@@ -4,6 +4,7 @@
 #include "llmopt/log.hpp"
 #include "llmopt/protocol.hpp"
 #include "llmopt/server.hpp"
+#include "llmopt/service.hpp"
 #include "spdlog/spdlog.h"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace llmopt {
@@ -25,16 +27,51 @@ struct AppContext {
     MetricsRegistry* metrics = nullptr;
     SchedulerCore* core = nullptr;
     GateResult gate;
+    ServiceController service;
     std::atomic<bool> stopping{false};
+    std::atomic<bool> drain_requested{false};
+    std::atomic<bool> listen_done{false};
 };
 
 httplib::Server* g_server = nullptr;
+std::atomic<bool> g_signal_requested{false};
 
-// 信号处理只做 stop()，避免在 handler 里做任何分配。
+// 信号处理只置标志，真正的排空在监视线程里做（signal handler 不得做 IO/等待）。
 void handle_signal(int) {
-    if (g_server) {
-        g_server->stop();
+    g_signal_requested.store(true, std::memory_order_relaxed);
+}
+
+std::int32_t inflight(const SchedulerCore& core) {
+    return core.running_count() + core.waiting_count();
+}
+
+// 收到 SIGTERM/SIGINT 后：Draining（/readyz 与准入立刻 503）→ 等在飞清零 →
+// 超过 drain_deadline_seconds 记 drain_timeout_total 后强制停止。
+void drain_loop(const std::shared_ptr<AppContext>& ctx, httplib::Server& server) {
+    while (!g_signal_requested.load(std::memory_order_relaxed) && !ctx->listen_done.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    if (!g_signal_requested.load(std::memory_order_relaxed)) {
+        return;
+    }
+    ctx->service.transit(ServiceState::Draining);
+    ctx->stopping.store(true);
+    logger()->info("draining: 停止准入，等待在飞完成 deadline={}s",
+                   ctx->config->drain_deadline_seconds);
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(ctx->config->drain_deadline_seconds);
+    while (inflight(*ctx->core) > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    const bool timed_out = inflight(*ctx->core) > 0;
+    if (timed_out) {
+        ctx->metrics->inc(MetricId::DrainTimeoutTotal);
+        logger()->warn("drain 超时：inflight={}，强制停止", inflight(*ctx->core));
+    } else {
+        logger()->info("draining: 在飞请求已清零");
+    }
+    ctx->service.transit(ServiceState::Stopped);
+    server.stop();
 }
 
 // 统一错误回包：状态码与 code 由 C-03 映射，禁止各路由自行编造。
@@ -144,6 +181,9 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
                      const std::string& forced_id, InferenceRequest& req,
                      std::shared_ptr<ResponseSink>& sink, int& prompt_tokens) {
     std::string message;
+    if (!ctx.service.accepting()) {
+        return make_error(ErrCode::Unavailable, "服务正在排空，停止接收新请求");
+    }
     if (!forced_id.empty()) {
         req.req_id = forced_id;
     }
@@ -385,25 +425,41 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
                         "application/json");
     });
     server.Get("/healthz", [ctx](const httplib::Request&, httplib::Response& res) {
-        if (ctx->stopping.load()) {
-            res.status = 503;
-            res.set_content("{\"status\":\"stopping\"}", "application/json");
-        } else {
-            res.set_content("{\"status\":\"ready\"}", "application/json");
-        }
+        res.set_content("{\"status\":\"" + std::string(service_state_name(ctx->service.state())) +
+                                "\"}",
+                        "application/json");
+    });
+    // /readyz 只在 Ready 返回 200；Starting/Draining/Stopped 一律 503（6-G3）。
+    server.Get("/readyz", [ctx](const httplib::Request&, httplib::Response& res) {
+        const ServiceState state = ctx->service.state();
+        res.status = state == ServiceState::Ready ? 200 : 503;
+        res.set_content("{\"status\":\"" + std::string(service_state_name(state)) + "\"}",
+                        "application/json");
     });
     server.Get("/metrics", [ctx](const httplib::Request&, httplib::Response& res) {
         res.set_content(ctx->metrics->render(), "text/plain; version=0.0.4");
     });
 
     g_server = &server;
+    g_signal_requested.store(false);
+    ctx->listen_done.store(false);
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
+    ctx->service.transit(ServiceState::Ready);
     logger()->info("listening on http://{}:{} backend={}", config.host, config.port,
                    runner.backend_name());
+    std::thread drain_thread([ctx, &server] { drain_loop(ctx, server); });
     const bool ok = server.listen(config.host, config.port);
+    ctx->listen_done.store(true);
+    drain_thread.join();
     g_server = nullptr;
     ctx->stopping.store(true);
+    if (ctx->service.state() == ServiceState::Ready) {
+        ctx->service.transit(ServiceState::Draining);
+        ctx->service.transit(ServiceState::Stopped);
+    } else if (ctx->service.state() == ServiceState::Draining) {
+        ctx->service.transit(ServiceState::Stopped);
+    }
     if (!ok) {
         logger()->error("listen 失败：端口 {} 可能被占用", config.port);
         return 3;

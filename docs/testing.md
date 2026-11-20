@@ -193,9 +193,14 @@ CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规
 阶段 5 不改 `src/`，因此 v0 指标对比沿用阶段 4 官方 14 行（同一 CSV + 同一 trace 复算）；真实判据表在 `docs/evidence/phase5/`，结论“本期数据不支持翻案”。
 
 阶段 6 的兼容面与指标收口（7-2）：
-
 - `tests/unit/protocol_test.cc` 追加 6 例：chat `messages` 纯文本解析与文本分片合并、`tools`/图片分片/`role=tool` 归 `unsupported_field`、`stop` 最多 4 条与长度边界、`n` 1–4 及 `stream+n>1` 拒绝、`StopFilter` 跨帧命中与尾部 flush、chat 帧/非流式体/models 列表形状。
 - `tests/integration/test_compat_openai.py`（登记名 `compat_openai_test`）：真 stub 服务跑 `/v1/models`、chat 非流式/流式（帧数 ≥2、以 `[DONE]` 结束、流式拼接与一次性文本一致）、旧 `/completion` 回归、`n=2` 双候选、seed 0/7 文本不同、`stop` 命中后 `finish_reason=stop` 且截断、`tools` 返回 400 `unsupported_field`；同时校验 `llmopt_http_requests_total` 与实际请求数一致，请求 id 出现在服务日志行。帧与指标证据落 `build/evidence/compat_frames.txt`、`metrics_format.txt`。
+
+阶段 6 的服务状态与排空（7-3）：
+
+- `tests/unit/service_test.cc`（`unit_service`，3 例）：`Starting→Ready→Draining→Stopped` 合法迁移表、同态/回退迁移拒绝、`accepting()` 仅 Ready 为真、状态名可打印。
+- `tests/integration/test_drain.py`（登记名 `service_state_test`）：8 路在飞 + `LLMOPT_TEST_STUB_DELAY_MS=40`，SIGTERM 后 100 ms 内 `/readyz` 必须 503，新请求回 503 `SERVICE_UNAVAILABLE`，在飞 SSE 全部以 `[DONE]` 收尾，进程退出码 0，日志含 `draining`。Windows 无 SIGTERM 语义，本机跳过、CI Linux 真跑。
+
 
 准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
 

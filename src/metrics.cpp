@@ -163,6 +163,8 @@ const std::array<MetricDef, kMetricCount> kMetricDefs = {{
          MetricKind::CounterInt, kGateHelp},
         {"llmopt_degraded", "llmopt_degraded", MetricKind::GaugeInt,
          "门控降级标记：1 表示 force_on 降并发放行 / 0 正常（K-9）"},
+        {"llmopt_drain_timeout_total", "llmopt_drain_timeout_total", MetricKind::CounterInt,
+         "排空超过 drain-deadline-seconds 的次数（超时后在飞请求强制中止）"},
 }};
 
 MetricId find_metric(std::string_view series) noexcept {

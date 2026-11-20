@@ -38,6 +38,7 @@ llmopt_add_doctest(unit_stub_runner "unit;fast;hermetic" SOURCES unit/stub_runne
 llmopt_add_doctest(unit_text "unit;fast;hermetic" SOURCES unit/text_test.cc)
 llmopt_add_doctest(unit_sink "unit;fast;hermetic" SOURCES unit/sink_test.cc)
 llmopt_add_doctest(unit_metrics "unit;fast;hermetic" SOURCES unit/metrics_test.cc)
+llmopt_add_doctest(unit_service "unit;fast;hermetic" SOURCES unit/service_test.cc)
 llmopt_add_doctest(unit_resource "unit;fast" SOURCES unit/resource_test.cc)
 llmopt_add_doctest(chunk_planner_test "unit;fast;hermetic"
                    SOURCES unit/scheduler/chunk_planner_test.cc)
@@ -96,6 +97,15 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(integration_server_config_sources PROPERTIES
                          LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_config_sources PROPERTIES TIMEOUT 120)
+
+    # 6-G3：SIGTERM 排空（Windows 跳过，CI Linux 真跑）。
+    add_test(NAME service_state_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_drain.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(service_state_test PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(service_state_test PROPERTIES TIMEOUT 180)
 
     # 6-G1/6-G5：三端点兼容面、stop/n/seed、旧端点回归与请求 ID 日志。
     add_test(NAME compat_openai_test

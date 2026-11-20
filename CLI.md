@@ -87,7 +87,8 @@ llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] 
 | POST | `/completion` | 与上者同一解析路径 | 兼容 llama.cpp 客户端 |
 | POST | `/v1/chat/completions` | `messages` → 模型 chat template → 同一条调度路径 | 仅纯文本；流式 `delta.content` |
 | GET | `/v1/models` | 返回 `{"object":"list","data":[{"id":...}]}` | id 取模型文件名去扩展名 |
-| GET | `/healthz` | 启动中/就绪 200，停止中 503 | 返回 `{"status":"ready"}` |
+| GET | `/healthz` | 存活探针，始终 200，body 带当前状态 | `{"status":"ready"}` |
+| GET | `/readyz` | 就绪探针，仅 `ready` 返回 200；启动中/排空/停止一律 503 | 6-G3 |
 | GET | `/metrics` | Prometheus 文本，仅 counter/gauge | 启动即预置 0 值序列 |
 
 请求体（`application/json`，上限 4 MB）：
@@ -168,6 +169,9 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | `NotSupported` | 404 | `NOT_SUPPORTED` | 否 |
 | `ResourceInsufficient` | 507 | `RESOURCE_INSUFFICIENT` | 否 |
 | `UnsupportedField` | 400 | `unsupported_field` | 否 |
+| `Unavailable` | 503 | `SERVICE_UNAVAILABLE` | 是 |
+
+排空语义（6-G3）：SIGTERM/SIGINT 后状态转 `draining`，`/readyz` 与新请求立即 503；在飞请求在 `--drain-deadline-seconds` 内自然收尾，超时记 `llmopt_drain_timeout_total` 并强制停止，进程退出码仍为 0。`/healthz` 始终 200，body 的 `status` 反映 `starting|ready|draining|stopped`。
 
 进程退出码：
 
