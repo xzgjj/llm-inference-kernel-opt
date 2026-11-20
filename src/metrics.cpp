@@ -47,6 +47,7 @@ MetricsRegistry::MetricsRegistry() {
     values_["llmopt_prefix_hit_tokens_total"] = 0;
     values_["llmopt_prefix_evictions_total"] = 0;
     values_["llmopt_kv_reconcile_diffs_total"] = 0;
+    values_["llmopt_sink_overflow_total"] = 0;
     for (const char* reason :
          {"no_free_block", "below_watermark", "context_overflow", "token_budget", "queue"}) {
         values_["llmopt_admission_rejected_total{reason=\"" + std::string(reason) + "\"}"] = 0;

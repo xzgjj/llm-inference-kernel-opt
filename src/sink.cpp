@@ -7,11 +7,15 @@ namespace llmopt {
 
 BoundedSink::BoundedSink(std::size_t capacity) : capacity_(capacity == 0 ? 1 : capacity) {}
 
+// 非阻塞入队：满即关闭并返回 false，由 Core 立即收尾，不拖住调度/执行线程。
 bool BoundedSink::push_frame(const Delta& delta) {
-    std::unique_lock<std::mutex> lock(mutex_);
-    const bool room = cv_.wait_for(lock, std::chrono::milliseconds(2000),
-                                   [this] { return closed_ || queue_.size() < capacity_; });
-    if (!room || closed_) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) {
+        return false;
+    }
+    if (queue_.size() >= capacity_) {
+        closed_ = true;
+        overflow_.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     queue_.push_back(delta);
@@ -51,6 +55,10 @@ void BoundedSink::abort() noexcept {
         queue_.clear();
     }
     cv_.notify_all();
+}
+
+std::uint64_t BoundedSink::overflow_total() const noexcept {
+    return overflow_.load(std::memory_order_relaxed);
 }
 
 } // namespace llmopt

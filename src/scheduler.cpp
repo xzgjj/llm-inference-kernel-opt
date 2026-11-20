@@ -958,7 +958,17 @@ SchedulerCore::DeliverResult SchedulerCore::deliver(const std::shared_ptr<Sequen
     if (reason != FinishReason::None) {
         delta.finish = reason;
     }
-    if (!group->sink || !group->sink->push_frame(delta)) {
+    if (!group->sink) {
+        return DeliverResult::Failed;
+    }
+    // 溢出次数只由 sink 记账，调度侧按增量上报，避免“关闭”与“队列满”混成一个口径。
+    const std::uint64_t overflow_before = group->sink->overflow_total();
+    if (!group->sink->push_frame(delta)) {
+        const std::uint64_t overflow_after = group->sink->overflow_total();
+        if (overflow_after > overflow_before) {
+            metrics_.inc("llmopt_sink_overflow_total",
+                         static_cast<std::int64_t>(overflow_after - overflow_before));
+        }
         return DeliverResult::Failed;
     }
     if (reason == FinishReason::None) {
