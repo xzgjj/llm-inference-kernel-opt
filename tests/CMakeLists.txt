@@ -97,6 +97,15 @@ if(Python3_Interpreter_FOUND)
                          LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_config_sources PROPERTIES TIMEOUT 120)
 
+    # 6-G1/6-G5：三端点兼容面、stop/n/seed、旧端点回归与请求 ID 日志。
+    add_test(NAME compat_openai_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_compat_openai.py
+                     $<TARGET_FILE:llmopt_server> ${CMAKE_BINARY_DIR}/evidence)
+    set_tests_properties(compat_openai_test PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(compat_openai_test PROPERTIES TIMEOUT 180)
+
     add_test(NAME integration_server_admission
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_admission.py

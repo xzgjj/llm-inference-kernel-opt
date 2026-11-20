@@ -35,6 +35,15 @@ public:
     // M3 tokenizer 随模型词表走，避免二次加载权重。
     virtual ErrCode tokenize(const std::string& text, std::vector<std::int32_t>& ids) = 0;
     virtual std::string detokenize(std::int32_t token_id) = 0;
+    // 兼容层：messages → prompt。默认回退 "role: content\n" 拼接；
+    // 真后端若内嵌 chat template 则按模型模板渲染，禁止在 C++ 里硬编码某家模板。
+    virtual ErrCode render_chat(const std::vector<ChatMessage>& messages, std::string& prompt) {
+        prompt.clear();
+        for (const ChatMessage& message : messages) {
+            prompt += message.role + ": " + message.content + "\n";
+        }
+        return ErrCode::Ok;
+    }
     virtual bool is_eos(std::int32_t token_id) const = 0;
     virtual std::int32_t n_ctx() const noexcept = 0;
     // 后端已写入该序列的最大位置；-1 表示空或后端不支持对账。

@@ -27,6 +27,7 @@ enum class ErrCode : std::uint8_t {
     NotSupported,
     ResourceInsufficient,
     Timeout,
+    UnsupportedField,
 };
 
 // 错误载体：跨层携带 code + 面向调用方的 message + 面向运维的 detail。
@@ -89,6 +90,12 @@ struct LogitsView {
     std::int32_t vocab_size = 0;
 };
 
+// C-01：OpenAI chat 的一条消息；content 只支持纯文本（D6-1）。
+struct ChatMessage {
+    std::string role;
+    std::string content;
+};
+
 // C-01
 struct InferenceRequest {
     RequestId req_id;
@@ -96,6 +103,10 @@ struct InferenceRequest {
     bool stream = false;
     SamplingParams sampling;
     std::string model_echo;
+    bool chat = false;                 // true 表示 /v1/chat/completions 入口
+    std::int32_t n = 1;                // 返回候选条数；>1 仅支持非流式
+    std::vector<ChatMessage> messages; // chat 入口保存原始消息，供模板渲染
+    std::vector<std::string> stop;     // 命中即截断并按 stop 收尾
 };
 
 // C-02

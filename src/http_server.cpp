@@ -6,11 +6,14 @@
 #include "llmopt/server.hpp"
 #include "spdlog/spdlog.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace llmopt {
 namespace {
@@ -45,18 +48,15 @@ void send_error(httplib::Response& res, const Error& error) {
     res.set_content(render_error_body(payload), "application/json");
 }
 
-void send_error(httplib::Response& res, ErrCode code, const std::string& message) {
-    send_error(res, make_error(code, message));
-}
-
 // 把 SSE 帧写到当前连接；写失败即断连，由调用方投递 Cancel。
 bool write_frame(httplib::DataSink& sink, const std::string& frame) {
     return sink.write(frame.data(), frame.size());
 }
 
-// 非流式：排空 sink 并拼接文本，最后一次性回 JSON；超时投递 Cancel。
+// 非流式：排空 sink 并拼接文本；stop 命中即取消，避免继续消耗算力。
 std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const InferenceRequest& req,
-                       SchedulerCore& core, int& gen_tokens, FinishReason& finish, Error& error) {
+                       SchedulerCore& core, StopFilter& filter, int& gen_tokens,
+                       FinishReason& finish, Error& error) {
     std::string text;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
     while (true) {
@@ -65,12 +65,19 @@ std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const Inferenc
             if (delta.error && !delta.error->ok()) {
                 error = *delta.error;
             }
-            text += delta.text;
             if (delta.token_id >= 0) {
                 ++gen_tokens;
             }
+            bool hit = false;
+            text += filter.feed(delta.text, &hit);
             if (delta.finish) {
                 finish = *delta.finish;
+                text += filter.flush();
+            }
+            if (hit) {
+                core.cancel(req.req_id);
+                finish = FinishReason::Stopped;
+                break;
             }
         } else if (sink->is_closed()) {
             break;
@@ -92,10 +99,30 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
     if (*done) {
         return false;
     }
+    StopFilter filter(req.stop);
     Delta delta;
     for (int index = 0; index < 32 && sink->pop_frame(delta, 20); ++index) {
-        if (!write_frame(data_sink, render_frame(req, delta))) {
-            ctx->core->cancel(req.req_id);
+        bool hit = false;
+        Delta out = delta;
+        out.text = filter.feed(delta.text, &hit);
+        if (delta.finish) {
+            out.text += filter.flush();
+        }
+        if (hit) {
+            out.finish = FinishReason::Stopped;
+        }
+        if (!out.text.empty() || out.finish || out.error) {
+            if (!write_frame(data_sink, render_frame(req, out))) {
+                ctx->core->cancel(req.req_id);
+                *done = true;
+                return false;
+            }
+        }
+        if (hit || out.error) {
+            if (hit) {
+                ctx->core->cancel(req.req_id);
+            }
+            data_sink.done();
             *done = true;
             return false;
         }
@@ -111,14 +138,31 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
     return false;
 }
 
-// 解析 → 分词 → 上下文校验 → 入口准入 → 入队；返回 Ok 表示响应已接管。
+// 解析 → 分词/模板 → 上下文校验 → 入口准入 → 入队；返回 Ok 表示响应已接管。
 // 准入在这里判定：队列满直接 429，不再"先 200 建流、再在调度器里静默失败"。
-Error submit_request(AppContext& ctx, const std::string& body, InferenceRequest& req,
+Error submit_request(AppContext& ctx, const std::string& body, bool chat,
+                     const std::string& forced_id, InferenceRequest& req,
                      std::shared_ptr<ResponseSink>& sink, int& prompt_tokens) {
     std::string message;
-    ErrCode code = parse_body(body, req, message);
+    if (!forced_id.empty()) {
+        req.req_id = forced_id;
+    }
+    ErrCode code = chat ? parse_chat_body(body, req, message) : parse_body(body, req, message);
     if (code != ErrCode::Ok) {
         return make_error(code, message.empty() ? "请求体非法" : message);
+    }
+    if (!forced_id.empty()) {
+        req.req_id = forced_id;
+    }
+    if (chat) {
+        code = ctx.runner->render_chat(req.messages, req.prompt);
+        if (code != ErrCode::Ok) {
+            return make_error(code, "chat 模板渲染失败",
+                              "op=render_chat backend=" + std::string(ctx.runner->backend_name()));
+        }
+        if (req.prompt.empty()) {
+            return make_error(ErrCode::InvalidJson, "messages 渲染结果为空");
+        }
     }
     std::vector<std::int32_t> ids;
     code = ctx.runner->tokenize(req.prompt, ids);
@@ -159,68 +203,156 @@ Error submit_request(AppContext& ctx, const std::string& body, InferenceRequest&
     return Error{};
 }
 
-// 两个补全端点共用：stream 走 SSE，非流式排空后一次性回包。
+// n>1 的候选共用原始 id，但调度器需要唯一键：后续候选统一加 -i 后缀。
+std::string choice_id(const InferenceRequest& req, std::int32_t index) {
+    if (index == 0) {
+        return req.req_id;
+    }
+    return req.req_id + "-" + std::to_string(index);
+}
+
+// 单候选流式回包：SSE 立即接管连接。
+void start_stream(const std::shared_ptr<AppContext>& ctx, const InferenceRequest& req,
+                  const std::shared_ptr<ResponseSink>& sink, httplib::Response& response) {
+    response.set_header("Cache-Control", "no-cache");
+    response.set_header("X-Accel-Buffering", "no");
+    auto done = std::make_shared<bool>(false);
+    response.set_chunked_content_provider(
+            "text/event-stream",
+            [ctx, req, sink, done](size_t, httplib::DataSink& data_sink) {
+                return stream_provider(ctx, req, sink, done, data_sink);
+            },
+            [ctx, req](bool success) {
+                if (!success) {
+                    ctx->core->cancel(req.req_id);
+                }
+            });
+}
+
+// 两个补全端点共用：stream 走 SSE；n>1 只在非流式生效，逐候选独立入队。
 // 失败一律按 Error 的真实状态码回包，不再出现 "200 + finish_reason=error"。
-void completions_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Request& request,
-                         httplib::Response& response) {
+void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Request& request,
+                       httplib::Response& response, bool chat) {
     bool responded = false;
+    std::vector<std::string> submitted;
     try {
         ctx->metrics->inc(MetricId::HttpRequests);
-        InferenceRequest req;
+        std::string request_id;
+        if (request.has_header("X-Request-Id")) {
+            request_id = request.get_header_value("X-Request-Id");
+        }
+        InferenceRequest base;
         std::shared_ptr<ResponseSink> sink;
         int prompt_tokens = 0;
-        const Error submit_error = submit_request(*ctx, request.body, req, sink, prompt_tokens);
+        const Error submit_error =
+                submit_request(*ctx, request.body, chat, request_id, base, sink, prompt_tokens);
         if (!submit_error.ok()) {
+            logger()->warn("http reject id={} code={} path={}", base.req_id,
+                           error_code_name(submit_error.code), request.path);
             send_error(response, submit_error);
             return;
         }
-        if (req.stream) {
-            response.set_header("Cache-Control", "no-cache");
-            response.set_header("X-Accel-Buffering", "no");
-            auto done = std::make_shared<bool>(false);
-            response.set_chunked_content_provider(
-                    "text/event-stream",
-                    [ctx, req, sink, done](size_t, httplib::DataSink& data_sink) {
-                        return stream_provider(ctx, req, sink, done, data_sink);
-                    },
-                    [ctx, req](bool success) {
-                        if (!success) {
-                            ctx->core->cancel(req.req_id);
-                        }
-                    });
+        logger()->info("http request id={} path={} stream={} n={}", base.req_id, request.path,
+                       base.stream, base.n);
+        if (base.stream) {
+            start_stream(ctx, base, sink, response);
             responded = true;
             return;
         }
-        int gen_tokens = 0;
-        FinishReason finish = FinishReason::None;
-        Error error;
-        const std::string text = drain_sink(sink, req, *ctx->core, gen_tokens, finish, error);
-        if (finish == FinishReason::Error && error.ok()) {
-            error = make_error(ErrCode::ExecutionFailed, "推理失败（无详细原因）");
-        } else if (finish == FinishReason::Aborted && error.ok()) {
-            error = make_error(ErrCode::Cancelled, "请求已取消");
-        } else if (finish == FinishReason::None && error.ok()) {
-            error = make_error(ErrCode::ExecutionFailed, "推理未产生结束原因");
+
+        std::vector<std::string> texts;
+        std::vector<FinishReason> finishes;
+        std::vector<int> gen_tokens;
+        std::vector<std::shared_ptr<ResponseSink>> sinks;
+        std::vector<InferenceRequest> reqs;
+        texts.reserve(static_cast<std::size_t>(base.n));
+        finishes.reserve(static_cast<std::size_t>(base.n));
+        gen_tokens.reserve(static_cast<std::size_t>(base.n));
+        sinks.reserve(static_cast<std::size_t>(base.n));
+        reqs.reserve(static_cast<std::size_t>(base.n));
+        reqs.push_back(base);
+        sinks.push_back(sink);
+        submitted.push_back(base.req_id);
+        for (std::int32_t index = 1; index < base.n; ++index) {
+            InferenceRequest extra = base;
+            extra.req_id = choice_id(base, index);
+            std::shared_ptr<ResponseSink> extra_sink;
+            int ignored_prompt = 0;
+            const Error error = submit_request(*ctx, request.body, chat, extra.req_id, extra,
+                                               extra_sink, ignored_prompt);
+            if (!error.ok()) {
+                for (const std::string& id : submitted) {
+                    ctx->core->cancel(id);
+                }
+                logger()->warn("http reject id={} code={} path={}", extra.req_id,
+                               error_code_name(error.code), request.path);
+                send_error(response, error);
+                return;
+            }
+            reqs.push_back(std::move(extra));
+            sinks.push_back(std::move(extra_sink));
+            submitted.push_back(reqs.back().req_id);
         }
-        if (!error.ok()) {
-            send_error(response, error);
+
+        Error first_error;
+        for (std::size_t index = 0; index < reqs.size(); ++index) {
+            int generated = 0;
+            FinishReason finish = FinishReason::None;
+            Error error;
+            StopFilter filter(reqs[index].stop);
+            const std::string text = drain_sink(sinks[index], reqs[index], *ctx->core, filter,
+                                                generated, finish, error);
+            if (finish == FinishReason::Error && error.ok()) {
+                error = make_error(ErrCode::ExecutionFailed, "推理失败（无详细原因）");
+            } else if (finish == FinishReason::Aborted && error.ok()) {
+                error = make_error(ErrCode::Cancelled, "请求已取消");
+            } else if (finish == FinishReason::None && error.ok()) {
+                error = make_error(ErrCode::ExecutionFailed, "推理未产生结束原因");
+            }
+            if (!error.ok() && first_error.ok()) {
+                first_error = error;
+            }
+            texts.push_back(text);
+            finishes.push_back(finish);
+            gen_tokens.push_back(generated);
+        }
+        if (!first_error.ok()) {
+            logger()->warn("http failed id={} code={} path={}", base.req_id,
+                           error_code_name(first_error.code), request.path);
+            send_error(response, first_error);
             return;
         }
         response.status = 200;
-        response.set_content(render_completion_body(req, text, finish, prompt_tokens, gen_tokens),
+        response.set_content(render_body(base, texts, finishes, prompt_tokens, gen_tokens),
                              "application/json");
+        logger()->info("http done id={} finish={} choices={} path={}", base.req_id,
+                       finish_reason_name(finishes.empty() ? FinishReason::Error : finishes[0]),
+                       texts.size(), request.path);
         responded = true;
     } catch (const std::exception& exc) {
-        logger()->error("completions handler 异常: {}", exc.what());
+        logger()->error("inference handler 异常: {}", exc.what());
+        for (const std::string& id : submitted) {
+            ctx->core->cancel(id);
+        }
         if (!responded) {
             send_error(response, make_error(ErrCode::ExecutionFailed, "服务内部异常"));
         }
     } catch (...) {
-        logger()->error("completions handler 未知异常");
+        logger()->error("inference handler 未知异常");
+        for (const std::string& id : submitted) {
+            ctx->core->cancel(id);
+        }
         if (!responded) {
             send_error(response, make_error(ErrCode::ExecutionFailed, "服务内部异常"));
         }
     }
+}
+
+// 模型 id 取文件名去扩展名，避免把绝对路径回给外部客户端。
+std::string model_id_from_path(const std::string& path) {
+    const std::string name = std::filesystem::path(path).filename().string();
+    const std::size_t dot = name.find_last_of('.');
+    return dot == std::string::npos ? name : name.substr(0, dot);
 }
 
 } // namespace
@@ -240,10 +372,17 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     server.set_read_timeout(5, 0);
     server.set_write_timeout(120, 0);
     server.Post("/v1/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
-        completions_handler(ctx, req, res);
+        inference_handler(ctx, req, res, false);
     });
     server.Post("/completion", [ctx](const httplib::Request& req, httplib::Response& res) {
-        completions_handler(ctx, req, res);
+        inference_handler(ctx, req, res, false);
+    });
+    server.Post("/v1/chat/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
+        inference_handler(ctx, req, res, true);
+    });
+    server.Get("/v1/models", [ctx](const httplib::Request&, httplib::Response& res) {
+        res.set_content(render_models_body(model_id_from_path(ctx->config->model_path)),
+                        "application/json");
     });
     server.Get("/healthz", [ctx](const httplib::Request&, httplib::Response& res) {
         if (ctx->stopping.load()) {
@@ -255,9 +394,6 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     });
     server.Get("/metrics", [ctx](const httplib::Request&, httplib::Response& res) {
         res.set_content(ctx->metrics->render(), "text/plain; version=0.0.4");
-    });
-    server.Post("/v1/chat/completions", [](const httplib::Request&, httplib::Response& res) {
-        send_error(res, ErrCode::NotSupported, "/v1/chat/completions 在阶段 4 未开放");
     });
 
     g_server = &server;

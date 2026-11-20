@@ -137,9 +137,102 @@ TEST_CASE("错误体映射状态码、名称与可重试性") {
     CHECK(http_status(ErrCode::QueueFull) == 429);
     CHECK(http_status(ErrCode::ContextOverflow) == 400);
     CHECK(http_status(ErrCode::NotSupported) == 404);
+    CHECK(http_status(ErrCode::UnsupportedField) == 400);
+    CHECK(std::string(error_code_name(ErrCode::UnsupportedField)) == "unsupported_field");
+    CHECK_FALSE(retryable(ErrCode::UnsupportedField));
     CHECK(std::string(error_code_name(ErrCode::KvInsufficient)) == "KV_INSUFFICIENT");
     CHECK(retryable(ErrCode::QueueFull));
     CHECK_FALSE(retryable(ErrCode::InvalidJson));
     const std::string body = render_error_body(ErrCode::QueueFull, "busy");
     CHECK(body.find("\"retryable\":true") != std::string::npos);
+}
+
+TEST_CASE("chat 请求解析出消息列表且不要求 prompt") {
+    InferenceRequest req;
+    std::string message;
+    const std::string body = R"({"model":"m","messages":[{"role":"system","content":"s"},
+        {"role":"user","content":[{"type":"text","text":"你"},{"type":"text","text":"好"}]}],
+        "stream":false,"max_tokens":16,"seed":7})";
+    REQUIRE(parse_chat_body(body, req, message) == ErrCode::Ok);
+    REQUIRE(req.chat);
+    REQUIRE(req.messages.size() == 2);
+    CHECK(req.messages[0].role == "system");
+    CHECK(req.messages[1].content == "你好");
+    CHECK(req.prompt.empty());
+    CHECK(req.sampling.seed == 7);
+}
+
+TEST_CASE("chat 越界字段与非法消息一律按 unsupported_field 拒绝") {
+    InferenceRequest req;
+    std::string message;
+    CHECK(parse_chat_body(R"({"messages":[{"role":"user","content":"hi"}],"tools":[]})", req,
+                          message) == ErrCode::UnsupportedField);
+    CHECK(message.find("unsupported_field: tools") != std::string::npos);
+    CHECK(parse_chat_body(R"({"messages":[{"role":"user","content":[{"type":"image_url"}]}]})", req,
+                          message) == ErrCode::UnsupportedField);
+    CHECK(parse_chat_body(R"({"messages":[{"role":"tool","content":"x"}]})", req, message) ==
+          ErrCode::UnsupportedField);
+    CHECK(parse_chat_body(R"({"messages":[]})", req, message) == ErrCode::InvalidJson);
+    CHECK(parse_chat_body(R"({"messages":[{"role":"user"}]})", req, message) ==
+          ErrCode::InvalidJson);
+    CHECK(parse_chat_body("not json", req, message) == ErrCode::InvalidJson);
+}
+
+TEST_CASE("stop/n 解析边界：stop 最多 4 条，n 仅 1–4，流式 n>1 拒绝") {
+    InferenceRequest req;
+    std::string message;
+    REQUIRE(parse_body(R"({"prompt":"hi","stop":["a","b"],"n":2})", req, message) == ErrCode::Ok);
+    REQUIRE(req.stop.size() == 2);
+    CHECK(req.n == 2);
+    CHECK(parse_body(R"({"prompt":"hi","stop":""})", req, message) == ErrCode::InvalidJson);
+    CHECK(parse_body(R"({"prompt":"hi","stop":["a","b","c","d","e"]})", req, message) ==
+          ErrCode::InvalidJson);
+    CHECK(parse_body(R"({"prompt":"hi","n":0})", req, message) == ErrCode::InvalidJson);
+    CHECK(parse_body(R"({"prompt":"hi","n":5})", req, message) == ErrCode::InvalidJson);
+    CHECK(parse_body(R"({"prompt":"hi","stream":true,"n":2})", req, message) ==
+          ErrCode::UnsupportedField);
+}
+
+TEST_CASE("StopFilter 跨帧命中并扣住可能的前缀") {
+    StopFilter filter({"END"});
+    bool hit = false;
+    CHECK(filter.feed("AB", &hit) == "AB");
+    CHECK_FALSE(hit);
+    CHECK(filter.feed("C", &hit) == "C");
+    CHECK_FALSE(hit);
+    CHECK(filter.feed("E", &hit).empty());
+    CHECK(filter.feed("NDtail", &hit).empty());
+    CHECK(hit);
+    CHECK(filter.flush().empty());
+}
+
+TEST_CASE("StopFilter 无命中时 flush 下发暂存尾部") {
+    StopFilter filter({"END"});
+    bool hit = false;
+    CHECK(filter.feed("hello E", &hit) == "hello ");
+    CHECK_FALSE(hit);
+    CHECK(filter.flush() == "E");
+}
+
+TEST_CASE("chat 帧/非流式体/models 列表符合 OpenAI 形状") {
+    InferenceRequest req;
+    req.req_id = "req-chat";
+    req.chat = true;
+    Delta delta;
+    delta.text = "hi";
+    delta.finish = FinishReason::Stopped;
+    const std::string frame = render_frame(req, delta);
+    CHECK(frame.find("\"object\":\"chat.completion.chunk\"") != std::string::npos);
+    CHECK(frame.find("\"delta\":{\"content\":\"hi\"}") != std::string::npos);
+
+    const std::string body = render_body(
+            req, {"a", "b"}, {FinishReason::Stopped, FinishReason::LengthCapped}, 4, {1, 2});
+    CHECK(body.find("\"object\":\"chat.completion\"") != std::string::npos);
+    CHECK(body.find("\"role\":\"assistant\"") != std::string::npos);
+    CHECK(body.find("\"index\":1") != std::string::npos);
+    CHECK(body.find("\"completion_tokens\":3") != std::string::npos);
+
+    const std::string models = render_models_body("qwen2.5-0.5b");
+    CHECK(models.find("\"object\":\"list\"") != std::string::npos);
+    CHECK(models.find("\"id\":\"qwen2.5-0.5b\"") != std::string::npos);
 }

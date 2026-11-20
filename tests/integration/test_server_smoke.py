@@ -111,8 +111,8 @@ def run_checks(port: int) -> None:
           "usage.total 应等于 prompt + completion")
 
     status, body = post(port, "/v1/chat/completions", {"messages": []})
-    check(status == 404, f"chat 端点应 404，实际 {status}")
-    check(json.loads(body)["error"]["code"] == "NOT_SUPPORTED", "404 错误码应为 NOT_SUPPORTED")
+    check(status == 400, f"空 messages 应 400，实际 {status}")
+    check(json.loads(body)["error"]["code"] == "INVALID_JSON", "空 messages 应回 INVALID_JSON")
 
     status, body = post(port, "/completion", {"prompt": ""})
     check(status == 400, f"空 prompt 应 400，实际 {status}")

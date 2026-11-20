@@ -107,6 +107,17 @@ public:
         }
         vocab_ = llama_model_get_vocab(model_.get());
         n_vocab_ = static_cast<std::int32_t>(llama_vocab_n_tokens(vocab_));
+        // 模板随 GGUF 走：读不到就留空，render_chat 回退通用拼接。
+        chat_template_.clear();
+        const int32_t tmpl_len =
+                llama_model_meta_val_str(model_.get(), "tokenizer.chat_template", nullptr, 0);
+        if (tmpl_len > 0) {
+            std::string buffer(static_cast<std::size_t>(tmpl_len), '\0');
+            if (llama_model_meta_val_str(model_.get(), "tokenizer.chat_template", buffer.data(),
+                                         buffer.size()) > 0) {
+                chat_template_ = std::move(buffer);
+            }
+        }
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = static_cast<std::uint32_t>(std::max(config.n_ctx_total, config.n_ctx));
         cparams.n_batch = static_cast<std::uint32_t>(std::max(config.n_batch, 1));
@@ -302,6 +313,32 @@ public:
         return vocab_ ? token_id == llama_vocab_eos(vocab_) : false;
     }
 
+    // 兼容层：优先用 GGUF 内嵌模板；模板缺失或渲染失败回退基类拼接。
+    ErrCode render_chat(const std::vector<ChatMessage>& messages, std::string& prompt) override {
+        if (chat_template_.empty() || !model_) {
+            return ModelRunner::render_chat(messages, prompt);
+        }
+        std::vector<llama_chat_message> chat;
+        chat.reserve(messages.size());
+        for (const ChatMessage& message : messages) {
+            chat.push_back({message.role.c_str(), message.content.c_str()});
+        }
+        const int32_t needed = llama_chat_apply_template(chat_template_.c_str(), chat.data(),
+                                                         chat.size(), true, nullptr, 0);
+        if (needed < 0) {
+            return ModelRunner::render_chat(messages, prompt);
+        }
+        std::string rendered(static_cast<std::size_t>(needed), '\0');
+        const int32_t written = llama_chat_apply_template(
+                chat_template_.c_str(), chat.data(), chat.size(), true, rendered.data(), needed);
+        if (written < 0) {
+            return ModelRunner::render_chat(messages, prompt);
+        }
+        rendered.resize(static_cast<std::size_t>(written));
+        prompt = std::move(rendered);
+        return ErrCode::Ok;
+    }
+
     // 单请求上下文上限进入 HTTP 准入。
     std::int32_t n_ctx() const noexcept override {
         return n_ctx_;
@@ -442,6 +479,7 @@ private:
     std::int32_t n_vocab_ = 0;
     std::int32_t n_ctx_ = 2048;
     std::int32_t n_gpu_layers_ = 0;
+    std::string chat_template_;
     Error last_error_;
     mutable std::mutex mutex_;
     std::vector<std::int32_t> slots_;

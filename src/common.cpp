@@ -26,6 +26,8 @@ int http_status(ErrCode code) noexcept {
         return 507;
     case ErrCode::Timeout:
         return 504;
+    case ErrCode::UnsupportedField:
+        return 400;
     }
     return 500;
 }
@@ -56,6 +58,8 @@ const char* error_code_name(ErrCode code) noexcept {
         return "RESOURCE_INSUFFICIENT";
     case ErrCode::Timeout:
         return "TIMEOUT";
+    case ErrCode::UnsupportedField:
+        return "unsupported_field";
     }
     return "EXECUTION_FAILED";
 }

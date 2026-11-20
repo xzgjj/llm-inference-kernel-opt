@@ -85,7 +85,8 @@ llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] 
 | --- | --- | --- | --- |
 | POST | `/v1/completions` | 文本补全；`stream=true` 走 SSE | 主端点 |
 | POST | `/completion` | 与上者同一解析路径 | 兼容 llama.cpp 客户端 |
-| POST | `/v1/chat/completions` | 恒 404 `NOT_SUPPORTED` | 阶段 1 不做 chat 模板 |
+| POST | `/v1/chat/completions` | `messages` → 模型 chat template → 同一条调度路径 | 仅纯文本；流式 `delta.content` |
+| GET | `/v1/models` | 返回 `{"object":"list","data":[{"id":...}]}` | id 取模型文件名去扩展名 |
 | GET | `/healthz` | 启动中/就绪 200，停止中 503 | 返回 `{"status":"ready"}` |
 | GET | `/metrics` | Prometheus 文本，仅 counter/gauge | 启动即预置 0 值序列 |
 
@@ -104,6 +105,17 @@ llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] 
 | `min_p` | number | `0.05` | 0.0–1.0 |
 | `repeat_penalty` | number | `1.0` | 0.5–2.0 |
 | `seed` | int | `-1` | -1 为随机；否则 0–1e9 |
+| `stop` | string / string[] | 无 | 最多 4 条，每条 1–32 字符；命中即截断并按 `stop` 收尾 |
+| `n` | int | `1` | 1–4；仅非流式，`stream=true` 且 `n>1` 返回 400 |
+
+chat 端点额外约束：
+
+| 字段 | 类型 | 约束 |
+| --- | --- | --- |
+| `messages` | array | 非空；`role` 仅 `system`/`user`/`assistant` |
+| `messages[].content` | string / array | 数组仅接受 `{"type":"text","text":...}` 分片 |
+
+`tools` / `tool_choice` / `functions` / `logprobs` / `logit_bias` / `response_format` / 图片分片等兼容面之外的字段返回 400 `unsupported_field`（D6-1），不静默忽略。模板读不到时回退 `role: content\n` 拼接并记 warn。
 
 采样链固定为：**惩罚 → top-k → top-p → min-p → 温度 → dist**。顺序写死在 `runner_llama.cpp`，请求不能改顺序。
 
@@ -112,24 +124,30 @@ llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] 
 流式帧：
 
 ```text
-data: {"choices":[{"finish_reason":null,"index":0,"text":"A","token_id":323}],"id":"req-1"}
+data: {"choices":[{"finish_reason":null,"index":0,"text":"A","token_id":323}],"id":"req-1","object":"text_completion"}
 
 data: [DONE]
 
 ```
 
+chat 流式帧的结构是 `object=chat.completion.chunk`，文本放在 `choices[].delta.content`；两条路径都以 `data: [DONE]` 结束。
+
 - 增量帧每帧一个 token，`text` 是该 token 的 detokenize 结果。
 - `id` 取请求里的 `req_id`；调用方必须保证同一进程内 `req_id` 唯一，重试请换新 id，否则取消与收尾可能命中错误请求。
+- `X-Request-Id` 头优先于请求体 `id`，并写入该请求的日志行。
 - 末帧 `finish_reason` 取 `stop` / `length` / `abort` / `error`，随后补 `data: [DONE]`。
+- `stop` 跨帧命中时先下发截断前的文本，再补一帧 `finish_reason=stop` 并取消后续生成。
 - `data: [DONE]\n\n` 实测 14 字节；SPEC-1 C-02 写 15 字节是笔误，以本文与实现为准。
 
-非流式响应：
+非流式响应（`n>1` 时 `choices` 按 `index` 排列，`usage` 汇总全部候选）：
 
 ```json
 {"choices":[{"finish_reason":"length","index":0,"text":"..."}],"id":"req-1",
  "object":"text_completion",
  "usage":{"completion_tokens":3,"prompt_tokens":5,"total_tokens":8}}
 ```
+
+chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assistant","content":...}`；`usage` 口径与文本端点一致。
 
 错误响应统一为 `{"error":{"code":"QUEUE_FULL","message":"...","retryable":true}}`，HTTP 映射见第 4 节。
 
@@ -149,6 +167,7 @@ data: [DONE]
 | `QueueFull` | 429 | `QUEUE_FULL` | 是 |
 | `NotSupported` | 404 | `NOT_SUPPORTED` | 否 |
 | `ResourceInsufficient` | 507 | `RESOURCE_INSUFFICIENT` | 否 |
+| `UnsupportedField` | 400 | `unsupported_field` | 否 |
 
 进程退出码：
 
