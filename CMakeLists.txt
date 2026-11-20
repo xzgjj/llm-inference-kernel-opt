@@ -28,6 +28,7 @@ add_library(llmopt_core STATIC
     src/scheduler.cpp
     src/sink.cpp
     src/metrics.cpp
+    src/text.cpp
     src/gate.cpp
     src/gguf.cpp
     src/runner_stub.cpp
