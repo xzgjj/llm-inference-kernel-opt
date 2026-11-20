@@ -35,7 +35,7 @@ void clear_env() {
           "LLMOPT_MAX_CONCURRENCY", "LLMOPT_MODE", "LLMOPT_BACKEND", "LLMOPT_SAFETY_RATIO",
           "LLMOPT_ALLOW_STUB", "LLMOPT_ALLOW_FORCE_ON", "LLMOPT_MAX_NUM_BATCHED_TOKENS",
           "LLMOPT_QUEUE_CAPACITY", "LLMOPT_BLOCK_SIZE", "LLMOPT_WATERMARK_RATIO",
-          "LLMOPT_DISABLE_PREFIX_CACHE"}) {
+          "LLMOPT_CHUNK_SIZE", "LLMOPT_DISABLE_PREFIX_CACHE"}) {
         set_env(key, "");
     }
 }
@@ -127,6 +127,7 @@ TEST_CASE("阶段 2 调度参数默认值与 CLI 覆盖") {
     CHECK(cfg.block_tokens == 16);
     CHECK(cfg.watermark_ratio == doctest::Approx(0.05));
     CHECK(cfg.enable_prefix_cache);
+    CHECK(cfg.chunk_size == 128);
 
     CHECK(load({"--model", "m.gguf", "--ctx-tokens", "1024", "--max-num-batched-tokens", "1024",
                 "--queue-capacity", "8", "--block-size", "32", "--watermark-ratio", "0.10",
@@ -143,6 +144,7 @@ TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
     clear_env();
     set_env("LLMOPT_CTX_TOKENS", "512");
     set_env("LLMOPT_MAX_NUM_BATCHED_TOKENS", "512");
+    set_env("LLMOPT_CHUNK_SIZE", "32");
     set_env("LLMOPT_QUEUE_CAPACITY", "4");
     set_env("LLMOPT_BLOCK_SIZE", "8");
     set_env("LLMOPT_WATERMARK_RATIO", "0.0");
@@ -151,6 +153,7 @@ TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
     std::string message;
     CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
     CHECK(cfg.max_num_batched_tokens == 512);
+    CHECK(cfg.chunk_size == 32);
     CHECK(cfg.ctx_tokens == 512);
     CHECK(cfg.queue_capacity == 4);
     CHECK(cfg.block_tokens == 8);
@@ -168,16 +171,18 @@ TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
           ErrCode::InvalidJson);
 }
 
-// 回归：预算小于 ctx 时，长 prompt 在队首反复 break、既不推进也不拒绝，会挂死并
-// 队头阻塞；阶段 2 无 chunked prefill，启动期必须拒绝该组合。
-TEST_CASE("批 token 预算不得小于上下文长度") {
+// 阶段 3 行为变更：chunked prefill 允许 max-num-batched-tokens < ctx-tokens；
+// 启动期改为校验 chunk-size 四档，避免非法宽度绕过切块器。
+TEST_CASE("chunk-size 只接受四档，预算可小于上下文") {
     clear_env();
     ServerConfig cfg;
     std::string message;
     CHECK(load({"--model", "m.gguf", "--ctx-tokens", "4096", "--max-num-batched-tokens", "2048"},
-               cfg, message) == ErrCode::InvalidJson);
-    CHECK(load({"--model", "m.gguf", "--ctx-tokens", "1024", "--max-num-batched-tokens", "2048"},
                cfg, message) == ErrCode::Ok);
+    CHECK(load({"--model", "m.gguf", "--chunk-size", "16"}, cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--chunk-size", "512"}, cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--chunk-size", "64"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.chunk_size == 64);
 }
 
 // 回归：llama 纯 CPU 后端没有统一 KV stream，seq_cp 会跨 stream 复制并重置目标

@@ -1,7 +1,7 @@
-# CLI 与接口契约（阶段 1 冻结版 v1.0）
+# CLI 与接口契约（阶段 1 冻结版 v1.1 / 阶段 3 chunk-size 补充）
 
-> 状态：已实现并冻结，对应 SPEC-1（C-01…C-13）。与 SPEC 冲突处已记录在 `implementation-notes.md`。
-> 适用进程：`llmopt_server`。`tools/dev.py` 是开发工具链，参数命名独立，见第 8 节。
+> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，其余不变。对应 SPEC-1（C-01…C-13）与 SPEC-3 F-04。
+> 与 SPEC 冲突处已记录在 `implementation-notes.md`。适用进程：`llmopt_server`。`tools/dev.py` 参数命名独立，见第 8 节。
 
 
 
@@ -24,6 +24,7 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
               [--ctx-tokens 2048] [--max-concurrency 8] \
               [--max-num-batched-tokens 2048] [--queue-capacity 32] \
               [--block-size 16] [--watermark-ratio 0.05] [--disable-prefix-cache] \
+              [--chunk-size 128] \
               [--mode off|auto|force_on] [--safety-ratio 0.80] [--allow-force-on] \
               [--threads 0] [--n-gpu-layers 0] [--backend llama|stub] \
               [--log-level info|debug|warn]
@@ -38,10 +39,11 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 | `--port` | `LLMOPT_PORT` | `8080` | 1–65535 | 占用时退出 3 |
 | `--ctx-tokens` | `LLMOPT_CTX_TOKENS` | `2048` | 128–131072 | 同时决定 KV 估算与上下文拒绝阈值 |
 | `--max-concurrency` | `LLMOPT_MAX_CONCURRENCY` | `8` | 1–64 | 连续批调度的运行序列上限，超出的请求进 waiting 队列 |
-| `--max-num-batched-tokens` | `LLMOPT_MAX_NUM_BATCHED_TOKENS` | `2048` | 1–8192，且 ≥ `max-concurrency`、≥ `ctx-tokens` | 单步调度 token 预算；阶段 2 无 chunked prefill，低于 ctx 会让长 prompt 永不推进，启动即拒绝 |
+| `--max-num-batched-tokens` | `LLMOPT_MAX_NUM_BATCHED_TOKENS` | `2048` | 1–8192，且 ≥ `max-concurrency` | 单步调度 token 预算；chunked prefill 后允许小于 `ctx-tokens`，长 prompt 按 chunk 推进 |
 | `--queue-capacity` | `LLMOPT_QUEUE_CAPACITY` | `32` | 1–1024 | waiting 队列上限，满即 429 |
 | `--block-size` | `LLMOPT_BLOCK_SIZE` | `16` | 4–128 | KV 逻辑块 token 数，同时决定前缀命中粒度 |
 | `--watermark-ratio` | `LLMOPT_WATERMARK_RATIO` | `0.05` | 0–0.2 | 准入预留的空闲块比例，按块池总量折算 |
+| `--chunk-size` | `LLMOPT_CHUNK_SIZE` | `128` | 仅 `32`/`64`/`128`/`256` | chunked prefill 的单步宽度；末块才采样，中间块只推进 KV |
 | `--disable-prefix-cache` | `LLMOPT_DISABLE_PREFIX_CACHE` | `false` | 布尔开关，不带值 | 关闭满块哈希与前缀复用；后端不支持零拷贝共享时也会自动关闭 |
 | `--mode` | `LLMOPT_MODE` | `off` | `off`/`auto`/`force_on` | 门控三档，见第 5 节 |
 | `--safety-ratio` | `LLMOPT_SAFETY_RATIO` | `0.80` | 0.80–0.85 | 软预算系数 |
@@ -51,7 +53,7 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 | `--backend` | `LLMOPT_BACKEND` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
 | `--log-level` | `LLMOPT_LOG_LEVEL` | `info` | spdlog 级别 | 跑基准建议 `warn` |
 
-阶段 2 单批 prefill 上限 8192，且要求 `max-num-batched-tokens ≥ ctx-tokens`，因此 `ctx-tokens > 8192` 的配置当前无法启动；这是 chunked prefill 落地前的临时边界，阶段 3 放开。
+阶段 3 起支持 chunked prefill，`ctx-tokens` 不再受单步预算限制；`chunk-size` 取四档，其他值启动即拒绝。调度顺序固定为：在跑 decode 保位 → 在跑 prefill 的下一 chunk → 预算内补新请求，合计 token 不超过 `max-num-batched-tokens`。
 
 优先级固定：**CLI > `LLMOPT_*` > 内置默认**。启动第一行打印生效配置，第三行打印预算与门控结论，便于复核。
 
@@ -213,7 +215,8 @@ cmake --build build-wsl --parallel
 ```bash
 LLMOPT_LLAMA_ROOT=/root/llm-src/llama.cpp \
 ./build-wsl/llmopt_server --model /root/llm-src/models/qwen2.5-0.5b-q4.gguf \
-  --port 8080 --ctx-tokens 2048 --mode auto --threads 8 --log-level warn
+  --port 8080 --ctx-tokens 2048 --max-num-batched-tokens 512 --chunk-size 64 \
+  --mode auto --threads 8 --log-level warn
 ```
 
 启动（stub 自检，无模型权重也能跑通路由）：
@@ -265,4 +268,6 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 4. `/completion` 保留，`/v1/chat/completions` 恒 404。
 5. 双档后端：`LLMOPT_ENABLE_LLAMA=ON` 才编真实后端；Windows/CI 用 stub。
 6. 退出码 3/4 语义见第 4 节。
-7. 阶段 2 调度参数默认值：`max-num-batched-tokens=2048`、`queue-capacity=32`、`block-size=16`、`watermark-ratio=0.05`、前缀缓存默认开。`max-num-batched-tokens` 必须 ≥ `ctx-tokens`，等阶段 3 支持 chunked prefill 后再放开。
+7. 阶段 2 调度参数默认值：`max-num-batched-tokens=2048`、`queue-capacity=32`、`block-size=16`、`watermark-ratio=0.05`、前缀缓存默认开。
+8. 阶段 3 新增 `--chunk-size`，默认 128，仅 32/64/128/256；`max-num-batched-tokens` 可小于 `ctx-tokens`（chunked prefill 承接）。
+9. 分支约定：阶段 2 用 `2`，阶段 3 用 `3`；每阶段结束需用户 review 后才允许推送。

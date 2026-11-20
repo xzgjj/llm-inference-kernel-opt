@@ -1,0 +1,25 @@
+# 阶段 3-1 真实后端切块等价证据（2026-11-20）
+
+环境：WSL2 Ubuntu-26.04，RTX 4060 Laptop 8GB；模型 `/root/llm-src/models/qwen2.5-0.5b-q4.gguf`；
+llama.cpp `b94959a`；构建 `build-wsl`（Release，`LLMOPT_ENABLE_LLAMA=ON`）。
+prompt 为同一段 1350 字符英文文本，`max_tokens=8`，贪心采样（temperature=0、top_k=1）。
+
+## CPU（--n-gpu-layers 0）
+
+```text
+$ python3 scripts/bench/verify_chunk.py --chunk-a 32 --chunk-b 256 --tokens 8 --n-gpu-layers 0
+chunk=32 tokens=[3555, 374, 279, 4226, 30, 576, 4226, 374] chunk_steps=9
+chunk=256 tokens=[3555, 374, 279, 4226, 30, 576, 4226, 374]
+OK chunked-prefill token-equivalent
+```
+
+## GPU（--n-gpu-layers 99）
+
+```text
+$ python3 scripts/bench/verify_chunk.py --chunk-a 32 --chunk-b 256 --tokens 8 --n-gpu-layers 99
+chunk=32 tokens=[3555, 374, 279, 4226, 30, 576, 4226, 374] chunk_steps=9
+chunk=256 tokens=[3555, 374, 279, 4226, 30, 576, 4226, 374]
+OK chunked-prefill token-equivalent
+```
+
+结论：chunk 32 产生 9 个非末块，输出与 chunk 256（一次 prefill）逐 token 相同；CPU 与 GPU 路径一致。

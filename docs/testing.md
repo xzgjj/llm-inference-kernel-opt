@@ -132,6 +132,8 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 
 另一个真实后端缺陷：`n_ctx_total = ctx × concurrency`，但 `n_seq_max = concurrency + donor_slots`，llama.cpp 会把总数均分给所有槽，8 并发 + 4 donor 时单序列只剩 `8/12` 上下文，约 840 token 的 prompt 直接 `failed to find a memory slot`。修复为 `n_ctx_total = ctx × (concurrency + 实际需要的 donor 槽)`，且 CPU（前缀共享已关闭）不再预留 donor。回归证据是 2-G2 的 8 路约 920-token prompt：修复前 `decode` 报 batch of size 840 失败，修复后 24/24 成功、利用率 85.39%、`reconcile=0`（`docs/阶段2-证据.md`）。
 
+阶段 3 的切块行为由三层用例锁定：`tests/unit/scheduler/chunk_planner_test.cc` 锁 128/128/64 与预算截断；`tests/contract/continuous_batch_test.cc` 锁“切块输出与整段 prefill 逐 token 一致”“decode 保位混批”“中途取消 Aborted”；`tests/integration/test_server_chunked.py` 锁进程级 SSE 一致与 `budget < ctx` 可推进。真实后端另用 `scripts/bench/verify_chunk.py` 在 CPU/GPU 两档复核同一 token 序列，结果见 `docs/阶段3-1-实现记录.md`。
+
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。
 
 ## 8 维护

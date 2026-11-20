@@ -79,12 +79,16 @@ bool parse_double(const std::string& text, double& out) {
 // 阶段 2 新增的调度参数集中处理，避免主 apply_arg 分支过长。
 bool is_sched_key(const std::string& key) {
     return key == "--max-num-batched-tokens" || key == "--queue-capacity" ||
-           key == "--block-size" || key == "--watermark-ratio" || key == "--disable-prefix-cache";
+           key == "--block-size" || key == "--watermark-ratio" || key == "--chunk-size" ||
+           key == "--disable-prefix-cache";
 }
 
 ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::string& value) {
     if (key == "--max-num-batched-tokens") {
         return parse_int(value, cfg.max_num_batched_tokens) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    if (key == "--chunk-size") {
+        return parse_int(value, cfg.chunk_size) ? ErrCode::Ok : ErrCode::InvalidJson;
     }
     if (key == "--queue-capacity") {
         return parse_int(value, cfg.queue_capacity) ? ErrCode::Ok : ErrCode::InvalidJson;
@@ -174,6 +178,9 @@ ErrCode load_env(ServerConfig& cfg, std::string& message) {
     if (env_int("LLMOPT_MAX_NUM_BATCHED_TOKENS", number)) {
         cfg.max_num_batched_tokens = number;
     }
+    if (env_int("LLMOPT_CHUNK_SIZE", number)) {
+        cfg.chunk_size = number;
+    }
     if (env_int("LLMOPT_QUEUE_CAPACITY", number)) {
         cfg.queue_capacity = number;
     }
@@ -206,6 +213,37 @@ ErrCode load_env(ServerConfig& cfg, std::string& message) {
     return ErrCode::Ok;
 }
 
+// 调度参数集中校验：预算、chunk、队列、块与 watermark；与上下文上限解耦。
+ErrCode validate_sched_config(const ServerConfig& cfg, std::string& message) {
+    if (cfg.max_num_batched_tokens < 1 || cfg.max_num_batched_tokens > 8192) {
+        message = "max-num-batched-tokens 必须在 1..8192";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.max_num_batched_tokens < cfg.max_concurrency) {
+        message = "max-num-batched-tokens 不能小于 max-concurrency";
+        return ErrCode::InvalidJson;
+    }
+    // chunked prefill 后允许 token 预算小于 ctx；预算仍必须至少容纳一个并发槽。
+    if (cfg.chunk_size != 32 && cfg.chunk_size != 64 && cfg.chunk_size != 128 &&
+        cfg.chunk_size != 256) {
+        message = "chunk-size 只接受 32/64/128/256";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.queue_capacity < 1 || cfg.queue_capacity > 1024) {
+        message = "queue-capacity 必须在 1..1024";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.block_tokens < 4 || cfg.block_tokens > 128) {
+        message = "block-size 必须在 4..128";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.watermark_ratio < 0.0 || cfg.watermark_ratio > 0.2) {
+        message = "watermark-ratio 必须在 0.0..0.2";
+        return ErrCode::InvalidJson;
+    }
+    return ErrCode::Ok;
+}
+
 ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
     if (cfg.model_path.empty()) {
         message = "缺少 --model 或 LLMOPT_MODEL";
@@ -223,30 +261,7 @@ ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
         message = "max-concurrency 必须在 1..64";
         return ErrCode::InvalidJson;
     }
-    if (cfg.max_num_batched_tokens < 1 || cfg.max_num_batched_tokens > 8192) {
-        message = "max-num-batched-tokens 必须在 1..8192";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.max_num_batched_tokens < cfg.max_concurrency) {
-        message = "max-num-batched-tokens 不能小于 max-concurrency";
-        return ErrCode::InvalidJson;
-    }
-    // 阶段 2 没有 chunked prefill：预算小于上下文时，超长 prompt 会在队首反复 break，
-    // 既不推进也不拒绝，且挡住后面的请求；启动期直接拒绝这种配置。
-    if (cfg.max_num_batched_tokens < cfg.ctx_tokens) {
-        message = "max-num-batched-tokens 不能小于 ctx-tokens（阶段 2 无 chunked prefill）";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.queue_capacity < 1 || cfg.queue_capacity > 1024) {
-        message = "queue-capacity 必须在 1..1024";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.block_tokens < 4 || cfg.block_tokens > 128) {
-        message = "block-size 必须在 4..128";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.watermark_ratio < 0.0 || cfg.watermark_ratio > 0.2) {
-        message = "watermark-ratio 必须在 0.0..0.2";
+    if (validate_sched_config(cfg, message) != ErrCode::Ok) {
         return ErrCode::InvalidJson;
     }
     if (cfg.safety_ratio < 0.80 || cfg.safety_ratio > 0.85) {

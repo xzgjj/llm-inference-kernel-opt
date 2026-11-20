@@ -28,6 +28,13 @@ MetricsRegistry::MetricsRegistry() {
     values_["llmopt_batch_size_peak"] = 0;
     values_["llmopt_batch_tokens_last"] = 0;
     values_["llmopt_batch_tokens_peak"] = 0;
+    values_["llmopt_batch_prefill_tokens_last"] = 0;
+    values_["llmopt_batch_decode_tokens_last"] = 0;
+    values_["llmopt_batch_prefill_seqs_last"] = 0;
+    values_["llmopt_batch_decode_seqs_last"] = 0;
+    values_["llmopt_chunk_prefill_steps_total"] = 0;
+    values_["llmopt_chunk_prefill_tokens_total"] = 0;
+    values_["llmopt_chunk_deferred_total"] = 0;
     values_["llmopt_prefix_hits_total"] = 0;
     values_["llmopt_prefix_misses_total"] = 0;
     values_["llmopt_prefix_hit_tokens_total"] = 0;

@@ -47,7 +47,8 @@ void print_config(const ServerConfig& cfg) {
     std::cout << "config: model=" << cfg.model_path << " host=" << cfg.host << " port=" << cfg.port
               << " ctx=" << cfg.ctx_tokens << " max_concurrency=" << cfg.max_concurrency
               << " batch_tokens=" << cfg.max_num_batched_tokens << " queue=" << cfg.queue_capacity
-              << " block=" << cfg.block_tokens << " watermark=" << cfg.watermark_ratio
+              << " block=" << cfg.block_tokens << " chunk=" << cfg.chunk_size
+              << " watermark=" << cfg.watermark_ratio
               << " prefix_cache=" << (cfg.enable_prefix_cache ? 1 : 0)
               << " mode=" << gate_mode_name(cfg.mode) << " safety_ratio=" << cfg.safety_ratio
               << " backend=" << cfg.backend << " log_level=" << cfg.log_level << "\n";
@@ -94,7 +95,8 @@ ModelConfig build_model_config(const ServerConfig& cfg, std::int32_t concurrency
     model_cfg.n_ctx = cfg.ctx_tokens;
     model_cfg.n_seq_max = concurrency + donor_slots_for(cfg);
     model_cfg.n_ctx_total = cfg.ctx_tokens * model_cfg.n_seq_max;
-    model_cfg.n_batch = std::max(cfg.max_num_batched_tokens, cfg.ctx_tokens);
+    // 单步物理批只需容纳调度预算；不再按 ctx 放大，避免大上下文配置白占缓冲。
+    model_cfg.n_batch = std::max<std::int32_t>(cfg.max_num_batched_tokens, cfg.chunk_size);
     model_cfg.n_ubatch = 512;
     model_cfg.threads = cfg.threads;
     model_cfg.n_gpu_layers = cfg.n_gpu_layers;
@@ -188,6 +190,7 @@ std::int32_t run(const ServerConfig& cfg) {
     scheduler_cfg.max_num_batched_tokens = cfg.max_num_batched_tokens;
     scheduler_cfg.queue_capacity = cfg.queue_capacity;
     scheduler_cfg.enable_prefix_cache = prefix_cache;
+    scheduler_cfg.chunk_size = cfg.chunk_size;
     SchedulerCore core(*runner, kv, metrics, scheduler_cfg);
 
     std::thread core_thread([&core] { core.run(); });

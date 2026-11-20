@@ -36,6 +36,26 @@ const char* alloc_reason_name(AllocFailReason reason) {
 
 } // namespace
 
+// 切块器只做纯计算：chunk_size 非法时收敛到 1，生产值由配置层校验。
+ChunkPlanner::ChunkPlanner(std::int32_t chunk_size) noexcept
+    : chunk_size_(chunk_size > 0 ? chunk_size : 1) {}
+
+ChunkSlice ChunkPlanner::next(std::int32_t prompt_len, std::int32_t computed,
+                              std::int32_t budget_left) const noexcept {
+    ChunkSlice slice;
+    const std::int32_t remaining = prompt_len - computed;
+    if (remaining <= 0 || budget_left <= 0) {
+        return slice;
+    }
+    slice.n_tokens = std::min(chunk_size_, std::min(remaining, budget_left));
+    slice.is_last = computed + slice.n_tokens == prompt_len;
+    return slice;
+}
+
+std::int32_t ChunkPlanner::chunk_size() const noexcept {
+    return chunk_size_;
+}
+
 TokenBudget::TokenBudget(std::int32_t max_seqs, std::int32_t max_tokens) noexcept
     : max_seqs_(max_seqs), max_tokens_(max_tokens) {}
 
@@ -167,15 +187,18 @@ void StepExecutor::loop() {
         RunnerStepOutput output = runner_.decode_step(batch);
         metrics_.inc("llmopt_forward_steps_total");
         // 即使 runner 提前失败也要逐条回投，避免 Core 永久等待 pending。
+        // sampled 只按“需要采样”的步骤顺序排列，非末块 chunk 不占位。
+        std::size_t sample_index = 0;
         for (std::size_t i = 0; i < batch.steps.size(); ++i) {
             const SequenceStep& step = batch.steps[i];
             Event event = make_event(EventKind::Completion, step.route.req_id);
             event.completion.seq_id = step.route.req_id;
             event.completion.seq_serial = step.kv.seq_id;
             event.completion.computed_tokens = step.pos_end;
+            event.completion.sampled_expected = step.needs_sampling;
             event.completion.err = output.err;
-            if (i < output.sampled.size()) {
-                event.completion.sampled.push_back(output.sampled[i]);
+            if (step.needs_sampling && sample_index < output.sampled.size()) {
+                event.completion.sampled.push_back(output.sampled[sample_index++]);
             }
             mailbox_.push(std::move(event));
         }
@@ -184,8 +207,8 @@ void StepExecutor::loop() {
 
 SchedulerCore::SchedulerCore(ModelRunner& runner, KVBlockManager& kv, MetricsRegistry& metrics,
                              SchedulerConfig config)
-    : runner_(runner), kv_(kv), metrics_(metrics), config_(config), mailbox_(config.queue_capacity),
-      executor_(runner, mailbox_, metrics) {}
+    : runner_(runner), kv_(kv), metrics_(metrics), config_(config), planner_(config.chunk_size),
+      mailbox_(config.queue_capacity), executor_(runner, mailbox_, metrics) {}
 
 SchedulerCore::~SchedulerCore() {
     shutdown();
@@ -314,29 +337,24 @@ void SchedulerCore::pump() {
     reap_donors();
     Batch batch;
     TokenBudget budget(config_.max_concurrency, config_.max_num_batched_tokens);
-    for (const auto& group : running_) {
-        append_step(batch, group);
-    }
+    append_running(batch, budget);
     while (!waiting_.empty()) {
         if (static_cast<std::int32_t>(running_.size()) >= config_.max_concurrency) {
             break;
         }
+        if (budget.tokens_remain() < 1) {
+            metrics_.inc("llmopt_admission_rejected_total{reason=\"token_budget\"}");
+            break;
+        }
         auto group = waiting_.front();
-        const std::int32_t remaining = group->seq.prompt_len - group->seq.num_computed;
-        if (remaining > config_.max_num_batched_tokens) {
-            metrics_.inc("llmopt_admission_rejected_total{reason=\"token_budget\"}");
-            break;
-        }
-        if (!budget.can_add(1, remaining)) {
-            metrics_.inc("llmopt_admission_rejected_total{reason=\"token_budget\"}");
-            break;
-        }
         if (!admit(group, budget)) {
             break;
         }
         waiting_.pop_front();
         metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
-        append_step(batch, group);
+        if (!append_prefill_chunk(batch, group, budget)) {
+            break;
+        }
     }
     if (batch.steps.empty()) {
         return;
@@ -348,17 +366,16 @@ void SchedulerCore::pump() {
         pending_serials_.push_back(step.kv.seq_id);
     }
     pending_remaining_ = batch_steps;
+    record_schedule_step(started, batch_steps, batch_tokens, batch);
     const bool submitted = executor_.submit(std::move(batch));
     if (!submitted) {
         pending_remaining_ = 0;
-        record_schedule_step(started, batch_steps, batch_tokens);
         return;
     }
     pending_step_ = true;
     metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
     metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
     publish_kv_usage();
-    record_schedule_step(started, batch_steps, batch_tokens);
 }
 
 // 块表快照统一从这里发布，准入、收尾与关停看到的 used/cached/held 口径一致。
@@ -373,7 +390,21 @@ void SchedulerCore::publish_kv_usage() {
 }
 
 void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point started,
-                                         std::int32_t steps, std::int32_t tokens) {
+                                         std::int32_t steps, std::int32_t tokens,
+                                         const Batch& batch) {
+    std::int32_t prefill_tokens = 0;
+    std::int32_t decode_tokens = 0;
+    std::int32_t prefill_seqs = 0;
+    std::int32_t decode_seqs = 0;
+    for (const SequenceStep& step : batch.steps) {
+        if (step.phase == Phase::Decode) {
+            decode_tokens += step.n_tokens;
+            ++decode_seqs;
+        } else {
+            prefill_tokens += step.n_tokens;
+            ++prefill_seqs;
+        }
+    }
     const std::int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     std::chrono::steady_clock::now() - started)
                                     .count();
@@ -391,6 +422,10 @@ void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point s
     metrics_.set("llmopt_batch_size_peak", batch_size_peak_);
     metrics_.set("llmopt_batch_tokens_last", tokens);
     metrics_.set("llmopt_batch_tokens_peak", batch_tokens_peak_);
+    metrics_.set("llmopt_batch_prefill_tokens_last", prefill_tokens);
+    metrics_.set("llmopt_batch_decode_tokens_last", decode_tokens);
+    metrics_.set("llmopt_batch_prefill_seqs_last", prefill_seqs);
+    metrics_.set("llmopt_batch_decode_seqs_last", decode_seqs);
     std::vector<std::int64_t> sorted = schedule_samples_;
     std::sort(sorted.begin(), sorted.end());
     const std::size_t index = sorted.empty() ? 0 : (sorted.size() - 1) * 99 / 100;
@@ -444,45 +479,93 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
     group->admitted = true;
     seq.status = SeqStatus::Running;
     running_.push_back(group);
-    budget.commit(1, seq.prompt_len - seq.num_computed);
+    // 序列槽先记账；本步实际 token 由 append_prefill_chunk 按切块结果扣预算。
+    budget.commit(1, 0);
     return true;
 }
 
-void SchedulerCore::append_step(Batch& batch, const std::shared_ptr<SequenceGroup>& group) const {
+// decode 保位：在跑且 prefill 已完成的序列每步固定吃 1 token 预算。
+bool SchedulerCore::append_decode(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
+                                  TokenBudget& budget) const {
     const Sequence& seq = group->seq;
+    if (seq.num_computed < seq.prompt_len || seq.output_token_ids.empty()) {
+        return false;
+    }
+    CachedRequestData data;
+    data.req_id = group->req_id;
+    data.new_token_ids.push_back(seq.output_token_ids.back());
+    data.new_block_ids = seq.block_table;
     SequenceStep step;
     step.seq_id = group->req_id;
     step.route.req_id = group->req_id;
     step.kv = KVPen{seq.id, 0};
-    if (seq.num_computed < seq.prompt_len) {
-        NewRequestData data;
-        data.req_id = group->req_id;
-        data.prefill_token_ids.assign(seq.prompt_token_ids.begin() + seq.num_computed,
-                                      seq.prompt_token_ids.end());
-        data.block_ids = seq.block_table;
-        data.sampling = seq.sampling;
-        data.prefix_source = group->prefix_source;
-        data.prefix_tokens = group->prefix_tokens;
-        step.phase = Phase::PrefillLast;
-        step.pos_begin = seq.num_computed;
-        step.pos_end = seq.prompt_len;
-        step.n_tokens = seq.prompt_len - seq.num_computed;
-        batch.new_reqs.push_back(std::move(data));
-    } else {
-        CachedRequestData data;
-        data.req_id = group->req_id;
-        data.new_token_ids.push_back(seq.output_token_ids.back());
-        data.new_block_ids = seq.block_table;
-        step.phase = Phase::Decode;
-        step.pos_begin = seq.num_computed;
-        step.pos_end = seq.num_computed + 1;
-        step.n_tokens = 1;
-        batch.cached_reqs.push_back(std::move(data));
-    }
+    step.phase = Phase::Decode;
+    step.pos_begin = seq.num_computed;
+    step.pos_end = seq.num_computed + 1;
+    step.n_tokens = 1;
     step.needs_sampling = true;
-    step.sample_pos = step.pos_end - 1;
+    step.sample_pos = step.pos_begin;
+    batch.cached_reqs.push_back(std::move(data));
     batch.total_tokens += step.n_tokens;
     batch.steps.push_back(step);
+    budget.commit(0, 1);
+    return true;
+}
+
+// 续 prefill：按 ChunkPlanner 取本步 chunk；非末块只推进 KV，不采样。
+bool SchedulerCore::append_prefill_chunk(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
+                                         TokenBudget& budget) {
+    Sequence& seq = group->seq;
+    if (seq.num_computed >= seq.prompt_len) {
+        return false;
+    }
+    const ChunkSlice slice =
+            planner_.next(seq.prompt_len, seq.num_computed, budget.tokens_remain());
+    if (slice.n_tokens <= 0) {
+        metrics_.inc("llmopt_chunk_deferred_total");
+        return false;
+    }
+    NewRequestData data;
+    data.req_id = group->req_id;
+    data.prefill_token_ids.assign(seq.prompt_token_ids.begin() + seq.num_computed,
+                                  seq.prompt_token_ids.begin() + seq.num_computed + slice.n_tokens);
+    data.block_ids = seq.block_table;
+    data.sampling = seq.sampling;
+    // 前缀只在首个 chunk 借一次，后续 chunk 直接续写同一 KV。
+    if (!group->prefix_applied && group->prefix_tokens > 0) {
+        data.prefix_source = group->prefix_source;
+        data.prefix_tokens = group->prefix_tokens;
+        group->prefix_applied = true;
+    }
+    SequenceStep step;
+    step.seq_id = group->req_id;
+    step.route.req_id = group->req_id;
+    step.kv = KVPen{seq.id, 0};
+    step.phase = slice.is_last ? Phase::PrefillLast : Phase::PrefillChunk;
+    step.pos_begin = seq.num_computed;
+    step.pos_end = seq.num_computed + slice.n_tokens;
+    step.n_tokens = slice.n_tokens;
+    step.needs_sampling = slice.is_last;
+    step.sample_pos = step.pos_end - 1;
+    batch.new_reqs.push_back(std::move(data));
+    batch.total_tokens += step.n_tokens;
+    batch.steps.push_back(step);
+    budget.commit(0, slice.n_tokens);
+    return true;
+}
+
+// 三段组批：先 decode 保位，再续在跑 prefill 的下一 chunk。
+void SchedulerCore::append_running(Batch& batch, TokenBudget& budget) {
+    for (const auto& group : running_) {
+        if (group->seq.num_computed >= group->seq.prompt_len) {
+            (void)append_decode(batch, group, budget);
+        }
+    }
+    for (const auto& group : running_) {
+        if (group->seq.num_computed < group->seq.prompt_len) {
+            (void)append_prefill_chunk(batch, group, budget);
+        }
+    }
 }
 
 Batch SchedulerCore::build_batch(const Sequence& seq) const {
@@ -518,6 +601,36 @@ Batch SchedulerCore::build_batch(const Sequence& seq) const {
     return batch;
 }
 
+// 一批结束后才推进下一 tick，避免在上一步完成回调里重入提交。
+void SchedulerCore::conclude_step(bool batch_done) {
+    if (!batch_done) {
+        return;
+    }
+    pending_step_ = false;
+    pump();
+}
+
+// 非末块 chunk：只推进 KV 进度，不产生输出 token，也不能走结束判定。
+void SchedulerCore::advance_chunk(const std::shared_ptr<SequenceGroup>& group,
+                                  const Completion& completion) {
+    Sequence& seq = group->seq;
+    const std::int32_t previous = seq.num_computed;
+    seq.num_computed = completion.computed_tokens;
+    if (previous < seq.prompt_len && seq.num_computed > previous) {
+        const std::int32_t upper = std::min(seq.num_computed, seq.prompt_len);
+        metrics_.inc("llmopt_prefill_tokens_total", upper - previous);
+    }
+    if (seq.num_computed < seq.prompt_len) {
+        metrics_.inc("llmopt_chunk_prefill_steps_total");
+        metrics_.inc("llmopt_chunk_prefill_tokens_total", seq.num_computed - previous);
+    }
+    kv_.mark_written(seq, seq.num_computed);
+    reconcile(seq);
+    if (seq.cancel_requested.load() || shutting_down_) {
+        finish(group, FinishReason::Aborted);
+    }
+}
+
 void SchedulerCore::apply_completion(const Completion& completion) {
     auto it = std::find(pending_serials_.begin(), pending_serials_.end(), completion.seq_serial);
     if (it == pending_serials_.end()) {
@@ -528,19 +641,23 @@ void SchedulerCore::apply_completion(const Completion& completion) {
     auto group = find_running(completion.seq_id);
     const bool batch_done = pending_remaining_ == 0;
     if (!group || group->seq.id != completion.seq_serial) {
-        if (batch_done) {
-            pending_step_ = false;
-            pump();
-        }
+        conclude_step(batch_done);
         return;
     }
     Sequence& seq = group->seq;
-    if (completion.err != ErrCode::Ok || completion.sampled.empty()) {
+    if (completion.err != ErrCode::Ok) {
         finish(group, FinishReason::Error);
-        if (batch_done) {
-            pending_step_ = false;
-            pump();
-        }
+        conclude_step(batch_done);
+        return;
+    }
+    if (!completion.sampled_expected) {
+        advance_chunk(group, completion);
+        conclude_step(batch_done);
+        return;
+    }
+    if (completion.sampled.empty()) {
+        finish(group, FinishReason::Error);
+        conclude_step(batch_done);
         return;
     }
     const std::int32_t previous = seq.num_computed;
@@ -553,16 +670,10 @@ void SchedulerCore::apply_completion(const Completion& completion) {
         metrics_.inc("llmopt_prefill_tokens_total", seq.prompt_len - previous);
     }
     reconcile(seq);
-    DeliverResult delivered = deliver(group, completion.sampled.front());
-    if (delivered == DeliverResult::Failed) {
+    if (deliver(group, completion.sampled.front()) == DeliverResult::Failed) {
         finish(group, FinishReason::Aborted);
-    } else if (delivered == DeliverResult::Finished) {
-        // finish 已在 deliver 内完成。
     }
-    if (batch_done) {
-        pending_step_ = false;
-        pump();
-    }
+    conclude_step(batch_done);
 }
 
 SchedulerCore::DeliverResult SchedulerCore::deliver(const std::shared_ptr<SequenceGroup>& group,

@@ -80,6 +80,8 @@ struct Completion {
     // 本步写入后的 KV token 总数，回写与对账都以它为准。
     std::int32_t computed_tokens = 0;
     std::vector<SampledToken> sampled;
+    // 非末块 chunk 只推进预填、不采样；false 表示 sampled 允许为空。
+    bool sampled_expected = true;
     ErrCode err = ErrCode::Ok;
 };
 

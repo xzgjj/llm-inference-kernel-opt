@@ -20,6 +20,8 @@ llmopt_add_doctest(unit_gate "unit;fast;hermetic" SOURCES unit/gate_test.cc)
 llmopt_add_doctest(unit_gguf "unit;fast;hermetic" SOURCES unit/gguf_test.cc)
 llmopt_add_doctest(unit_stub_runner "unit;fast;hermetic" SOURCES unit/stub_runner_test.cc)
 llmopt_add_doctest(unit_text "unit;fast;hermetic" SOURCES unit/text_test.cc)
+llmopt_add_doctest(chunk_planner_test "unit;fast;hermetic"
+                   SOURCES unit/scheduler/chunk_planner_test.cc)
 llmopt_add_doctest(contract_scheduler "contract;fast;hermetic" SOURCES contract/scheduler_test.cc)
 llmopt_add_doctest(contract_continuous_batch "contract;fast;hermetic"
                    SOURCES contract/continuous_batch_test.cc)
@@ -37,4 +39,11 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:llmopt_server>)
     set_tests_properties(integration_server_concurrency PROPERTIES LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_concurrency PROPERTIES TIMEOUT 120)
+
+    add_test(NAME integration_server_chunked
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_chunked.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_chunked PROPERTIES LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_chunked PROPERTIES TIMEOUT 180)
 endif()

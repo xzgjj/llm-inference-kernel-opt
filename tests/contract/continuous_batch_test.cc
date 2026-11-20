@@ -78,9 +78,9 @@ private:
 // 装配：块大小 4，prompt 由 token 基址生成，便于构造同前缀。
 struct CbHarness {
     CbHarness(std::int32_t max_seqs, std::int32_t budget, std::int32_t blocks,
-              double watermark = 0.0)
+              double watermark = 0.0, std::int32_t chunk_size = 128)
         : runner(std::make_unique<RecordingRunner>()), kv(KVConfig{4, blocks, watermark, true, 2}),
-          core(*runner, kv, metrics, SchedulerConfig{max_seqs, budget, 64, true}) {
+          core(*runner, kv, metrics, SchedulerConfig{max_seqs, budget, 64, true, chunk_size}) {
         ModelConfig model;
         model.n_ctx = 4096;
         REQUIRE(runner->load_model(model) == ErrCode::Ok);
@@ -176,16 +176,19 @@ TEST_CASE("同一 tick 到达的 4 条请求合成一个 prefill 批") {
     CHECK(harness.core.running_count() == 0);
 }
 
-TEST_CASE("预算 8 时 6-token prefill 只准入一条，其余留队") {
-    CbHarness harness(4, 8, 64);
+TEST_CASE("预算 8 时两个 6-token prompt 按 chunk 分走预算，第三条留队") {
+    CbHarness harness(4, 8, 64, 0.0, 8);
     std::vector<std::shared_ptr<BoundedSink>> sinks;
     for (std::int32_t index = 0; index < 3; ++index) {
         sinks.push_back(harness.submit("req-b" + std::to_string(index), 6, 1, 100 + index * 10));
     }
     (void)harness.core.run_once(20);
-    CHECK(harness.core.running_count() == 1);
-    CHECK(harness.core.waiting_count() == 2);
-    CHECK(harness.metrics.get("llmopt_admission_rejected_total{reason=\"token_budget\"}") >= 1);
+    CHECK(harness.core.running_count() == 2);
+    CHECK(harness.core.waiting_count() == 1);
+    const std::vector<Batch> batches = wait_batches(harness, 1);
+    REQUIRE(!batches.empty());
+    CHECK(batches[0].total_tokens == 8);
+    CHECK(batches[0].steps.size() == 2);
     harness.run_until_closed(sinks);
 }
 
@@ -318,7 +321,73 @@ TEST_CASE("KV watermark 指标随准入上报") {
     CHECK(harness.metrics.get("llmopt_kv_watermark_blocks") == usage.watermark_blocks);
 }
 
-// 2-G2/2-G4/2-G7 的证据口径：批大小峰值、调度步数与 p99、held 收尾必须能直接读。
+// 3-G1：长 prompt 切块后，输出必须与整段一次 prefill 的逐 token 结果一致。
+TEST_CASE("切块输出与整段 prefill 逐 token 一致") {
+    CbHarness chunked(1, 512, 256, 0.0, 128);
+    const auto chunked_sink = chunked.submit("req-eq-chunk", 320, 4, 100);
+    chunked.run_until_closed({chunked_sink});
+
+    CbHarness whole(1, 512, 256, 0.0, 1024);
+    const auto whole_sink = whole.submit("req-eq-whole", 320, 4, 100);
+    whole.run_until_closed({whole_sink});
+
+    const std::vector<Delta> chunked_frames = drain(chunked_sink);
+    const std::vector<Delta> whole_frames = drain(whole_sink);
+    REQUIRE(chunked_frames.size() == whole_frames.size());
+    for (std::size_t index = 0; index < chunked_frames.size(); ++index) {
+        CHECK(chunked_frames[index].token_id == whole_frames[index].token_id);
+        CHECK(chunked_frames[index].text == whole_frames[index].text);
+    }
+    CHECK(chunked.metrics.get("llmopt_prefill_tokens_total") == 320);
+    CHECK(chunked.metrics.get("llmopt_chunk_prefill_steps_total") == 2);
+    CHECK(chunked.metrics.get("llmopt_chunk_prefill_tokens_total") == 256);
+    CHECK(whole.metrics.get("llmopt_chunk_prefill_steps_total") == 0);
+    CHECK(chunked.metrics.get("llmopt_kv_reconcile_diffs_total") == 0);
+}
+
+// 3-G1 / F-03：在跑 decode 先保位，续 prefill 取下一 chunk，两者同批且总量受预算约束。
+TEST_CASE("长 prompt 切块与在跑 decode 混批，decode 保位") {
+    CbHarness harness(2, 256, 256, 0.0, 128);
+    const auto long_req = harness.submit("req-mix-long", 320, 2, 100);
+    const auto short_req = harness.submit("req-mix-short", 4, 4, 200);
+    harness.run_until_closed({long_req, short_req});
+
+    bool mixed = false;
+    std::int32_t chunk_sizes = 0;
+    for (const Batch& batch : harness.runner->batches()) {
+        CHECK(batch.total_tokens <= 256);
+        if (batch.cached_reqs.size() == 1 && batch.new_reqs.size() == 1) {
+            mixed = true;
+            CHECK(batch.steps.front().phase == Phase::Decode);
+            CHECK(batch.steps.back().phase != Phase::Decode);
+            CHECK(batch.steps.back().n_tokens <= 128);
+            chunk_sizes += batch.new_reqs.front().prefill_token_ids.size();
+        }
+    }
+    CHECK(mixed);
+    // 首个 chunk 128 与短请求 prefill 同批；混批阶段只剩 128 + 64 = 192。
+    CHECK(chunk_sizes == 192);
+    CHECK(harness.metrics.get("llmopt_batch_prefill_tokens_last") >= 0);
+    CHECK(harness.metrics.get("llmopt_batch_decode_seqs_last") >= 1);
+}
+
+// 3-G1：chunk 进行中取消不能等末块，必须按 Aborted 收尾并释放块。
+TEST_CASE("chunked prefill 中途取消按 Aborted 收尾") {
+    CbHarness harness(1, 256, 256, 0.0, 128);
+    const auto sink = harness.submit("req-cancel-chunk", 320, 4, 100);
+    (void)harness.core.run_once(20);
+    (void)wait_batches(harness, 1);
+    harness.core.cancel("req-cancel-chunk");
+    harness.run_until_closed({sink});
+    const std::vector<Delta> frames = drain(sink);
+    REQUIRE(!frames.empty());
+    REQUIRE(frames.back().finish.has_value());
+    CHECK(*frames.back().finish == FinishReason::Aborted);
+    CHECK(harness.metrics.get("llmopt_requests_total{status=\"cancelled\"}") == 1);
+    harness.shutdown_flush();
+    CHECK(harness.kv.num_free_blocks() == harness.kv.num_total_blocks());
+}
+
 TEST_CASE("调度与 KV 指标随批次和收尾更新") {
     CbHarness harness(4, 64, 64);
     std::vector<std::shared_ptr<BoundedSink>> sinks;

@@ -26,6 +26,26 @@ struct SchedulerConfig {
     std::int32_t max_num_batched_tokens = 2048;
     std::int32_t queue_capacity = 64;
     bool enable_prefix_cache = true;
+    // 单步 prefill 宽度；生产值限定 {32,64,128,256}，用例可传更小值。
+    std::int32_t chunk_size = 128;
+};
+
+// Chunked prefill 切块结果：n_tokens 为本步可算 token 数，is_last 标记末块需采样。
+struct ChunkSlice {
+    std::int32_t n_tokens = 0;
+    bool is_last = false;
+};
+
+// 纯逻辑切块器：只按 prompt 进度与剩余预算取 min(chunk, left, budget)，不碰状态。
+class ChunkPlanner {
+public:
+    explicit ChunkPlanner(std::int32_t chunk_size) noexcept;
+    [[nodiscard]] ChunkSlice next(std::int32_t prompt_len, std::int32_t computed,
+                                  std::int32_t budget_left) const noexcept;
+    [[nodiscard]] std::int32_t chunk_size() const noexcept;
+
+private:
+    std::int32_t chunk_size_;
 };
 
 // 请求数与 token 双预算：独立判定、互不替代（INV-07）。
@@ -55,6 +75,8 @@ struct SequenceGroup {
     bool admitted = false;
     RequestId prefix_source;
     std::int32_t prefix_tokens = 0;
+    // 前缀借用只在首个 chunk 下发一次，后续 chunk 不能重复 seq_cp。
+    bool prefix_applied = false;
     // 半个 UTF-8 字符先攒在这里，完整后再下发，避免 JSON 编码异常。
     std::string utf8_pending;
 };
@@ -134,10 +156,16 @@ private:
     void pump();
     void publish_kv_usage();
     void record_schedule_step(std::chrono::steady_clock::time_point started, std::int32_t steps,
-                              std::int32_t tokens);
+                              std::int32_t tokens, const Batch& batch);
     bool admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget);
-    void append_step(Batch& batch, const std::shared_ptr<SequenceGroup>& group) const;
+    bool append_decode(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
+                       TokenBudget& budget) const;
+    bool append_prefill_chunk(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
+                              TokenBudget& budget);
+    void append_running(Batch& batch, TokenBudget& budget);
     void apply_completion(const Completion& completion);
+    void advance_chunk(const std::shared_ptr<SequenceGroup>& group, const Completion& completion);
+    void conclude_step(bool batch_done);
     DeliverResult deliver(const std::shared_ptr<SequenceGroup>& group, const SampledToken& token);
     void finish(const std::shared_ptr<SequenceGroup>& group, FinishReason reason,
                 bool final_frame_pushed = false);
@@ -150,6 +178,7 @@ private:
     KVBlockManager& kv_;
     MetricsRegistry& metrics_;
     SchedulerConfig config_;
+    ChunkPlanner planner_;
     SchedulerMailbox mailbox_;
     StepExecutor executor_;
     std::deque<std::shared_ptr<SequenceGroup>> waiting_;

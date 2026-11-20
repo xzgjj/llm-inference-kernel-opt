@@ -75,7 +75,10 @@ public:
             }
             StubState& state = states_[data.req_id];
             state.n_past = step.pos_end;
-            emit(state, output);
+            // 非末块 chunk 只推进 KV，不采样；末块才产出首个 token。
+            if (step.needs_sampling) {
+                emit(state, output);
+            }
         }
         output.err = ErrCode::Ok;
         return output;

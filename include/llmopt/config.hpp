@@ -17,6 +17,7 @@ struct ServerConfig {
     std::int32_t ctx_tokens = 2048;
     std::int32_t max_concurrency = 8;
     std::int32_t max_num_batched_tokens = 2048;
+    std::int32_t chunk_size = 128;
     std::int32_t queue_capacity = 32;
     std::int32_t block_tokens = 16;
     double watermark_ratio = 0.05;

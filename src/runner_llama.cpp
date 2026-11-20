@@ -127,6 +127,7 @@ public:
         std::size_t cached_index = 0;
         std::vector<RequestId> ordered;
         std::vector<std::int32_t> output_indexes;
+        std::vector<bool> need_sample;
         for (const SequenceStep& step : batch.steps) {
             const std::int32_t output_idx = step.phase == Phase::Decode
                                                     ? add_decode_step(step, batch, cached_index)
@@ -136,6 +137,7 @@ public:
             }
             ordered.push_back(step.route.req_id);
             output_indexes.push_back(output_idx);
+            need_sample.push_back(step.needs_sampling);
         }
         if (batch.total_tokens <= 0 || ordered.empty()) {
             return failed(output);
@@ -144,6 +146,9 @@ public:
             return failed(output);
         }
         for (std::size_t index = 0; index < ordered.size(); ++index) {
+            if (!need_sample[index]) {
+                continue;
+            }
             SampledToken token = sample(ordered[index], output_indexes[index]);
             if (token.token_id < 0) {
                 return failed(output);
@@ -322,7 +327,8 @@ private:
                 return -1;
             }
         }
-        if (last_idx >= 0) {
+        // 只有末块需要 logits；中间 chunk 省掉 output 采样与 logits 计算。
+        if (last_idx >= 0 && step.needs_sampling) {
             (void)llama_batch_ext_set_output_logits(batch_, last_idx, true);
         }
         state.n_past = step.pos_end;
