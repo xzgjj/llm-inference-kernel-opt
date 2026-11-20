@@ -236,11 +236,11 @@ def payload(cfg: MatrixConfig, text: str, max_tokens: int, seed: int) -> dict:
 
 
 def run_one(cfg: MatrixConfig, port: int, concurrency: int, row: dict, round_no: int,
-            dropped: bool, max_tokens: int) -> dict:
+            dropped: bool, max_tokens: int, timeout_s: float | None = None) -> dict:
     prompt_seed = cfg.seed + int(row["prompt_id"].split("-")[-1])
     result = client.run_stream(
         cfg.host, port, payload(cfg, row["text"], max_tokens, prompt_seed),
-        int(row["n_prompt"]), timeout_s=cfg.request_timeout_s, path="/v1/completions",
+        int(row["n_prompt"]), timeout_s=timeout_s or cfg.request_timeout_s, path="/v1/completions",
     )
     stats = result.stats
     itl = [
@@ -287,9 +287,12 @@ def _timeout_record(cfg: MatrixConfig, concurrency: int, row: dict, round_no: in
 def _run_batch(cfg: MatrixConfig, port: int, concurrency: int, rows: list[dict], round_no: int,
                dropped: bool, max_tokens: int) -> list[dict]:
     workers = max(1, min(concurrency, len(rows)))
+    # 单请求超时同时受档预算约束，避免一档拖过墙钟上限。
+    request_timeout = min(cfg.request_timeout_s, cfg.tier_timeout_ms / 1000.0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(run_one, cfg, port, concurrency, row, round_no, dropped, max_tokens): row
+            executor.submit(run_one, cfg, port, concurrency, row, round_no, dropped, max_tokens,
+                            request_timeout): row
             for row in rows
         }
         done, pending = concurrent.futures.wait(
