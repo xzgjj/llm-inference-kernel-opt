@@ -41,5 +41,5 @@ Qwen2.5-0.5B
 - 服务：`/readyz` 就绪探针 + `Starting/Ready/Draining/Stopped` 四态；SIGTERM 后停止准入、等在飞收尾，超 `--drain-deadline-seconds` 记 `llmopt_drain_timeout_total`。
 - 限流：`--rate-limit-rps/--rate-limit-burst` 原子令牌桶，超额 429 + `Retry-After: 1`，不进队列。
 - 指标：全部 family 带 `# TYPE/# HELP`；请求 id 进该请求日志行；`llmopt_rate_limited_total`、`llmopt_drain_timeout_total` 已登记。
-- 部署：`scripts/release/Dockerfile`、`llmopt.service`、`docker_smoke.sh`；`soak.py` 30 min + `.github/workflows/nightly.yml`（TSan 10 轮 / ASan / soak）。说明见 `docs/deploy.md`。
+- 部署：`scripts/release/Dockerfile`、`llmopt.service`、`docker_smoke.sh`；`soak.py` 30 min + `.github/workflows/nightly.yml`（TSan 10 轮 / ASan / soak）。说明见 `scripts/release/README.md`。
 - 边界：单 token Bearer（D6-2）仍未启用，待用户确认是否修订 01 §2.3；慢客户端 ≤10% 退化与 sanitizer 结论以 Linux/真后端为准。
