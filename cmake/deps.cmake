@@ -35,13 +35,6 @@ if(TARGET concurrentqueue)
         "${concurrentqueue_SOURCE_DIR}")
 endif()
 
-# doctest 2.4.11 经 <ciso646> 做 MSVC 兼容；libstdc++ 15 起该头在 C++20 下抛 #warning，
-# clang 会把它升成 -Werror 硬错（gcc 不报）。第三方头一律按 SYSTEM 处理，不参与本项目告警面。
-if(TARGET doctest)
-    set_property(TARGET doctest APPEND PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES
-        "${doctest_SOURCE_DIR}")
-endif()
-
 # 真实 llama.cpp 后端：复用 WSL 侧已构建的共享库，不在此处重编依赖树。
 function(add_llama_backend target)
     set(LLAMA_ROOT "$ENV{LLMOPT_LLAMA_ROOT}" CACHE PATH "llama.cpp source root")
