@@ -63,7 +63,7 @@ public:
         output.err = ErrCode::ExecutionFailed;
         return output;
     }
-    void release_sequence(const RequestId&) override {}
+    void release_sequence(const RequestId&, std::int32_t) override {}
     void release() override {}
     ErrCode tokenize(const std::string&, std::vector<std::int32_t>&) override {
         return ErrCode::Ok;
@@ -261,7 +261,7 @@ TEST_CASE("decode_step 失败仍回投完成事件并关闭 sink") {
 }
 
 TEST_CASE("mailbox 满时 submit 返回 QueueFull") {
-    Harness harness(SchedulerConfig{1, 2});
+    Harness harness(SchedulerConfig{1, 2, 2});
     CHECK(harness.core.submit(InferenceRequest{}, {}, nullptr) == ErrCode::Ok);
     CHECK(harness.core.submit(InferenceRequest{}, {}, nullptr) == ErrCode::Ok);
     CHECK(harness.core.submit(InferenceRequest{}, {}, nullptr) == ErrCode::QueueFull);

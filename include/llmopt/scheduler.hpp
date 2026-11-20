@@ -1,4 +1,5 @@
-// scheduler.hpp — C-12 有界 Mailbox 与单线程 SchedulerCore；状态只由 Core 写。
+// scheduler.hpp — C-12 有界 Mailbox、C-P2-13 双预算与单线程 SchedulerCore。
+// 连续批处理：每 tick 把 running 的 prefill/decode 与待准入请求合成一个不可变 Batch。
 #ifndef LLMOPT_SCHEDULER_HPP
 #define LLMOPT_SCHEDULER_HPP
 
@@ -9,6 +10,7 @@
 #include "llmopt/sink.hpp"
 
 #include <condition_variable>
+#include <cstdint>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -19,8 +21,27 @@
 namespace llmopt {
 
 struct SchedulerConfig {
-    std::int32_t max_concurrency = 1; // 阶段 1 固定 1
+    std::int32_t max_concurrency = 8;
+    std::int32_t max_num_batched_tokens = 2048;
     std::int32_t queue_capacity = 64;
+    bool enable_prefix_cache = true;
+};
+
+// 请求数与 token 双预算：独立判定、互不替代（INV-07）。
+class TokenBudget {
+public:
+    TokenBudget(std::int32_t max_seqs, std::int32_t max_tokens) noexcept;
+    bool can_add(std::int32_t seqs, std::int32_t tokens) const noexcept;
+    void commit(std::int32_t seqs, std::int32_t tokens) noexcept;
+    void reset() noexcept;
+    std::int32_t seqs_remain() const noexcept;
+    std::int32_t tokens_remain() const noexcept;
+
+private:
+    std::int32_t max_seqs_;
+    std::int32_t max_tokens_;
+    std::int32_t seqs_used_ = 0;
+    std::int32_t tokens_used_ = 0;
 };
 
 struct SequenceGroup {
@@ -31,6 +52,10 @@ struct SequenceGroup {
     std::shared_ptr<ResponseSink> sink;
     Sequence seq;
     bool admitted = false;
+    RequestId prefix_source;
+    std::int32_t prefix_tokens = 0;
+    // 半个 UTF-8 字符先攒在这里，完整后再下发，避免 JSON 编码异常。
+    std::string utf8_pending;
 };
 
 enum class EventKind : std::uint8_t { AddRequest, Cancel, Completion, Shutdown };
@@ -93,23 +118,29 @@ public:
 
     // 线程体：运行到 Shutdown 且无在飞序列为止。
     void run();
-    // 测试入口：处理一个事件并推进状态机，返回是否还有进展。
+    // 测试入口：处理一批事件并推进，返回是否有进展。
     bool run_once(int wait_ms);
-    // 纯投影：阶段 1 batch=1，PrefillLast 采样、Decode 采样，PrefillChunk 不采样。
+    // 单序列投影，保留给纯逻辑用例。
     Batch build_batch(const Sequence& seq) const;
 
     std::int32_t running_count() const noexcept;
     std::int32_t waiting_count() const noexcept;
 
 private:
+    enum class DeliverResult : std::uint8_t { Continue, Finished, Failed };
+
     void handle(Event& event);
-    void start_next();
-    void admit(const std::shared_ptr<SequenceGroup>& group);
-    void dispatch(const Sequence& seq);
+    void pump();
+    bool admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget);
+    void append_step(Batch& batch, const std::shared_ptr<SequenceGroup>& group) const;
     void apply_completion(const Completion& completion);
+    DeliverResult deliver(const std::shared_ptr<SequenceGroup>& group, const SampledToken& token);
     void finish(const std::shared_ptr<SequenceGroup>& group, FinishReason reason,
                 bool final_frame_pushed = false);
-    bool has_pending() const noexcept;
+    void reap_donors();
+    void reconcile(const Sequence& seq);
+    std::shared_ptr<SequenceGroup> find_running(const RequestId& req_id) const;
+    RequestId find_live_donor(const PrefixHit& hit) const;
 
     ModelRunner& runner_;
     KVBlockManager& kv_;
@@ -118,10 +149,10 @@ private:
     SchedulerMailbox mailbox_;
     StepExecutor executor_;
     std::deque<std::shared_ptr<SequenceGroup>> waiting_;
-    std::shared_ptr<SequenceGroup> running_;
-    std::int32_t last_step_tokens_ = 0;
+    std::vector<std::shared_ptr<SequenceGroup>> running_;
+    std::vector<std::int32_t> pending_serials_;
+    std::int32_t pending_remaining_ = 0;
     bool pending_step_ = false;
-    bool cancel_pending_ = false;
     bool shutting_down_ = false;
 };
 

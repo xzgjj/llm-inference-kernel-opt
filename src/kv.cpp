@@ -201,6 +201,9 @@ PrefixHit KVBlockManager::lookup_prefix(const Sequence& seq) const {
         if (block.hash != hash || !block.verified || block.ref_cnt <= 0) {
             break;
         }
+        if (hit.blocks.empty() && !block.owner.empty()) {
+            hit.donor = block.owner;
+        }
         hit.blocks.push_back(BlockRef{it->second});
         hit.hit_tokens += config_.block_tokens;
         parent = hash;
@@ -252,12 +255,18 @@ std::int32_t KVBlockManager::retain(Sequence& seq) {
             ++index;
             continue;
         }
+        if (block.owner == seq.group_id) {
+            ++index;
+            keep_tokens += config_.block_tokens;
+            continue;
+        }
         if (block.owner.empty()) {
             adopt_block(ref.block_id, seq.group_id);
+            keep_tokens += config_.block_tokens;
         } else {
+            // 内容已由别的 donor 持有，本序列无需再保留一份。
             release_block(ref.block_id);
         }
-        keep_tokens += config_.block_tokens;
         ++index;
     }
     seq.block_table.clear();

@@ -1,8 +1,10 @@
-// scheduler.cpp — 单线程状态机 + 单线程执行；状态只由 Core 写，Completion 只回投。
+// scheduler.cpp — 单线程状态机 + 单线程执行；每 tick 合成连续批，状态只由 Core 写。
 #include "llmopt/scheduler.hpp"
 
+#include "llmopt/text.hpp"
+
+#include <algorithm>
 #include <atomic>
-#include <chrono>
 
 namespace llmopt {
 namespace {
@@ -16,7 +18,48 @@ Event make_event(EventKind kind, RequestId id) {
     return event;
 }
 
+// 供日志/指标使用的简易原因名，避免分支里写字符串字面量。
+const char* alloc_reason_name(AllocFailReason reason) {
+    switch (reason) {
+    case AllocFailReason::NoFreeBlock:
+        return "no_free_block";
+    case AllocFailReason::BelowWatermark:
+        return "below_watermark";
+    case AllocFailReason::ContextOverflow:
+        return "context_overflow";
+    case AllocFailReason::SequenceTooLong:
+        return "sequence_too_long";
+    default:
+        return "none";
+    }
+}
+
 } // namespace
+
+TokenBudget::TokenBudget(std::int32_t max_seqs, std::int32_t max_tokens) noexcept
+    : max_seqs_(max_seqs), max_tokens_(max_tokens) {}
+
+bool TokenBudget::can_add(std::int32_t seqs, std::int32_t tokens) const noexcept {
+    return seqs_used_ + seqs <= max_seqs_ && tokens_used_ + tokens <= max_tokens_;
+}
+
+void TokenBudget::commit(std::int32_t seqs, std::int32_t tokens) noexcept {
+    seqs_used_ += seqs;
+    tokens_used_ += tokens;
+}
+
+void TokenBudget::reset() noexcept {
+    seqs_used_ = 0;
+    tokens_used_ = 0;
+}
+
+std::int32_t TokenBudget::seqs_remain() const noexcept {
+    return max_seqs_ - seqs_used_;
+}
+
+std::int32_t TokenBudget::tokens_remain() const noexcept {
+    return max_tokens_ - tokens_used_;
+}
 
 SchedulerMailbox::SchedulerMailbox(std::int32_t capacity) : capacity_(capacity) {
     if (capacity_ < 1) {
@@ -123,12 +166,13 @@ void StepExecutor::loop() {
         }
         RunnerStepOutput output = runner_.decode_step(batch);
         metrics_.inc("llmopt_forward_steps_total");
-        // 即使 runner 提前失败（req_ids 为空）也要回投，避免 Core 永久等待 pending。
+        // 即使 runner 提前失败也要逐条回投，避免 Core 永久等待 pending。
         for (std::size_t i = 0; i < batch.steps.size(); ++i) {
             const SequenceStep& step = batch.steps[i];
             Event event = make_event(EventKind::Completion, step.route.req_id);
             event.completion.seq_id = step.route.req_id;
             event.completion.seq_serial = step.kv.seq_id;
+            event.completion.computed_tokens = step.pos_end;
             event.completion.err = output.err;
             if (i < output.sampled.size()) {
                 event.completion.sampled.push_back(output.sampled[i]);
@@ -182,9 +226,12 @@ void SchedulerCore::shutdown() noexcept {
 void SchedulerCore::run() {
     while (true) {
         (void)run_once(50);
-        if (shutting_down_ && !running_ && !pending_step_) {
+        if (shutting_down_ && !pending_step_ && running_.empty()) {
             break;
         }
+    }
+    for (const RequestId& donor : kv_.flush_cache()) {
+        runner_.release_sequence(donor, 0);
     }
     executor_.stop();
 }
@@ -195,52 +242,56 @@ bool SchedulerCore::run_once(int wait_ms) {
         return false;
     }
     handle(event);
+    Event extra;
+    while (mailbox_.try_pop(extra)) {
+        handle(extra);
+    }
+    pump();
     return true;
 }
 
 void SchedulerCore::handle(Event& event) {
     switch (event.kind) {
-    case EventKind::AddRequest:
+    case EventKind::AddRequest: {
+        auto group = std::move(event.group);
         metrics_.inc("llmopt_requests_total{status=\"accepted\"}");
-        if (running_) {
-            waiting_.push_back(std::move(event.group));
-            metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
-        } else {
-            admit(event.group);
+        if (static_cast<std::int32_t>(waiting_.size()) >= config_.queue_capacity) {
+            metrics_.inc("llmopt_admission_rejected_total{reason=\"queue\"}");
+            finish(group, FinishReason::Error);
+            break;
         }
+        waiting_.push_back(std::move(group));
+        metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
         break;
+    }
     case EventKind::Cancel:
-        if (running_ && running_->req_id == event.seq_id) {
-            running_->seq.cancel_requested.store(true);
-            if (pending_step_) {
-                cancel_pending_ = true;
-            } else {
-                finish(running_, FinishReason::Aborted);
+        if (auto running = find_running(event.seq_id)) {
+            running->seq.cancel_requested.store(true);
+            if (!pending_step_) {
+                finish(running, FinishReason::Aborted);
             }
-        } else {
-            for (auto it = waiting_.begin(); it != waiting_.end(); ++it) {
-                if ((*it)->req_id == event.seq_id) {
-                    finish(*it, FinishReason::Aborted);
-                    waiting_.erase(it);
-                    metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
-                    break;
-                }
+            break;
+        }
+        for (auto it = waiting_.begin(); it != waiting_.end(); ++it) {
+            if ((*it)->req_id == event.seq_id) {
+                finish(*it, FinishReason::Aborted);
+                waiting_.erase(it);
+                metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+                break;
             }
         }
         break;
     case EventKind::Completion:
-        if (running_ && running_->req_id == event.completion.seq_id) {
-            apply_completion(event.completion);
-        }
+        apply_completion(event.completion);
         break;
     case EventKind::Shutdown:
         shutting_down_ = true;
-        if (running_) {
-            if (pending_step_) {
-                running_->seq.cancel_requested.store(true);
-                cancel_pending_ = true;
-            } else {
-                finish(running_, FinishReason::Aborted);
+        for (const auto& group : running_) {
+            group->seq.cancel_requested.store(true);
+        }
+        if (!pending_step_) {
+            for (const auto& group : running_) {
+                finish(group, FinishReason::Aborted);
             }
         }
         while (!waiting_.empty()) {
@@ -254,74 +305,172 @@ void SchedulerCore::handle(Event& event) {
     }
 }
 
-void SchedulerCore::start_next() {
-    if (shutting_down_ || running_ || waiting_.empty()) {
+void SchedulerCore::pump() {
+    if (pending_step_ || shutting_down_) {
         return;
     }
-    auto group = waiting_.front();
-    waiting_.pop_front();
+    // 上一 tick 淘汰的 donor 此刻才能真正释放：本批若还要借前缀，必须等复制完成。
+    reap_donors();
+    Batch batch;
+    TokenBudget budget(config_.max_concurrency, config_.max_num_batched_tokens);
+    for (const auto& group : running_) {
+        append_step(batch, group);
+    }
+    while (!waiting_.empty()) {
+        if (static_cast<std::int32_t>(running_.size()) >= config_.max_concurrency) {
+            break;
+        }
+        auto group = waiting_.front();
+        const std::int32_t remaining = group->seq.prompt_len - group->seq.num_computed;
+        if (remaining > config_.max_num_batched_tokens) {
+            metrics_.inc("llmopt_admission_rejected_total{reason=\"token_budget\"}");
+            break;
+        }
+        if (!budget.can_add(1, remaining)) {
+            metrics_.inc("llmopt_admission_rejected_total{reason=\"token_budget\"}");
+            break;
+        }
+        if (!admit(group, budget)) {
+            break;
+        }
+        waiting_.pop_front();
+        metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+        append_step(batch, group);
+    }
+    if (batch.steps.empty()) {
+        return;
+    }
+    pending_serials_.clear();
+    for (const SequenceStep& step : batch.steps) {
+        pending_serials_.push_back(step.kv.seq_id);
+    }
+    pending_remaining_ = static_cast<std::int32_t>(batch.steps.size());
+    const bool submitted = executor_.submit(std::move(batch));
+    if (!submitted) {
+        pending_remaining_ = 0;
+        return;
+    }
+    pending_step_ = true;
+    metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
     metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
-    admit(group);
+    KVUsage usage = kv_.usage();
+    metrics_.set("llmopt_kv_used_blocks", usage.used_blocks);
+    metrics_.set("llmopt_kv_cached_blocks", usage.cached_blocks);
+    metrics_.set("llmopt_kv_shared_blocks", usage.shared_blocks);
+    metrics_.set("llmopt_kv_free_blocks", usage.free_blocks);
 }
 
-void SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group) {
+bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget) {
     Sequence& seq = group->seq;
-    if (!seq.block_table.empty()) {
-        kv_.free(seq);
+    std::int32_t hit_tokens = 0;
+    if (config_.enable_prefix_cache && seq.num_computed == 0) {
+        const PrefixHit hit = kv_.lookup_prefix(seq);
+        RequestId donor = hit.donor;
+        if (donor.empty() && hit.hit_tokens > 0 && runner_.supports_live_prefix()) {
+            donor = find_live_donor(hit);
+        }
+        if (hit.hit_tokens > 0 && !donor.empty()) {
+            hit_tokens = kv_.attach_prefix(seq, hit);
+            if (hit_tokens > 0) {
+                seq.num_computed = hit_tokens;
+                group->prefix_source = donor;
+                group->prefix_tokens = hit_tokens;
+                metrics_.inc("llmopt_prefix_hits_total");
+                metrics_.inc("llmopt_prefix_hit_tokens_total", hit_tokens);
+            }
+        } else {
+            metrics_.inc("llmopt_prefix_misses_total");
+        }
     }
-    if (!kv_.acquire(seq, seq.prompt_len, 0, true).ok()) {
-        finish(group, FinishReason::Error);
-        return;
+    const std::int32_t total_tokens = seq.prompt_len + seq.sampling.max_tokens;
+    const AllocResult alloc = kv_.acquire(seq, total_tokens, 0, true);
+    if (!alloc.ok()) {
+        if (hit_tokens > 0) {
+            kv_.free(seq);
+            seq.num_computed = 0;
+            group->prefix_source.clear();
+            group->prefix_tokens = 0;
+        }
+        metrics_.inc(std::string("llmopt_admission_rejected_total{reason=\"") +
+                     alloc_reason_name(alloc.reason) + "\"}");
+        if (alloc.reason == AllocFailReason::ContextOverflow) {
+            finish(group, FinishReason::Error);
+        }
+        return false;
     }
     if (runner_.add_sequence(seq) != ErrCode::Ok) {
         kv_.free(seq);
         finish(group, FinishReason::Error);
-        return;
+        return false;
     }
     group->admitted = true;
     seq.status = SeqStatus::Running;
-    running_ = group;
-    metrics_.set("llmopt_running_sequences", 1);
-    metrics_.set("llmopt_kv_free_blocks", kv_.num_free_blocks());
-    dispatch(seq);
+    running_.push_back(group);
+    budget.commit(1, seq.prompt_len - seq.num_computed);
+    return true;
 }
 
-void SchedulerCore::dispatch(const Sequence& seq) {
-    Batch batch = build_batch(seq);
-    last_step_tokens_ = batch.total_tokens;
-    if (batch.total_tokens <= 0 || !executor_.submit(std::move(batch))) {
-        finish(running_, FinishReason::Error);
-        return;
+void SchedulerCore::append_step(Batch& batch, const std::shared_ptr<SequenceGroup>& group) const {
+    const Sequence& seq = group->seq;
+    SequenceStep step;
+    step.seq_id = group->req_id;
+    step.route.req_id = group->req_id;
+    step.kv = KVPen{seq.id, 0};
+    if (seq.num_computed < seq.prompt_len) {
+        NewRequestData data;
+        data.req_id = group->req_id;
+        data.prefill_token_ids.assign(seq.prompt_token_ids.begin() + seq.num_computed,
+                                      seq.prompt_token_ids.end());
+        data.block_ids = seq.block_table;
+        data.sampling = seq.sampling;
+        data.prefix_source = group->prefix_source;
+        data.prefix_tokens = group->prefix_tokens;
+        step.phase = Phase::PrefillLast;
+        step.pos_begin = seq.num_computed;
+        step.pos_end = seq.prompt_len;
+        step.n_tokens = seq.prompt_len - seq.num_computed;
+        batch.new_reqs.push_back(std::move(data));
+    } else {
+        CachedRequestData data;
+        data.req_id = group->req_id;
+        data.new_token_ids.push_back(seq.output_token_ids.back());
+        data.new_block_ids = seq.block_table;
+        step.phase = Phase::Decode;
+        step.pos_begin = seq.num_computed;
+        step.pos_end = seq.num_computed + 1;
+        step.n_tokens = 1;
+        batch.cached_reqs.push_back(std::move(data));
     }
-    pending_step_ = true;
+    step.needs_sampling = true;
+    step.sample_pos = step.pos_end - 1;
+    batch.total_tokens += step.n_tokens;
+    batch.steps.push_back(step);
 }
 
 Batch SchedulerCore::build_batch(const Sequence& seq) const {
     Batch batch;
     SequenceStep step;
-    const bool prefill = seq.num_computed == 0;
-    if (prefill) {
+    if (seq.num_computed < seq.prompt_len) {
         NewRequestData data;
         data.req_id = seq.group_id;
         data.prefill_token_ids = seq.prompt_token_ids;
         data.block_ids = seq.block_table;
         data.sampling = seq.sampling;
+        step.phase = Phase::PrefillLast;
+        step.pos_end = seq.prompt_len;
         batch.total_tokens = seq.prompt_len;
         batch.new_reqs.push_back(std::move(data));
-        step.phase = Phase::PrefillLast;
-        step.pos_begin = 0;
-        step.pos_end = seq.prompt_len;
     } else {
         CachedRequestData data;
         data.req_id = seq.group_id;
         data.new_token_ids.push_back(seq.output_token_ids.back());
+        step.phase = Phase::Decode;
+        step.pos_end = seq.num_computed + 1;
         batch.total_tokens = 1;
         batch.cached_reqs.push_back(std::move(data));
-        step.phase = Phase::Decode;
-        step.pos_begin = seq.num_computed;
-        step.pos_end = seq.num_computed + 1;
     }
     step.seq_id = seq.group_id;
+    step.pos_begin = seq.num_computed;
     step.n_tokens = batch.total_tokens;
     step.needs_sampling = true;
     step.sample_pos = step.pos_end - 1;
@@ -332,30 +481,62 @@ Batch SchedulerCore::build_batch(const Sequence& seq) const {
 }
 
 void SchedulerCore::apply_completion(const Completion& completion) {
-    // 过期事件：请求已结束或被取消后，同 req_id 的新请求不能消费旧 token。
-    if (!pending_step_ || !running_ || running_->seq.id != completion.seq_serial) {
+    auto it = std::find(pending_serials_.begin(), pending_serials_.end(), completion.seq_serial);
+    if (it == pending_serials_.end()) {
         return;
     }
-    pending_step_ = false;
-    if (!running_) {
+    pending_serials_.erase(it);
+    pending_remaining_ -= 1;
+    auto group = find_running(completion.seq_id);
+    const bool batch_done = pending_remaining_ == 0;
+    if (!group || group->seq.id != completion.seq_serial) {
+        if (batch_done) {
+            pending_step_ = false;
+            pump();
+        }
         return;
     }
-    Sequence& seq = running_->seq;
+    Sequence& seq = group->seq;
     if (completion.err != ErrCode::Ok || completion.sampled.empty()) {
-        finish(running_, FinishReason::Error);
+        finish(group, FinishReason::Error);
+        if (batch_done) {
+            pending_step_ = false;
+            pump();
+        }
         return;
     }
-    const SampledToken token = completion.sampled.front();
-    seq.num_computed += last_step_tokens_;
+    const std::int32_t previous = seq.num_computed;
+    seq.num_computed = completion.computed_tokens;
     seq.num_output += 1;
-    seq.output_token_ids.push_back(token.token_id);
+    seq.output_token_ids.push_back(completion.sampled.front().token_id);
+    kv_.mark_written(seq, seq.num_computed);
     metrics_.inc("llmopt_tokens_generated_total");
-    if (seq.num_computed == seq.prompt_len) {
-        metrics_.inc("llmopt_prefill_tokens_total", seq.prompt_len);
+    if (previous < seq.prompt_len && seq.num_computed >= seq.prompt_len) {
+        metrics_.inc("llmopt_prefill_tokens_total", seq.prompt_len - previous);
     }
-    const std::string text = runner_.detokenize(token.token_id);
+    reconcile(seq);
+    DeliverResult delivered = deliver(group, completion.sampled.front());
+    if (delivered == DeliverResult::Failed) {
+        finish(group, FinishReason::Aborted);
+    } else if (delivered == DeliverResult::Finished) {
+        // finish 已在 deliver 内完成。
+    }
+    if (batch_done) {
+        pending_step_ = false;
+        pump();
+    }
+}
+
+SchedulerCore::DeliverResult SchedulerCore::deliver(const std::shared_ptr<SequenceGroup>& group,
+                                                    const SampledToken& token) {
+    Sequence& seq = group->seq;
+    const std::string piece = runner_.detokenize(token.token_id);
+    group->utf8_pending += piece;
+    const std::size_t complete = utf8_complete_prefix(group->utf8_pending);
+    const std::string text = group->utf8_pending.substr(0, complete);
+    group->utf8_pending.erase(0, complete);
     FinishReason reason = FinishReason::None;
-    if (cancel_pending_ || seq.cancel_requested.load()) {
+    if (seq.cancel_requested.load() || shutting_down_) {
         reason = FinishReason::Aborted;
     } else if (runner_.is_eos(token.token_id)) {
         reason = FinishReason::Stopped;
@@ -368,15 +549,14 @@ void SchedulerCore::apply_completion(const Completion& completion) {
     if (reason != FinishReason::None) {
         delta.finish = reason;
     }
-    if (!running_->sink || !running_->sink->push_frame(delta)) {
-        finish(running_, FinishReason::Aborted);
-        return;
+    if (!group->sink || !group->sink->push_frame(delta)) {
+        return DeliverResult::Failed;
     }
-    if (reason != FinishReason::None) {
-        finish(running_, reason, true);
-        return;
+    if (reason == FinishReason::None) {
+        return DeliverResult::Continue;
     }
-    dispatch(seq);
+    finish(group, reason, true);
+    return DeliverResult::Finished;
 }
 
 void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishReason reason,
@@ -390,26 +570,27 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
     }
     seq.finish = reason;
     seq.status = SeqStatus::Finished;
-    if (!final_frame_pushed) {
+    if (!final_frame_pushed && group->sink) {
         Delta delta;
         delta.finish = reason;
-        if (group->sink) {
-            (void)group->sink->push_frame(delta);
-        }
+        (void)group->sink->push_frame(delta);
     }
     if (group->sink) {
         group->sink->close();
     }
     if (group->admitted) {
-        runner_.release_sequence(seq.group_id);
-        kv_.free(seq);
+        std::int32_t keep = 0;
+        if (config_.enable_prefix_cache && reason != FinishReason::Error &&
+            reason != FinishReason::Aborted) {
+            keep = kv_.retain(seq);
+        } else {
+            kv_.free(seq);
+        }
+        runner_.release_sequence(group->req_id, keep);
     }
-    if (running_ == group) {
-        metrics_.set("llmopt_running_sequences", 0);
-        metrics_.set("llmopt_kv_free_blocks", kv_.num_free_blocks());
-        running_.reset();
-        pending_step_ = false;
-        cancel_pending_ = false;
+    running_.erase(std::remove(running_.begin(), running_.end(), group), running_.end());
+    if (!pending_step_) {
+        reap_donors();
     }
     if (reason == FinishReason::Aborted) {
         metrics_.inc("llmopt_requests_total{status=\"cancelled\"}");
@@ -418,17 +599,60 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
     } else {
         metrics_.inc("llmopt_requests_total{status=\"ok\"}");
     }
-    if (!shutting_down_) {
-        start_next();
+    metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
+    metrics_.set("llmopt_kv_free_blocks", kv_.num_free_blocks());
+    if (!shutting_down_ && !pending_step_) {
+        pump();
     }
 }
 
-bool SchedulerCore::has_pending() const noexcept {
-    return pending_step_;
+void SchedulerCore::reap_donors() {
+    for (const RequestId& donor : kv_.take_dropped_donors()) {
+        runner_.release_sequence(donor, 0);
+        metrics_.inc("llmopt_prefix_evictions_total");
+    }
+}
+
+void SchedulerCore::reconcile(const Sequence& seq) {
+    const std::int32_t backend_pos = runner_.seq_pos_max(seq.group_id);
+    const std::int32_t expected = seq.num_computed - 1;
+    if (backend_pos < 0 || expected < 0) {
+        return;
+    }
+    if (backend_pos != expected) {
+        metrics_.inc("llmopt_kv_reconcile_diffs_total");
+    }
+}
+
+std::shared_ptr<SequenceGroup> SchedulerCore::find_running(const RequestId& req_id) const {
+    for (const auto& group : running_) {
+        if (group->req_id == req_id) {
+            return group;
+        }
+    }
+    return nullptr;
+}
+
+RequestId SchedulerCore::find_live_donor(const PrefixHit& hit) const {
+    if (hit.blocks.empty()) {
+        return {};
+    }
+    const std::int32_t block_id = hit.blocks.front().block_id;
+    for (const auto& group : running_) {
+        if (group->seq.num_computed < hit.hit_tokens) {
+            continue;
+        }
+        for (const BlockRef& ref : group->seq.block_table) {
+            if (ref.block_id == block_id) {
+                return group->req_id;
+            }
+        }
+    }
+    return {};
 }
 
 std::int32_t SchedulerCore::running_count() const noexcept {
-    return running_ ? 1 : 0;
+    return static_cast<std::int32_t>(running_.size());
 }
 
 std::int32_t SchedulerCore::waiting_count() const noexcept {

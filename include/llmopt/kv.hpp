@@ -35,6 +35,8 @@ struct KVConfig {
 struct PrefixHit {
     std::vector<BlockRef> blocks;
     std::int32_t hit_tokens = 0;
+    // 提供这些块 KV 的序列：运行中的 seq_id 或留置 donor；空表示不可物理借用。
+    RequestId donor;
 };
 
 struct AllocResult {

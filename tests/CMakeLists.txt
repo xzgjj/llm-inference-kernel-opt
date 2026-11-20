@@ -19,7 +19,10 @@ llmopt_add_doctest(unit_kv "unit;fast;hermetic" SOURCES unit/kv_test.cc)
 llmopt_add_doctest(unit_gate "unit;fast;hermetic" SOURCES unit/gate_test.cc)
 llmopt_add_doctest(unit_gguf "unit;fast;hermetic" SOURCES unit/gguf_test.cc)
 llmopt_add_doctest(unit_stub_runner "unit;fast;hermetic" SOURCES unit/stub_runner_test.cc)
+llmopt_add_doctest(unit_text "unit;fast;hermetic" SOURCES unit/text_test.cc)
 llmopt_add_doctest(contract_scheduler "contract;fast;hermetic" SOURCES contract/scheduler_test.cc)
+llmopt_add_doctest(contract_continuous_batch "contract;fast;hermetic"
+                   SOURCES contract/continuous_batch_test.cc)
 
 if(Python3_Interpreter_FOUND)
     add_test(NAME integration_server_smoke
@@ -27,4 +30,11 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:llmopt_server> ${CMAKE_BINARY_DIR}/evidence)
     set_tests_properties(integration_server_smoke PROPERTIES LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_smoke PROPERTIES TIMEOUT 120)
+
+    add_test(NAME integration_server_concurrency
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_concurrency.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_concurrency PROPERTIES LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_concurrency PROPERTIES TIMEOUT 120)
 endif()
