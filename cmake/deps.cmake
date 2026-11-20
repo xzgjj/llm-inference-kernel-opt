@@ -21,19 +21,10 @@ FetchContent_Declare(nlohmann_json
 FetchContent_Declare(spdlog
     URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_Declare(concurrentqueue
-    URL https://github.com/cameron314/concurrentqueue/archive/refs/tags/v1.0.3.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_Declare(doctest
     URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.11.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(httplib nlohmann_json spdlog concurrentqueue doctest)
-
-# concurrentqueue 自带 INTERFACE 目标，补 SYSTEM 标记避免第三方头触发 -Werror。
-if(TARGET concurrentqueue)
-    target_include_directories(concurrentqueue SYSTEM INTERFACE
-        "${concurrentqueue_SOURCE_DIR}")
-endif()
+FetchContent_MakeAvailable(httplib nlohmann_json spdlog doctest)
 
 # 真实 llama.cpp 后端：复用 WSL 侧已构建的共享库，不在此处重编依赖树。
 function(add_llama_backend target)

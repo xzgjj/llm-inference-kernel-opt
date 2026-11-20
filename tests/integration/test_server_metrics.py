@@ -1,6 +1,7 @@
 # test_server_metrics.py — 4-G0-1/5 进程级契约：TYPE/HELP 全覆盖，KPI 与请求计数一致。
 from __future__ import annotations
 
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -80,6 +81,16 @@ def main() -> int:
             check(samples['llmopt_gate_verdict_total{verdict="ELIGIBLE"}'] == 1,
                   "门控应记录 1 次 ELIGIBLE")
             check(samples["llmopt_degraded"] == 0, "未降级时 degraded 应为 0")
+
+            # K-8：RSS 为进程级实数，峰值不低于当前；VRAM 未知时必须 NaN + probe_ok=0。
+            check(samples["llmopt_rss_mib"] > 0, "RSS 应为正")
+            check(samples["llmopt_rss_peak_mib"] >= samples["llmopt_rss_mib"],
+                  "RSS 峰值不应低于当前值")
+            probe = samples["llmopt_vram_probe_ok"]
+            check(probe in (0, 1), "vram_probe_ok 只能是 0/1")
+            if probe == 0:
+                check(math.isnan(samples["llmopt_vram_mib"]), "未知 VRAM 应写 NaN")
+                check(math.isnan(samples["llmopt_vram_peak_mib"]), "未知 VRAM 峰值应写 NaN")
 
             # 反例：未知指标名不得被动态注册成新序列。
             check("llmopt_unknown_metric" not in samples, "未知指标不应出现在 /metrics")

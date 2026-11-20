@@ -6,6 +6,7 @@
 #include "llmopt/kv.hpp"
 #include "llmopt/log.hpp"
 #include "llmopt/metrics.hpp"
+#include "llmopt/resource.hpp"
 #include "llmopt/runner.hpp"
 #include "llmopt/scheduler.hpp"
 #include "llmopt/server.hpp"
@@ -192,6 +193,9 @@ std::int32_t run(const ServerConfig& cfg) {
     // K-9：门控结论一次落指标，矩阵侧可直接对账启动时是否发生降级。
     MetricsRegistry metrics;
     report_gate_metrics(metrics, gate);
+    // K-8：采样线程在 load_model 之前起，峰值才包含权重落地的那一段。
+    ResourceSampler sampler(metrics);
+    sampler.start();
 
     std::string message;
     std::unique_ptr<ModelRunner> runner = make_runner(cfg, message);

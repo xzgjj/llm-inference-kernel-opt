@@ -41,6 +41,7 @@ add_library(llmopt_core STATIC
     src/scheduler.cpp
     src/sink.cpp
     src/metrics.cpp
+    src/resource.cpp
     src/text.cpp
     src/gate.cpp
     src/gguf.cpp
@@ -48,7 +49,11 @@ add_library(llmopt_core STATIC
     src/log.cpp)
 target_include_directories(llmopt_core PUBLIC include)
 target_link_libraries(llmopt_core PUBLIC nlohmann_json::nlohmann_json llmopt_coverage PRIVATE llmopt_warnings)
-target_link_libraries(llmopt_core PRIVATE concurrentqueue spdlog::spdlog)
+target_link_libraries(llmopt_core PRIVATE spdlog::spdlog)
+if(WIN32)
+    # K-8：GetProcessMemoryInfo 需要 psapi；Linux 读 /proc/self/statm，无额外库。
+    target_link_libraries(llmopt_core PUBLIC psapi)
+endif()
 
 if(LLMOPT_ENABLE_LLAMA)
     add_llama_backend(llmopt_core)

@@ -17,9 +17,43 @@
 namespace llmopt {
 namespace {
 
+// C 句柄统一交给 unique_ptr：析构即释放，异常/早退路径不再手工配对 free。
+struct ModelDeleter {
+    void operator()(llama_model* handle) const noexcept {
+        if (handle != nullptr) {
+            llama_model_free(handle);
+        }
+    }
+};
+struct ContextDeleter {
+    void operator()(llama_context* handle) const noexcept {
+        if (handle != nullptr) {
+            llama_free(handle);
+        }
+    }
+};
+struct BatchDeleter {
+    void operator()(llama_batch_ext* handle) const noexcept {
+        if (handle != nullptr) {
+            llama_batch_ext_free(handle);
+        }
+    }
+};
+struct SamplerDeleter {
+    void operator()(llama_sampler* handle) const noexcept {
+        if (handle != nullptr) {
+            llama_sampler_free(handle);
+        }
+    }
+};
+using ModelPtr = std::unique_ptr<llama_model, ModelDeleter>;
+using ContextPtr = std::unique_ptr<llama_context, ContextDeleter>;
+using BatchPtr = std::unique_ptr<llama_batch_ext, BatchDeleter>;
+using SamplerPtr = std::unique_ptr<llama_sampler, SamplerDeleter>;
+
 // 每个序列一个采样链与一个 llama seq 槽；retained 表示 KV 前缀仍被借用。
 struct LlamaSeqState {
-    llama_sampler* sampler = nullptr;
+    SamplerPtr sampler;
     std::int32_t slot = -1;
     std::int32_t n_past = 0;
     bool retained = false;
@@ -32,17 +66,17 @@ void ensure_backend() {
 }
 
 // 把 (0,1] 的 top_p/min_p 转成 llama 需要的 min_keep=1，避免空候选。
-llama_sampler* build_chain(const SamplingParams& sampling, std::int32_t n_vocab) {
-    auto* chain = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(
-            chain, llama_sampler_init_penalties(n_vocab, 64, sampling.repeat_penalty, 0.0F, 0.0F));
-    llama_sampler_chain_add(chain, llama_sampler_init_top_k(sampling.top_k));
-    llama_sampler_chain_add(chain, llama_sampler_init_top_p(sampling.top_p, 1));
-    llama_sampler_chain_add(chain, llama_sampler_init_min_p(sampling.min_p, 1));
-    llama_sampler_chain_add(chain, llama_sampler_init_temp(sampling.temperature));
+SamplerPtr build_chain(const SamplingParams& sampling, std::int32_t n_vocab) {
+    SamplerPtr chain{llama_sampler_chain_init(llama_sampler_chain_default_params())};
+    llama_sampler_chain_add(chain.get(), llama_sampler_init_penalties(
+                                                 n_vocab, 64, sampling.repeat_penalty, 0.0F, 0.0F));
+    llama_sampler_chain_add(chain.get(), llama_sampler_init_top_k(sampling.top_k));
+    llama_sampler_chain_add(chain.get(), llama_sampler_init_top_p(sampling.top_p, 1));
+    llama_sampler_chain_add(chain.get(), llama_sampler_init_min_p(sampling.min_p, 1));
+    llama_sampler_chain_add(chain.get(), llama_sampler_init_temp(sampling.temperature));
     const std::uint32_t seed =
             sampling.seed >= 0 ? static_cast<std::uint32_t>(sampling.seed) : LLAMA_DEFAULT_SEED;
-    llama_sampler_chain_add(chain, llama_sampler_init_dist(seed));
+    llama_sampler_chain_add(chain.get(), llama_sampler_init_dist(seed));
     return chain;
 }
 
@@ -62,7 +96,7 @@ public:
         n_gpu_layers_ = config.n_gpu_layers;
         llama_model_params mparams = llama_model_default_params();
         mparams.n_gpu_layers = config.n_gpu_layers;
-        model_ = llama_model_load_from_file(config.model_path.c_str(), mparams);
+        model_.reset(llama_model_load_from_file(config.model_path.c_str(), mparams));
         if (!model_) {
             // 第三方只回空指针：在这里翻成带阶段的领域错误，原始信息进 detail。
             last_error_ = make_error(
@@ -71,7 +105,7 @@ public:
                             std::filesystem::path(config.model_path).filename().string());
             return ErrCode::ModelNotLoaded;
         }
-        vocab_ = llama_model_get_vocab(model_);
+        vocab_ = llama_model_get_vocab(model_.get());
         n_vocab_ = static_cast<std::int32_t>(llama_vocab_n_tokens(vocab_));
         llama_context_params cparams = llama_context_default_params();
         cparams.n_ctx = static_cast<std::uint32_t>(std::max(config.n_ctx_total, config.n_ctx));
@@ -84,16 +118,15 @@ public:
                                    : static_cast<std::int32_t>(std::thread::hardware_concurrency());
         cparams.n_threads = threads;
         cparams.n_threads_batch = threads;
-        ctx_ = llama_init_from_model(model_, cparams);
+        ctx_.reset(llama_init_from_model(model_.get(), cparams));
         if (!ctx_) {
-            llama_model_free(model_);
-            model_ = nullptr;
+            model_.reset();
             last_error_ = make_error(ErrCode::ModelNotLoaded, "上下文创建失败（显存/内存不足）",
                                      "op=init_context n_ctx=" + std::to_string(cparams.n_ctx) +
                                              " n_seq_max=" + std::to_string(cparams.n_seq_max));
             return ErrCode::ModelNotLoaded;
         }
-        batch_ = llama_batch_ext_init(ctx_);
+        batch_.reset(llama_batch_ext_init(ctx_.get()));
         if (!batch_) {
             release();
             last_error_ =
@@ -122,12 +155,12 @@ public:
         slots_.pop_back();
         state.sampler = build_chain(seq.sampling, n_vocab_);
         for (std::int32_t id : seq.prompt_token_ids) {
-            llama_sampler_accept(state.sampler, id);
+            llama_sampler_accept(state.sampler.get(), id);
         }
         for (std::int32_t id : seq.output_token_ids) {
-            llama_sampler_accept(state.sampler, id);
+            llama_sampler_accept(state.sampler.get(), id);
         }
-        states_[seq.group_id] = state;
+        states_.insert_or_assign(seq.group_id, std::move(state));
         return ErrCode::Ok;
     }
 
@@ -140,7 +173,7 @@ public:
                                       "op=decode_step ctx_or_batch_null");
             return output;
         }
-        llama_batch_ext_clear(batch_);
+        llama_batch_ext_clear(batch_.get());
         std::size_t new_index = 0;
         std::size_t cached_index = 0;
         std::vector<RequestId> ordered;
@@ -166,7 +199,7 @@ public:
                                              "op=decode_step tokens=" +
                                                      std::to_string(batch.total_tokens)));
         }
-        const int process_rc = llama_process(ctx_, LLAMA_PROCESS_TYPE_DECODE, batch_);
+        const int process_rc = llama_process(ctx_.get(), LLAMA_PROCESS_TYPE_DECODE, batch_.get());
         if (process_rc != 0) {
             return failed(output, from_backend_rc("llama.cpp", "process", process_rc));
         }
@@ -197,49 +230,30 @@ public:
             return;
         }
         if (it->second.sampler) {
-            llama_sampler_free(it->second.sampler);
-            it->second.sampler = nullptr;
+            it->second.sampler.reset();
         }
         const std::int32_t slot = it->second.slot;
         if (keep_tokens > 0 && ctx_) {
-            (void)llama_memory_seq_rm(llama_get_memory(ctx_), slot, keep_tokens, -1);
+            (void)llama_memory_seq_rm(llama_get_memory(ctx_.get()), slot, keep_tokens, -1);
             it->second.n_past = keep_tokens;
             it->second.retained = true;
             return;
         }
         if (ctx_) {
-            (void)llama_memory_seq_rm(llama_get_memory(ctx_), slot, -1, -1);
+            (void)llama_memory_seq_rm(llama_get_memory(ctx_.get()), slot, -1, -1);
         }
         slots_.push_back(slot);
         states_.erase(it);
     }
 
-    // 全量释放：采样链、批、上下文、模型、后端，顺序与创建相反。
+    // 全量释放：按创建反序 reset 句柄；后端初始化是进程级的，不在此处 free。
     void release() override {
         std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& entry : states_) {
-            if (entry.second.sampler) {
-                llama_sampler_free(entry.second.sampler);
-            }
-        }
         states_.clear();
         slots_.clear();
-        if (batch_) {
-            llama_batch_ext_free(batch_);
-            batch_ = nullptr;
-        }
-        if (ctx_) {
-            llama_free(ctx_);
-            ctx_ = nullptr;
-        }
-        if (model_) {
-            llama_model_free(model_);
-            model_ = nullptr;
-        }
-        if (backend_ready_) {
-            llama_backend_free();
-            backend_ready_ = false;
-        }
+        batch_.reset();
+        ctx_.reset();
+        model_.reset();
     }
 
     // 分词：add_special=true 与 llama-server 默认一致；负返回值表示需要更大缓冲。
@@ -301,7 +315,7 @@ public:
             return -1;
         }
         return static_cast<std::int32_t>(
-                llama_memory_seq_pos_max(llama_get_memory(ctx_), it->second.slot));
+                llama_memory_seq_pos_max(llama_get_memory(ctx_.get()), it->second.slot));
     }
 
     // 后端名进入启动摘要。
@@ -349,7 +363,8 @@ private:
                 return -1;
             }
             // 只从已截断到前缀的 donor 借：cross-stream 的 seq_cp 只支持整段复制。
-            llama_memory_seq_cp(llama_get_memory(ctx_), donor->second.slot, state.slot, -1, -1);
+            llama_memory_seq_cp(llama_get_memory(ctx_.get()), donor->second.slot, state.slot, -1,
+                                -1);
             state.n_past = data.prefix_tokens;
         }
         const std::int32_t size = static_cast<std::int32_t>(data.prefill_token_ids.size());
@@ -363,7 +378,7 @@ private:
         }
         // 只有末块需要 logits；中间 chunk 省掉 output 采样与 logits 计算。
         if (last_idx >= 0 && step.needs_sampling) {
-            (void)llama_batch_ext_set_output_logits(batch_, last_idx, true);
+            (void)llama_batch_ext_set_output_logits(batch_.get(), last_idx, true);
         }
         state.n_past = step.pos_end;
         return last_idx;
@@ -384,7 +399,7 @@ private:
         if (idx < 0) {
             return -1;
         }
-        (void)llama_batch_ext_set_output_logits(batch_, idx, true);
+        (void)llama_batch_ext_set_output_logits(batch_.get(), idx, true);
         it->second.n_past = step.pos_end;
         return idx;
     }
@@ -392,12 +407,12 @@ private:
     // 往批里加一个 token 并设位置；返回批内下标，负值即失败。
     std::int32_t add_token(std::int32_t pos, std::int32_t token_id, std::int32_t slot) {
         const std::int32_t idx =
-                llama_batch_ext_add_token(batch_, static_cast<llama_seq_id>(slot), token_id);
+                llama_batch_ext_add_token(batch_.get(), static_cast<llama_seq_id>(slot), token_id);
         if (idx < 0) {
             return idx;
         }
         const llama_pos position = pos;
-        (void)llama_batch_ext_set_pos(batch_, idx, &position);
+        (void)llama_batch_ext_set_pos(batch_.get(), idx, &position);
         return idx;
     }
 
@@ -407,11 +422,12 @@ private:
         if (it == states_.end() || !it->second.sampler) {
             return SampledToken{};
         }
-        const llama_token token = llama_sampler_sample(it->second.sampler, ctx_, output_index);
+        const llama_token token =
+                llama_sampler_sample(it->second.sampler.get(), ctx_.get(), output_index);
         if (token < 0) {
             return SampledToken{};
         }
-        llama_sampler_accept(it->second.sampler, token);
+        llama_sampler_accept(it->second.sampler.get(), token);
         SampledToken out;
         out.token_id = token;
         out.logprob = 0.0F;
@@ -419,14 +435,13 @@ private:
     }
 
     ModelConfig config_;
-    llama_model* model_ = nullptr;
+    ModelPtr model_;
     const llama_vocab* vocab_ = nullptr;
-    llama_context* ctx_ = nullptr;
-    llama_batch_ext* batch_ = nullptr;
+    ContextPtr ctx_;
+    BatchPtr batch_;
     std::int32_t n_vocab_ = 0;
     std::int32_t n_ctx_ = 2048;
     std::int32_t n_gpu_layers_ = 0;
-    bool backend_ready_ = true;
     Error last_error_;
     mutable std::mutex mutex_;
     std::vector<std::int32_t> slots_;

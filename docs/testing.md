@@ -165,11 +165,14 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 阶段 4 的回包队列改造按同一约定固化：`tests/unit/sink_test.cc`（4 例）锁“队列满立即失败并关闭”“关闭后 pop 不阻塞”“溢出只计队列满、关闭后的写入不算”。计时断言一律用 `std::chrono::milliseconds` 比较，不用 `steady_clock::count()` 直接比常量——MSVC 的 period 是 100ns，`50'000'000` 实际是 5 秒，测不出 2 秒阻塞回归。
 
-阶段 4 的指标/准入层补三组用例：
+阶段 4 的指标/准入/资源层补四组用例：
 
 - `tests/unit/metrics_test.cc`（9 例）：`MetricId` 表与 KPI 冻结名、8 线程分片累加不丢、gauge 覆盖、标签白名单、sum/count、每个 family 唯一 TYPE/HELP、snapshot、reset 语义。
 - `tests/contract/admission_test.cc`（2 例）：预算 `max_concurrency + queue_capacity` 的突发拒绝只计一次；预留兑现后 `accepting()` 恢复且不重复拒绝。
-- `tests/integration/test_server_metrics.py` / `test_server_admission.py`：进程级校验 TYPE/HELP 与 KPI 计数一致；8 并发打满预算 3 时回 3×200 + 5×429，429 带 `Retry-After: 1`，退避后重试 200。
+- `tests/unit/resource_test.cc`（5 例，4-G0-3）：无 GPU 依赖也能拿到正 RSS；20 次采样峰值只增不减；VRAM known/unknown 时 `vram_mib`/`vram_peak_mib`/`vram_probe_ok` 三者自洽（unknown 必须 NaN + 0）；`start`/`stop` 幂等；未显式 stop 析构也安全。`tests/tools/test_peak_sampler.py` 用真实子进程验证 `scripts/bench/peak_sampler.py` 的 CSV 五列与未知 pid 失败码。
+- `tests/integration/test_server_metrics.py` / `test_server_admission.py`：进程级校验 TYPE/HELP 与 KPI 计数一致（含 K-8 RSS>0、峰值不低于当前值、VRAM unknown 语义）；8 并发打满预算 3 时回 3×200 + 5×429，429 带 `Retry-After: 1`，退避后重试 200。
+
+`tests/unit/runner_raii_test.cc`（4-G0-7）只在 `LLMOPT_ENABLE_LLAMA=ON` 时登记：反复构造/析构、非法模型两次 load 后 release、以及 `LLMOPT_TEST_MODEL` 提供真模型时的 load→tokenize→release→reload；在 WSL ASan 构建跑 `ctest -R runner_raii`，用于证明 C 句柄无泄漏。
 
 准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
 
