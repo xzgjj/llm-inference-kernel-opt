@@ -25,6 +25,7 @@ add_library(llmopt_core STATIC
     src/protocol.cpp
     src/config.cpp
     src/kv.cpp
+    src/preempt.cpp
     src/scheduler.cpp
     src/sink.cpp
     src/metrics.cpp

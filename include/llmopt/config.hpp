@@ -18,6 +18,10 @@ struct ServerConfig {
     std::int32_t max_concurrency = 8;
     std::int32_t max_num_batched_tokens = 2048;
     std::int32_t chunk_size = 128;
+    bool fairness_aging = false;
+    std::int32_t aging_threshold_ms = 30000;
+    std::int32_t max_consecutive_preemptions = 3;
+    std::string preempt_trace_path;
     std::int32_t queue_capacity = 32;
     std::int32_t block_tokens = 16;
     double watermark_ratio = 0.05;

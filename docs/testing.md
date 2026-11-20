@@ -134,6 +134,15 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 
 阶段 3 的切块行为由三层用例锁定：`tests/unit/scheduler/chunk_planner_test.cc` 锁 128/128/64、预算截断与批次构成快照（5 例）；`tests/contract/continuous_batch_test.cc` 锁“切块输出与整段 prefill 逐 token 一致”“decode 保位混批”“chunk 宽大于预算跨 tick”“中途取消 Aborted”（14 例中含 4 例切块）；`tests/integration/test_server_chunked.py` 锁进程级 SSE 一致、`budget < ctx` 可推进与 7 个指标键真实存在。`unit_config` 另覆盖四档/非法值/CLI 覆盖 env、预算等于并发与小于 ctx 两组边界。真实后端另用 `scripts/bench/verify_chunk.py` 在 CPU/GPU 两档复核同一 token 序列，结果见 `docs/阶段3-1-实现记录.md`。
 
+阶段 3 的抢占/恢复/生命周期再补四组用例：
+
+- `tests/unit/scheduler/cost_model_test.cc`（6 例）：`context_tokens` 的“末 token 未写回”口径、fcfs_tail 选最晚准入、aging 豁免、weighted 打分、recompute/swap 代价未标定返回 -1、`choose` 回落 recompute、四态迁移合法性。
+- `tests/contract/preempt_test.cc`（3 例）：基线档零抢占；压力档每次抢占写 trace，断言 victim/`free_before`/`need_blocks`/释放块数/重算 token/`recompute` 路径与代价；连续 cap 后请求以 `Error` 终止且块全归还。
+- `tests/contract/state_test.cc`（2 例）：recompute 恢复后的输出与无抢占基线逐 token 一致、长度不超 `max_tokens`、stale completion 不重复计进度。
+- `tests/contract/lifecycle_test.cc`（5 例）：断连 `abort()` 后下一步 `Aborted` 并归还块；排队请求取消不占块；超上下文请求以 `Error` 终止且不留在等待队列；生成达到 `max_tokens` 后按长度收尾并归还块；压力抢占后关停无悬挂序列、无泄漏块（`check_invariants`）。
+
+`unit_config` 同时覆盖 `--fairness-aging` 无值开关、`--aging-threshold-ms` / `--max-consecutive-preemptions` / `--preempt-trace` 的 CLI/env 覆盖与范围校验。调度不变量“抢占只在组批前、已组批序列不得成为 victim、被抢占组不得反向抢占”由 `preempt_test` / `state_test` / `lifecycle_test` 共同锁定。阶段 3 的完整证据链与三次 review 见 `docs/阶段3-实现记录.md`。
+
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。
 
 ## 8 维护

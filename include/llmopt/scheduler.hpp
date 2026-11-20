@@ -9,10 +9,12 @@
 #include "llmopt/runner.hpp"
 #include "llmopt/sink.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -28,6 +30,12 @@ struct SchedulerConfig {
     bool enable_prefix_cache = true;
     // 单步 prefill 宽度；生产值限定 {32,64,128,256}，用例可传更小值。
     std::int32_t chunk_size = 128;
+    // 公平性：默认关闭老化，只观测；阈值仅在 aging_enabled 时生效。
+    bool fairness_aging_enabled = false;
+    std::int64_t aging_threshold_ns = 30'000'000'000LL;
+    std::int32_t max_consecutive_preemptions = 3;
+    // 预留：抢占事件 CSV；空串表示不落盘。
+    std::string preempt_trace_path{};
 };
 
 // Chunked prefill 切块结果：n_tokens 为本步可算 token 数，is_last 标记末块需采样。
@@ -79,7 +87,109 @@ struct SequenceGroup {
     bool prefix_applied = false;
     // 半个 UTF-8 字符先攒在这里，完整后再下发，避免 JSON 编码异常。
     std::string utf8_pending;
+    // 抢占与公平性观测；admit_order 越大越新，对应 fcfs_tail。
+    std::int64_t admit_order = 0;
+    std::int32_t consecutive_preemptions = 0;
+    std::int32_t preemptions_total = 0;
+    bool recompute_active = false;
+    // 准入时已按预算预留的首个 prefill 切片；append_running 直接消费，避免重复扣预算。
+    bool has_reserved_slice = false;
+    ChunkSlice reserved_slice;
+    // 本 tick 是否已有步骤进入待提交批；用于阻止抢占已组批的序列。
+    bool scheduled_this_pump = false;
+    std::int64_t last_progress_ns = 0;
+    std::int64_t enqueued_ns = 0;
 };
+
+// 已生成 token 已写入 KV 的长度：prompt 之后只差“最后一个已采样、尚未回填”的 token。
+inline std::int32_t context_tokens(const Sequence& seq) noexcept {
+    return seq.prompt_len + std::max<std::int32_t>(0, seq.num_output - 1);
+}
+
+enum class PreemptTrigger : std::uint8_t { Admission = 0, ChunkPlan = 1 };
+enum class RecoveryPath : std::uint8_t { Recompute = 0, Swap = 1 };
+
+struct FairnessState {
+    std::int64_t now_ns = 0;
+    bool aging_enabled = false;
+    std::int64_t aging_threshold_ns = 30'000'000'000LL;
+    std::int32_t max_consecutive_preemptions = 3;
+};
+
+struct VictimWeights {
+    double priority = 0.0;
+    double progress = 0.0;
+    double blocks = 0.0;
+    double remaining = 0.0;
+};
+
+// fcfs_tail：默认选最晚准入的在跑序列；weighted 权重非零时按打分升序。
+class VictimPolicy {
+public:
+    void configure(VictimWeights weights) noexcept;
+    [[nodiscard]] std::vector<RequestId> select(const std::vector<SequenceGroup*>& groups,
+                                                const FairnessState& fairness,
+                                                std::int32_t* aging_exempt = nullptr) const;
+
+private:
+    VictimWeights weights_;
+};
+
+struct PreemptDecision {
+    std::vector<RequestId> victims;
+    // 与 victims 一一对应；共享块未归零时单个 victim 释放数可能小于块表长度。
+    std::vector<std::int32_t> released_per_victim;
+    std::int32_t blocks_released = 0;
+    // 被老化规则豁免、未参与本次 victim 竞争的组数（仅观测）。
+    std::int32_t aging_exempt = 0;
+    bool retry_ok = false;
+};
+
+struct PreemptEvent {
+    std::int64_t ts_ns = 0;
+    PreemptTrigger trigger = PreemptTrigger::Admission;
+    RequestId victim;
+    std::int32_t free_before = 0;
+    std::int32_t need_blocks = 0;
+    std::int32_t blocks_released = 0;
+    std::int32_t recompute_tokens = 0;
+    RecoveryPath path = RecoveryPath::Recompute;
+    double cost_ms = -1.0;
+    bool cap_error = false;
+};
+
+// 抢占事件 CSV：字段固定，便于压力档回放与证据归档。
+class PreemptTrace {
+public:
+    explicit PreemptTrace(const std::string& path);
+    void record(const PreemptEvent& event);
+
+private:
+    std::ofstream file_;
+    bool header_written_ = false;
+};
+
+// 纯代价模型：本机系数未标定时返回 -1，调用方不得据此选 swap。
+class CostModel {
+public:
+    explicit CostModel(double recompute_ms_per_token = 0.0,
+                       double swap_bytes_per_ms = 0.0) noexcept;
+    [[nodiscard]] std::int32_t recompute_tokens(const SequenceGroup& group) const noexcept;
+    [[nodiscard]] double recompute_ms(std::int32_t tokens) const noexcept;
+    [[nodiscard]] std::int64_t swap_bytes(std::int32_t blocks,
+                                          std::int32_t cap_tokens) const noexcept;
+    [[nodiscard]] double swap_ms(std::int32_t blocks, std::int32_t cap_tokens) const noexcept;
+    [[nodiscard]] RecoveryPath choose(bool swap_enabled, double margin) const noexcept;
+
+private:
+    double recompute_ms_per_token_;
+    double swap_bytes_per_ms_;
+};
+
+// 组批前试算：只释放块，不碰序列状态；调用方随后 release/重置/回队首。
+PreemptDecision try_preempt(const std::vector<SequenceGroup*>& groups, std::int32_t need_blocks,
+                            KVBlockManager& kv, const VictimPolicy& policy,
+                            const FairnessState& fairness);
 
 enum class EventKind : std::uint8_t { AddRequest, Cancel, Completion, Shutdown };
 
@@ -154,21 +264,31 @@ private:
 
     void handle(Event& event);
     void pump();
+    void preempt_for_waiting();
+    void admit_waiting(TokenBudget& budget);
+    bool submit_scheduled(Batch& batch, std::chrono::steady_clock::time_point started);
     void publish_kv_usage();
     void record_schedule_step(std::chrono::steady_clock::time_point started, std::int32_t steps,
                               std::int32_t tokens, const Batch& batch);
     bool admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget);
+    std::int32_t apply_prefix_hit(const std::shared_ptr<SequenceGroup>& group);
+    bool acquire_blocks(const std::shared_ptr<SequenceGroup>& group, std::int32_t total_tokens,
+                        std::int32_t hit_tokens);
     bool append_decode(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
-                       TokenBudget& budget) const;
+                       TokenBudget& budget);
     bool append_prefill_chunk(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
                               TokenBudget& budget);
-    void append_running(Batch& batch, TokenBudget& budget);
+    void append_decodes(Batch& batch, TokenBudget& budget);
+    void append_prefills(Batch& batch, TokenBudget& budget);
     void apply_completion(const Completion& completion);
     void advance_chunk(const std::shared_ptr<SequenceGroup>& group, const Completion& completion);
     void conclude_step(bool batch_done);
     DeliverResult deliver(const std::shared_ptr<SequenceGroup>& group, const SampledToken& token);
     void finish(const std::shared_ptr<SequenceGroup>& group, FinishReason reason,
                 bool final_frame_pushed = false);
+    void apply_preemption(const PreemptDecision& decision, PreemptTrigger trigger,
+                          std::int32_t free_before, std::int32_t need_blocks);
+    std::vector<SequenceGroup*> running_ptrs() const;
     void reap_donors();
     void reconcile(const Sequence& seq);
     std::shared_ptr<SequenceGroup> find_running(const RequestId& req_id) const;
@@ -179,6 +299,11 @@ private:
     MetricsRegistry& metrics_;
     SchedulerConfig config_;
     ChunkPlanner planner_;
+    VictimPolicy victim_policy_;
+    CostModel cost_model_;
+    FairnessState fairness_;
+    std::unique_ptr<PreemptTrace> trace_;
+    std::int64_t admit_seq_ = 0;
     SchedulerMailbox mailbox_;
     StepExecutor executor_;
     std::deque<std::shared_ptr<SequenceGroup>> waiting_;
@@ -186,6 +311,8 @@ private:
     std::vector<std::int32_t> pending_serials_;
     std::int32_t pending_remaining_ = 0;
     bool pending_step_ = false;
+    bool pumping_ = false;
+    bool preempted_this_pump_ = false;
     bool shutting_down_ = false;
     std::vector<std::int64_t> schedule_samples_;
     std::size_t schedule_pos_ = 0;

@@ -35,7 +35,9 @@ void clear_env() {
           "LLMOPT_MAX_CONCURRENCY", "LLMOPT_MODE", "LLMOPT_BACKEND", "LLMOPT_SAFETY_RATIO",
           "LLMOPT_ALLOW_STUB", "LLMOPT_ALLOW_FORCE_ON", "LLMOPT_MAX_NUM_BATCHED_TOKENS",
           "LLMOPT_QUEUE_CAPACITY", "LLMOPT_BLOCK_SIZE", "LLMOPT_WATERMARK_RATIO",
-          "LLMOPT_CHUNK_SIZE", "LLMOPT_DISABLE_PREFIX_CACHE"}) {
+          "LLMOPT_CHUNK_SIZE", "LLMOPT_DISABLE_PREFIX_CACHE", "LLMOPT_FAIRNESS_AGING",
+          "LLMOPT_AGING_THRESHOLD_MS", "LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS",
+          "LLMOPT_PREEMPT_TRACE"}) {
         set_env(key, "");
     }
 }
@@ -208,6 +210,50 @@ TEST_CASE("预算等于并发数可启动，低于并发数拒绝") {
                cfg, message) == ErrCode::Ok);
     CHECK(load({"--model", "m.gguf", "--max-concurrency", "8", "--max-num-batched-tokens", "7"},
                cfg, message) == ErrCode::InvalidJson);
+}
+
+TEST_CASE("阶段 3 抢占与公平性参数：无值开关、env 与范围校验") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK_FALSE(cfg.fairness_aging);
+    CHECK(cfg.aging_threshold_ms == 30000);
+    CHECK(cfg.max_consecutive_preemptions == 3);
+    CHECK(cfg.preempt_trace_path.empty());
+
+    CHECK(load({"--model", "m.gguf", "--fairness-aging", "--aging-threshold-ms", "100",
+                "--max-consecutive-preemptions", "5", "--preempt-trace", "trace.csv"},
+               cfg, message) == ErrCode::Ok);
+    CHECK(cfg.fairness_aging);
+    CHECK(cfg.aging_threshold_ms == 100);
+    CHECK(cfg.max_consecutive_preemptions == 5);
+    CHECK(cfg.preempt_trace_path == "trace.csv");
+
+    set_env("LLMOPT_FAIRNESS_AGING", "1");
+    set_env("LLMOPT_AGING_THRESHOLD_MS", "250");
+    set_env("LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS", "4");
+    set_env("LLMOPT_PREEMPT_TRACE", "env_trace.csv");
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.fairness_aging);
+    CHECK(cfg.aging_threshold_ms == 250);
+    CHECK(cfg.max_consecutive_preemptions == 4);
+    CHECK(cfg.preempt_trace_path == "env_trace.csv");
+    // CLI 覆盖 env。
+    CHECK(load({"--model", "m.gguf", "--aging-threshold-ms", "50",
+                "--max-consecutive-preemptions", "2"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.aging_threshold_ms == 50);
+    CHECK(cfg.max_consecutive_preemptions == 2);
+    clear_env();
+
+    CHECK(load({"--model", "m.gguf", "--aging-threshold-ms", "0"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--aging-threshold-ms", "3600001"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--max-consecutive-preemptions", "0"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--max-consecutive-preemptions", "33"}, cfg, message) ==
+          ErrCode::InvalidJson);
 }
 
 // 回归：llama 纯 CPU 后端没有统一 KV stream，seq_cp 会跨 stream 复制并重置目标

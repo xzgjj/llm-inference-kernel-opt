@@ -35,6 +35,13 @@ MetricsRegistry::MetricsRegistry() {
     values_["llmopt_chunk_prefill_steps_total"] = 0;
     values_["llmopt_chunk_prefill_tokens_total"] = 0;
     values_["llmopt_chunk_deferred_total"] = 0;
+    values_["llmopt_preemptions_total"] = 0;
+    values_["llmopt_preempted_tokens_total"] = 0;
+    values_["llmopt_preempt_recompute_total"] = 0;
+    values_["llmopt_preempt_recovered_total"] = 0;
+    values_["llmopt_preempt_cap_errors_total"] = 0;
+    values_["llmopt_preempt_stalls_total"] = 0;
+    values_["llmopt_aging_exempt_total"] = 0;
     values_["llmopt_prefix_hits_total"] = 0;
     values_["llmopt_prefix_misses_total"] = 0;
     values_["llmopt_prefix_hit_tokens_total"] = 0;

@@ -22,9 +22,14 @@ llmopt_add_doctest(unit_stub_runner "unit;fast;hermetic" SOURCES unit/stub_runne
 llmopt_add_doctest(unit_text "unit;fast;hermetic" SOURCES unit/text_test.cc)
 llmopt_add_doctest(chunk_planner_test "unit;fast;hermetic"
                    SOURCES unit/scheduler/chunk_planner_test.cc)
+llmopt_add_doctest(cost_model_test "unit;fast;hermetic"
+                   SOURCES unit/scheduler/cost_model_test.cc)
 llmopt_add_doctest(contract_scheduler "contract;fast;hermetic" SOURCES contract/scheduler_test.cc)
 llmopt_add_doctest(contract_continuous_batch "contract;fast;hermetic"
                    SOURCES contract/continuous_batch_test.cc)
+llmopt_add_doctest(preempt_test "contract;fast;hermetic" SOURCES contract/preempt_test.cc)
+llmopt_add_doctest(state_test "contract;fast;hermetic" SOURCES contract/state_test.cc)
+llmopt_add_doctest(lifecycle_test "contract;fast;hermetic" SOURCES contract/lifecycle_test.cc)
 
 if(Python3_Interpreter_FOUND)
     add_test(NAME integration_server_smoke

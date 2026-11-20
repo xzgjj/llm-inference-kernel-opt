@@ -315,6 +315,13 @@ std::int32_t KVBlockManager::num_total_blocks() const noexcept {
     return config_.num_blocks;
 }
 
+std::int32_t KVBlockManager::blocks_for_tokens(std::int32_t tokens) const noexcept {
+    if (tokens <= 0) {
+        return 0;
+    }
+    return blocks_for(tokens);
+}
+
 std::int32_t KVBlockManager::block_capacity_tokens() const noexcept {
     return config_.num_blocks * config_.block_tokens;
 }

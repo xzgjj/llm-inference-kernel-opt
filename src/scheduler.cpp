@@ -5,11 +5,18 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 
 namespace llmopt {
 namespace {
 
 std::atomic<std::int32_t> g_seq_id{0};
+
+std::int64_t now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+}
 
 Event make_event(EventKind kind, RequestId id) {
     Event event;
@@ -222,6 +229,9 @@ void StepExecutor::loop() {
 SchedulerCore::SchedulerCore(ModelRunner& runner, KVBlockManager& kv, MetricsRegistry& metrics,
                              SchedulerConfig config)
     : runner_(runner), kv_(kv), metrics_(metrics), config_(config), planner_(config.chunk_size),
+      fairness_{0, config.fairness_aging_enabled, config.aging_threshold_ns,
+                config.max_consecutive_preemptions},
+      trace_(std::make_unique<PreemptTrace>(config.preempt_trace_path)),
       mailbox_(config.queue_capacity), executor_(runner, mailbox_, metrics) {}
 
 SchedulerCore::~SchedulerCore() {
@@ -292,6 +302,8 @@ void SchedulerCore::handle(Event& event) {
     case EventKind::AddRequest: {
         auto group = std::move(event.group);
         metrics_.inc("llmopt_requests_total{status=\"accepted\"}");
+        group->enqueued_ns = now_ns();
+        group->last_progress_ns = group->enqueued_ns;
         if (static_cast<std::int32_t>(waiting_.size()) >= config_.queue_capacity) {
             metrics_.inc("llmopt_admission_rejected_total{reason=\"queue\"}");
             finish(group, FinishReason::Error);
@@ -342,16 +354,41 @@ void SchedulerCore::handle(Event& event) {
     }
 }
 
-void SchedulerCore::pump() {
-    if (pending_step_ || shutting_down_) {
-        return;
+// 组批前的 KV 预检：decode 尚未进批，victim 仍可释放；已被抢占过的候选不再反向抢占。
+void SchedulerCore::preempt_for_waiting() {
+    const std::int32_t slots = std::max<std::int32_t>(
+            0, config_.max_concurrency - static_cast<std::int32_t>(running_.size()));
+    std::vector<std::shared_ptr<SequenceGroup>> candidates;
+    for (const auto& group : waiting_) {
+        if (static_cast<std::int32_t>(candidates.size()) >= slots) {
+            break;
+        }
+        candidates.push_back(group);
     }
-    const auto started = std::chrono::steady_clock::now();
-    // 上一 tick 淘汰的 donor 此刻才能真正释放：本批若还要借前缀，必须等复制完成。
-    reap_donors();
-    Batch batch;
-    TokenBudget budget(config_.max_concurrency, config_.max_num_batched_tokens);
-    append_running(batch, budget);
+    for (const auto& candidate : candidates) {
+        if (candidate->consecutive_preemptions > 0) {
+            continue;
+        }
+        const std::int32_t total_tokens =
+                candidate->seq.prompt_len + candidate->seq.sampling.max_tokens;
+        if (total_tokens > kv_.block_capacity_tokens()) {
+            continue; // 交给准入路径报 ContextOverflow
+        }
+        const std::int32_t need = kv_.blocks_for_tokens(total_tokens) + kv_.watermark_blocks();
+        if (kv_.num_free_blocks() >= need) {
+            continue;
+        }
+        FairnessState fairness = fairness_;
+        fairness.now_ns = now_ns();
+        const std::int32_t free_before = kv_.num_free_blocks();
+        const PreemptDecision decision =
+                try_preempt(running_ptrs(), need, kv_, victim_policy_, fairness);
+        apply_preemption(decision, PreemptTrigger::Admission, free_before, need);
+    }
+}
+
+// 预算内补新请求；跳过本 tick 刚被抢占的 victim，让触发抢占的请求先进入。
+void SchedulerCore::admit_waiting(TokenBudget& budget) {
     while (!waiting_.empty()) {
         if (static_cast<std::int32_t>(running_.size()) >= config_.max_concurrency) {
             break;
@@ -360,33 +397,81 @@ void SchedulerCore::pump() {
             metrics_.inc("llmopt_admission_rejected_total{reason=\"token_budget\"}");
             break;
         }
-        auto group = waiting_.front();
-        if (!admit(group, budget)) {
+        std::size_t index = waiting_.size();
+        for (std::size_t i = 0; i < waiting_.size(); ++i) {
+            if (!(preempted_this_pump_ && waiting_[i]->consecutive_preemptions > 0)) {
+                index = i;
+                break;
+            }
+        }
+        if (index >= waiting_.size()) {
             break;
         }
-        waiting_.pop_front();
+        auto group = waiting_[index];
+        // 先摘出候选：admit 内的抢占会把 victim push_front，不能再用原下标定位。
+        waiting_.erase(waiting_.begin() + static_cast<std::ptrdiff_t>(index));
         metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
-        if (!append_prefill_chunk(batch, group, budget)) {
+        if (!admit(group, budget)) {
+            // 终态组不得塞回队列；仍可重试的组按原位置插回。
+            if (group->seq.status != SeqStatus::Finished && !group->admitted) {
+                waiting_.insert(waiting_.begin() + static_cast<std::ptrdiff_t>(index), group);
+            }
+            metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
             break;
         }
     }
+}
+
+// 批次只有在这里才变为 pending；提交失败清掉剩余计数，避免执行线程空等。
+bool SchedulerCore::submit_scheduled(Batch& batch, std::chrono::steady_clock::time_point started) {
     if (batch.steps.empty()) {
-        return;
+        return false;
     }
-    const std::int32_t batch_steps = static_cast<std::int32_t>(batch.steps.size());
-    const std::int32_t batch_tokens = batch.total_tokens;
     pending_serials_.clear();
     for (const SequenceStep& step : batch.steps) {
         pending_serials_.push_back(step.kv.seq_id);
     }
-    pending_remaining_ = batch_steps;
-    record_schedule_step(started, batch_steps, batch_tokens, batch);
-    const bool submitted = executor_.submit(std::move(batch));
-    if (!submitted) {
+    pending_remaining_ = static_cast<std::int32_t>(batch.steps.size());
+    record_schedule_step(started, pending_remaining_, batch.total_tokens, batch);
+    if (!executor_.submit(std::move(batch))) {
         pending_remaining_ = 0;
-        return;
+        return false;
     }
     pending_step_ = true;
+    return true;
+}
+
+void SchedulerCore::pump() {
+    if (pending_step_ || shutting_down_ || pumping_) {
+        return;
+    }
+    struct PumpGuard {
+        bool& flag;
+        explicit PumpGuard(bool& value) : flag(value) {
+            flag = true;
+        }
+        ~PumpGuard() {
+            flag = false;
+        }
+    } guard(pumping_);
+    const auto started = std::chrono::steady_clock::now();
+    // 上一 tick 淘汰的 donor 此刻才能真正释放：本批若还要借前缀，必须等复制完成。
+    reap_donors();
+    Batch batch;
+    TokenBudget budget(config_.max_concurrency, config_.max_num_batched_tokens);
+    preempted_this_pump_ = false;
+    for (const auto& group : running_) {
+        group->has_reserved_slice = false; // 上一 tick 的预留必须已经消费
+        group->scheduled_this_pump = false;
+    }
+    // 1) 预算内先为等待队列做一次 KV 预检；2) decode 保位；3) 准入；4) 补 prefill。
+    preempt_for_waiting();
+    append_decodes(batch, budget);
+    admit_waiting(budget);
+    append_prefills(batch, budget);
+    if (!submit_scheduled(batch, started)) {
+        return;
+    }
     metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
     metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
     publish_kv_usage();
@@ -435,42 +520,77 @@ void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point s
                  sorted.empty() ? 0 : sorted[static_cast<std::size_t>(index)]);
 }
 
-bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget) {
+// 前缀命中优先用块表 donor；后端支持 live prefix 时再找在飞序列。返回命中 token 数。
+std::int32_t SchedulerCore::apply_prefix_hit(const std::shared_ptr<SequenceGroup>& group) {
     Sequence& seq = group->seq;
-    std::int32_t hit_tokens = 0;
-    if (config_.enable_prefix_cache && seq.num_computed == 0) {
-        const PrefixHit hit = kv_.lookup_prefix(seq);
-        RequestId donor = hit.donor;
-        if (donor.empty() && hit.hit_tokens > 0 && runner_.supports_live_prefix()) {
-            donor = find_live_donor(hit);
+    if (!config_.enable_prefix_cache || seq.num_computed != 0 || group->recompute_active) {
+        return 0;
+    }
+    const PrefixHit hit = kv_.lookup_prefix(seq);
+    RequestId donor = hit.donor;
+    if (donor.empty() && hit.hit_tokens > 0 && runner_.supports_live_prefix()) {
+        donor = find_live_donor(hit);
+    }
+    if (hit.hit_tokens > 0 && !donor.empty()) {
+        const std::int32_t hit_tokens = kv_.attach_prefix(seq, hit);
+        if (hit_tokens > 0) {
+            seq.num_computed = hit_tokens;
+            group->prefix_source = donor;
+            group->prefix_tokens = hit_tokens;
+            metrics_.inc("llmopt_prefix_hits_total");
+            metrics_.inc("llmopt_prefix_hit_tokens_total", hit_tokens);
         }
-        if (hit.hit_tokens > 0 && !donor.empty()) {
-            hit_tokens = kv_.attach_prefix(seq, hit);
-            if (hit_tokens > 0) {
-                seq.num_computed = hit_tokens;
-                group->prefix_source = donor;
-                group->prefix_tokens = hit_tokens;
-                metrics_.inc("llmopt_prefix_hits_total");
-                metrics_.inc("llmopt_prefix_hit_tokens_total", hit_tokens);
-            }
+        return hit_tokens;
+    }
+    metrics_.inc("llmopt_prefix_misses_total");
+    return 0;
+}
+
+// 按全序列长度取块；不足时在组批前选 victim 重试。终态由调用方决定是否 finish。
+bool SchedulerCore::acquire_blocks(const std::shared_ptr<SequenceGroup>& group,
+                                   std::int32_t total_tokens, std::int32_t hit_tokens) {
+    Sequence& seq = group->seq;
+    AllocResult alloc = kv_.acquire(seq, total_tokens, 0, true);
+    if (!alloc.ok() && hit_tokens > 0) {
+        kv_.free(seq);
+        seq.num_computed = 0;
+        group->prefix_source.clear();
+        group->prefix_tokens = 0;
+    }
+    if (!alloc.ok() &&
+        (alloc.reason == AllocFailReason::NoFreeBlock ||
+         alloc.reason == AllocFailReason::BelowWatermark) &&
+        !running_.empty() && group->consecutive_preemptions == 0) {
+        // 组批前试算：先释放 donor，再按 fcfs_tail 选 victim；不动候选块表。
+        const std::int32_t need = kv_.blocks_for_tokens(total_tokens) + kv_.watermark_blocks();
+        const std::int32_t free_before = kv_.num_free_blocks();
+        FairnessState fairness = fairness_;
+        fairness.now_ns = now_ns();
+        const PreemptDecision decision =
+                try_preempt(running_ptrs(), need, kv_, victim_policy_, fairness);
+        apply_preemption(decision, PreemptTrigger::Admission, free_before, need);
+        if (decision.retry_ok) {
+            alloc = kv_.acquire(seq, total_tokens, 0, true);
         } else {
-            metrics_.inc("llmopt_prefix_misses_total");
+            metrics_.inc("llmopt_preempt_stalls_total");
         }
     }
+    if (alloc.ok()) {
+        return true;
+    }
+    metrics_.inc(std::string("llmopt_admission_rejected_total{reason=\"") +
+                 alloc_reason_name(alloc.reason) + "\"}");
+    if (alloc.reason == AllocFailReason::ContextOverflow) {
+        finish(group, FinishReason::Error);
+    }
+    return false;
+}
+
+bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget) {
+    Sequence& seq = group->seq;
+    const std::int32_t hit_tokens = apply_prefix_hit(group);
     const std::int32_t total_tokens = seq.prompt_len + seq.sampling.max_tokens;
-    const AllocResult alloc = kv_.acquire(seq, total_tokens, 0, true);
-    if (!alloc.ok()) {
-        if (hit_tokens > 0) {
-            kv_.free(seq);
-            seq.num_computed = 0;
-            group->prefix_source.clear();
-            group->prefix_tokens = 0;
-        }
-        metrics_.inc(std::string("llmopt_admission_rejected_total{reason=\"") +
-                     alloc_reason_name(alloc.reason) + "\"}");
-        if (alloc.reason == AllocFailReason::ContextOverflow) {
-            finish(group, FinishReason::Error);
-        }
+    if (!acquire_blocks(group, total_tokens, hit_tokens)) {
         return false;
     }
     if (runner_.add_sequence(seq) != ErrCode::Ok) {
@@ -478,19 +598,107 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
         finish(group, FinishReason::Error);
         return false;
     }
+    const ChunkSlice slice =
+            planner_.next(context_tokens(seq), seq.num_computed, budget.tokens_remain());
+    if (slice.n_tokens <= 0) {
+        metrics_.inc("llmopt_chunk_deferred_total");
+        kv_.free(seq);
+        runner_.release_sequence(group->req_id, 0);
+        finish(group, FinishReason::Error);
+        return false;
+    }
     group->admitted = true;
+    group->admit_order = ++admit_seq_;
+    group->last_progress_ns = now_ns();
+    group->has_reserved_slice = false;
     seq.status = SeqStatus::Running;
     running_.push_back(group);
-    // 序列槽先记账；本步实际 token 由 append_prefill_chunk 按切块结果扣预算。
-    budget.commit(1, 0);
+    // 序列槽与本步首个 chunk 的 token 预算一起记账；append_prefills 消费预留切片。
+    group->reserved_slice = slice;
+    group->has_reserved_slice = true;
+    budget.commit(1, slice.n_tokens);
     return true;
 }
 
+// 被抢请求四步：释放块（try_preempt 已做）→ 清零进度 → Swapped/回队首 → 释放后端槽。
+void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTrigger trigger,
+                                     std::int32_t free_before, std::int32_t need_blocks) {
+    for (std::size_t index = 0; index < decision.victims.size(); ++index) {
+        const RequestId& req_id = decision.victims[index];
+        auto group = find_running(req_id);
+        if (!group) {
+            continue;
+        }
+        Sequence& seq = group->seq;
+        const std::int32_t recompute_tokens = context_tokens(seq);
+        runner_.release_sequence(req_id, 0);
+        group->admitted = false;
+        seq.num_computed = 0;
+        seq.id += 1; // 旧 serial 的完成事件一律 stale
+        seq.status = SeqStatus::Swapped;
+        group->prefix_source.clear();
+        group->prefix_tokens = 0;
+        group->prefix_applied = false;
+        group->recompute_active = true;
+        ++group->consecutive_preemptions;
+        ++group->preemptions_total;
+        preempted_this_pump_ = true;
+        running_.erase(std::remove(running_.begin(), running_.end(), group), running_.end());
+
+        const std::int32_t released = index < decision.released_per_victim.size()
+                                              ? decision.released_per_victim[index]
+                                              : 0;
+        const bool cap_error =
+                group->consecutive_preemptions >= config_.max_consecutive_preemptions;
+        PreemptEvent event;
+        event.ts_ns = now_ns();
+        event.trigger = trigger;
+        event.victim = req_id;
+        event.free_before = free_before;
+        event.need_blocks = need_blocks;
+        event.blocks_released = released;
+        event.recompute_tokens = recompute_tokens;
+        event.path = cost_model_.choose(false, 1.0);
+        event.cost_ms = cost_model_.recompute_ms(recompute_tokens);
+        event.cap_error = cap_error;
+        trace_->record(event);
+
+        metrics_.inc("llmopt_preemptions_total");
+        metrics_.inc("llmopt_preempted_tokens_total", recompute_tokens);
+        metrics_.inc("llmopt_preempt_recompute_total");
+        if (cap_error) {
+            metrics_.inc("llmopt_preempt_cap_errors_total");
+            metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+            finish(group, FinishReason::Error);
+            continue;
+        }
+        waiting_.push_front(group);
+        metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+    }
+    metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
+    if (decision.aging_exempt > 0) {
+        metrics_.inc("llmopt_aging_exempt_total", decision.aging_exempt);
+    }
+    publish_kv_usage();
+}
+
+std::vector<SequenceGroup*> SchedulerCore::running_ptrs() const {
+    std::vector<SequenceGroup*> out;
+    out.reserve(running_.size());
+    for (const auto& group : running_) {
+        // 已进入待提交批（decode 或预留 prefill）的序列不能再作为 victim。
+        if (group->has_reserved_slice || group->scheduled_this_pump) {
+            continue;
+        }
+        out.push_back(group.get());
+    }
+    return out;
+}
 // decode 保位：在跑且 prefill 已完成的序列每步固定吃 1 token 预算。
 bool SchedulerCore::append_decode(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
-                                  TokenBudget& budget) const {
+                                  TokenBudget& budget) {
     const Sequence& seq = group->seq;
-    if (seq.num_computed < seq.prompt_len || seq.output_token_ids.empty()) {
+    if (seq.num_computed < context_tokens(seq) || seq.output_token_ids.empty()) {
         return false;
     }
     CachedRequestData data;
@@ -511,6 +719,7 @@ bool SchedulerCore::append_decode(Batch& batch, const std::shared_ptr<SequenceGr
     batch.total_tokens += step.n_tokens;
     batch.steps.push_back(step);
     budget.commit(0, 1);
+    group->scheduled_this_pump = true;
     return true;
 }
 
@@ -518,19 +727,41 @@ bool SchedulerCore::append_decode(Batch& batch, const std::shared_ptr<SequenceGr
 bool SchedulerCore::append_prefill_chunk(Batch& batch, const std::shared_ptr<SequenceGroup>& group,
                                          TokenBudget& budget) {
     Sequence& seq = group->seq;
-    if (seq.num_computed >= seq.prompt_len) {
+    const std::int32_t target = context_tokens(seq);
+    if (seq.num_computed >= target) {
         return false;
     }
-    const ChunkSlice slice =
-            planner_.next(seq.prompt_len, seq.num_computed, budget.tokens_remain());
+    ChunkSlice slice;
+    bool reserved = false;
+    if (group->has_reserved_slice) {
+        slice = group->reserved_slice;
+        group->has_reserved_slice = false;
+        reserved = true;
+    } else {
+        slice = planner_.next(target, seq.num_computed, budget.tokens_remain());
+        if (slice.n_tokens <= 0) {
+            metrics_.inc("llmopt_chunk_deferred_total");
+            return false;
+        }
+        budget.commit(0, slice.n_tokens);
+    }
     if (slice.n_tokens <= 0) {
         metrics_.inc("llmopt_chunk_deferred_total");
         return false;
     }
     NewRequestData data;
     data.req_id = group->req_id;
-    data.prefill_token_ids.assign(seq.prompt_token_ids.begin() + seq.num_computed,
-                                  seq.prompt_token_ids.begin() + seq.num_computed + slice.n_tokens);
+    data.prefill_token_ids.reserve(static_cast<std::size_t>(slice.n_tokens));
+    for (std::int32_t offset = 0; offset < slice.n_tokens; ++offset) {
+        const std::int32_t pos = seq.num_computed + offset;
+        if (pos < seq.prompt_len) {
+            data.prefill_token_ids.push_back(seq.prompt_token_ids[static_cast<std::size_t>(pos)]);
+        } else {
+            // recompute 重放已生成 token（最后一个已采样 token 不回填，留给下一次 decode）。
+            data.prefill_token_ids.push_back(
+                    seq.output_token_ids[static_cast<std::size_t>(pos - seq.prompt_len)]);
+        }
+    }
     data.block_ids = seq.block_table;
     data.sampling = seq.sampling;
     // 前缀只在首个 chunk 借一次，后续 chunk 直接续写同一 KV。
@@ -547,24 +778,35 @@ bool SchedulerCore::append_prefill_chunk(Batch& batch, const std::shared_ptr<Seq
     step.pos_begin = seq.num_computed;
     step.pos_end = seq.num_computed + slice.n_tokens;
     step.n_tokens = slice.n_tokens;
-    step.needs_sampling = slice.is_last;
+    // recompute 已有生成 token 时，末块只回填 KV，不再采样；否则末块产出首 token。
+    step.needs_sampling = slice.is_last && !(group->recompute_active && seq.num_output > 0);
     step.sample_pos = step.pos_end - 1;
     batch.new_reqs.push_back(std::move(data));
     batch.total_tokens += step.n_tokens;
     batch.steps.push_back(step);
-    budget.commit(0, slice.n_tokens);
+    if (!reserved) {
+        budget.commit(0, slice.n_tokens);
+    }
+    group->scheduled_this_pump = true;
     return true;
 }
 
-// 三段组批：先 decode 保位，再续在跑 prefill 的下一 chunk。
-void SchedulerCore::append_running(Batch& batch, TokenBudget& budget) {
+// 第一阶段：decode 保位；已完成 prefill 的序列每步固定吃 1 token 预算。
+void SchedulerCore::append_decodes(Batch& batch, TokenBudget& budget) {
     for (const auto& group : running_) {
-        if (group->seq.num_computed >= group->seq.prompt_len) {
+        if (group->seq.num_computed >= context_tokens(group->seq)) {
             (void)append_decode(batch, group, budget);
         }
     }
+}
+
+// 第三阶段：所有未完成 prefill 的序列（含本 tick 新准入）统一补切块。
+void SchedulerCore::append_prefills(Batch& batch, TokenBudget& budget) {
     for (const auto& group : running_) {
-        if (group->seq.num_computed < group->seq.prompt_len) {
+        if (group->scheduled_this_pump) {
+            continue;
+        }
+        if (group->seq.num_computed < context_tokens(group->seq)) {
             (void)append_prefill_chunk(batch, group, budget);
         }
     }
@@ -628,6 +870,14 @@ void SchedulerCore::advance_chunk(const std::shared_ptr<SequenceGroup>& group,
     }
     kv_.mark_written(seq, seq.num_computed);
     reconcile(seq);
+    group->last_progress_ns = now_ns();
+    if (group->recompute_active && seq.num_computed >= context_tokens(seq)) {
+        group->recompute_active = false;
+        group->consecutive_preemptions = 0;
+        metrics_.inc("llmopt_preempt_recovered_total");
+    } else if (!group->recompute_active) {
+        group->consecutive_preemptions = 0;
+    }
     if (seq.cancel_requested.load() || shutting_down_) {
         finish(group, FinishReason::Aborted);
     }
@@ -672,6 +922,14 @@ void SchedulerCore::apply_completion(const Completion& completion) {
         metrics_.inc("llmopt_prefill_tokens_total", seq.prompt_len - previous);
     }
     reconcile(seq);
+    group->last_progress_ns = now_ns();
+    if (group->recompute_active && seq.num_computed >= context_tokens(seq)) {
+        group->recompute_active = false;
+        group->consecutive_preemptions = 0;
+        metrics_.inc("llmopt_preempt_recovered_total");
+    } else if (!group->recompute_active) {
+        group->consecutive_preemptions = 0;
+    }
     if (deliver(group, completion.sampled.front()) == DeliverResult::Failed) {
         finish(group, FinishReason::Aborted);
     }

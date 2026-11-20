@@ -48,6 +48,8 @@ void print_config(const ServerConfig& cfg) {
               << " ctx=" << cfg.ctx_tokens << " max_concurrency=" << cfg.max_concurrency
               << " batch_tokens=" << cfg.max_num_batched_tokens << " queue=" << cfg.queue_capacity
               << " block=" << cfg.block_tokens << " chunk=" << cfg.chunk_size
+              << " aging=" << (cfg.fairness_aging ? 1 : 0) << " aging_ms=" << cfg.aging_threshold_ms
+              << " preempt_cap=" << cfg.max_consecutive_preemptions
               << " watermark=" << cfg.watermark_ratio
               << " prefix_cache=" << (cfg.enable_prefix_cache ? 1 : 0)
               << " mode=" << gate_mode_name(cfg.mode) << " safety_ratio=" << cfg.safety_ratio
@@ -191,6 +193,11 @@ std::int32_t run(const ServerConfig& cfg) {
     scheduler_cfg.queue_capacity = cfg.queue_capacity;
     scheduler_cfg.enable_prefix_cache = prefix_cache;
     scheduler_cfg.chunk_size = cfg.chunk_size;
+    scheduler_cfg.fairness_aging_enabled = cfg.fairness_aging;
+    scheduler_cfg.aging_threshold_ns =
+            static_cast<std::int64_t>(cfg.aging_threshold_ms) * 1'000'000;
+    scheduler_cfg.max_consecutive_preemptions = cfg.max_consecutive_preemptions;
+    scheduler_cfg.preempt_trace_path = cfg.preempt_trace_path;
     SchedulerCore core(*runner, kv, metrics, scheduler_cfg);
 
     std::thread core_thread([&core] { core.run(); });

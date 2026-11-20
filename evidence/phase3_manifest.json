@@ -1,0 +1,24 @@
+{
+  "phase": "3-G5",
+  "generated_utc": "2026-11-20T11:43:51+00:00",
+  "limit_gib": 4.5,
+  "config": "config: model=/root/llm-src/models/qwen2.5-0.5b-q4.gguf host=127.0.0.1 port=18110 ctx=1024 max_concurrency=4 batch_tokens=256 queue=32 block=16 chunk=128 aging=0 aging_ms=30000 preempt_cap=3 watermark=0.05 prefix_cache=1 mode=off safety_ratio=0.8 backend=llama log_level=info",
+  "budget_estimate": "estimate: model=468MiB kv=48MiB required=516MiB free=4593MiB safety=0.8 decision=ELIGIBLE",
+  "startup_decision": "ELIGIBLE",
+  "peak_rss_bytes": 1069895680,
+  "peak_rss_gib": 0.996,
+  "peak_within_limit": true,
+  "end_rss_bytes": 1069895680,
+  "gpu_estimate": "estimate: model=468MiB kv=96MiB required=564MiB free=4605MiB safety=0.8 decision=ELIGIBLE",
+  "peak_vram_mib": 4095,
+  "peak_vram_scope": "nvidia-smi memory.used 全卡口径（含桌面/WSL 其他占用）",
+  "peak_vram_within_limit": true,
+  "shutdown": "shutdown: kv_used=0 cached=0 free=256 total=256 shared=0 invariants=ok",
+  "over_budget_probe": {
+    "command": "ctx-tokens=131072 max-concurrency=16",
+    "exit_code": 3,
+    "expected_exit_code": 3,
+    "estimate": "estimate: model=468MiB kv=24576MiB required=25044MiB free=4605MiB safety=0.8 decision=BLOCKED",
+    "passed": true
+  }
+}

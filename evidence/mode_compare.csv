@@ -1,0 +1,3 @@
+mode,evidence,requests,prefix_hits,prefix_hit_rate,prefix_hit_tokens,ttft_cold_ms,ttft_warm_ms,ttft_gain_ms,ttft_gain_pct,patch_files,patch_loc_min,maintenance_hours,decision
+collaboration,measured,6,5,0.833,1680,13.89,13.41,0.48,3.45,0,0,0,维持
+autonomous,not_implemented,,,,,,,,,4,120,8.0,不立项

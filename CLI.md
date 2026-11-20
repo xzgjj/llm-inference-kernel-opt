@@ -44,6 +44,10 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 | `--block-size` | `LLMOPT_BLOCK_SIZE` | `16` | 4–128 | KV 逻辑块 token 数，同时决定前缀命中粒度 |
 | `--watermark-ratio` | `LLMOPT_WATERMARK_RATIO` | `0.05` | 0–0.2 | 准入预留的空闲块比例，按块池总量折算 |
 | `--chunk-size` | `LLMOPT_CHUNK_SIZE` | `128` | 仅 `32`/`64`/`128`/`256` | chunked prefill 的单步宽度；末块才采样，中间块只推进 KV |
+| `--fairness-aging` | `LLMOPT_FAIRNESS_AGING` | `false` | 布尔开关，不带值 | 开启等待老化豁免：无进展超阈值的请求不再被选为 victim |
+| `--aging-threshold-ms` | `LLMOPT_AGING_THRESHOLD_MS` | `30000` | 1–3600000 | 老化阈值（毫秒），仅 `--fairness-aging` 开启后生效 |
+| `--max-consecutive-preemptions` | `LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS` | `3` | 1–32 | 同一请求连续被抢占上限；达到即转 `Error`，防饿死 |
+| `--preempt-trace` | `LLMOPT_PREEMPT_TRACE` | 空 | 可写路径 | 每次抢占写一行 CSV：victim/块数/重算 token/路径/代价 |
 | `--disable-prefix-cache` | `LLMOPT_DISABLE_PREFIX_CACHE` | `false` | 布尔开关，不带值 | 关闭满块哈希与前缀复用；后端不支持零拷贝共享时也会自动关闭 |
 | `--mode` | `LLMOPT_MODE` | `off` | `off`/`auto`/`force_on` | 门控三档，见第 5 节 |
 | `--safety-ratio` | `LLMOPT_SAFETY_RATIO` | `0.80` | 0.80–0.85 | 软预算系数 |

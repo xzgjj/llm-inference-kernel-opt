@@ -110,6 +110,9 @@ public:
         for (std::int32_t id : seq.prompt_token_ids) {
             llama_sampler_accept(state.sampler, id);
         }
+        for (std::int32_t id : seq.output_token_ids) {
+            llama_sampler_accept(state.sampler, id);
+        }
         states_[seq.group_id] = state;
         return ErrCode::Ok;
     }

@@ -1,0 +1,200 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="Win32-ninja"
+	tests="17"
+	failures="0"
+	disabled="0"
+	skipped="0"
+	hostname="DESKTOP-GN8DB6B"
+	time="4"
+	timestamp="2026-11-20T19:48:26"
+	>
+	<testcase name="unit_protocol" classname="unit_protocol" time="0.0501149" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  7 |  7 passed | 0 failed | 0 skipped
+[doctest] assertions: 39 | 39 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="unit_config" classname="unit_config" time="0.040512" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  12 |  12 passed | 0 failed | 0 skipped
+[doctest] assertions: 101 | 101 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="unit_kv" classname="unit_kv" time="0.0402615" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases: 10 | 10 passed | 0 failed | 0 skipped
+[doctest] assertions: 70 | 70 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="unit_gate" classname="unit_gate" time="0.0389841" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  5 |  5 passed | 0 failed | 0 skipped
+[doctest] assertions: 16 | 16 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="unit_gguf" classname="unit_gguf" time="0.0424929" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  3 |  3 passed | 0 failed | 0 skipped
+[doctest] assertions: 18 | 18 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="unit_stub_runner" classname="unit_stub_runner" time="0.040865" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  3 |  3 passed | 0 failed | 0 skipped
+[doctest] assertions: 23 | 23 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="unit_text" classname="unit_text" time="0.0379444" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  4 |  4 passed | 0 failed | 0 skipped
+[doctest] assertions: 12 | 12 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="chunk_planner_test" classname="chunk_planner_test" time="0.0469934" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  5 |  5 passed | 0 failed | 0 skipped
+[doctest] assertions: 25 | 25 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="cost_model_test" classname="cost_model_test" time="0.0427302" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;unit"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  6 |  6 passed | 0 failed | 0 skipped
+[doctest] assertions: 24 | 24 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="contract_scheduler" classname="contract_scheduler" time="0.0659858" status="run">
+		<properties>
+			<property name="cmake_labels" value="contract;fast;hermetic"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  9 |  9 passed | 0 failed | 0 skipped
+[doctest] assertions: 78 | 78 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="contract_continuous_batch" classname="contract_continuous_batch" time="0.0572886" status="run">
+		<properties>
+			<property name="cmake_labels" value="contract;fast;hermetic"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  14 |  14 passed | 0 failed | 0 skipped
+[doctest] assertions: 146 | 146 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="preempt_test" classname="preempt_test" time="0.0549658" status="run">
+		<properties>
+			<property name="cmake_labels" value="contract;fast;hermetic"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  3 |  3 passed | 0 failed | 0 skipped
+[doctest] assertions: 29 | 29 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="state_test" classname="state_test" time="0.0631027" status="run">
+		<properties>
+			<property name="cmake_labels" value="contract;fast;hermetic"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  2 |  2 passed | 0 failed | 0 skipped
+[doctest] assertions: 35 | 35 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="lifecycle_test" classname="lifecycle_test" time="0.0526442" status="run">
+		<properties>
+			<property name="cmake_labels" value="contract;fast;hermetic"/>
+		</properties>
+		<system-out>[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  5 |  5 passed | 0 failed | 0 skipped
+[doctest] assertions: 43 | 43 passed | 0 failed |
+[doctest] Status: SUCCESS!
+</system-out>
+	</testcase>
+	<testcase name="integration_server_smoke" classname="integration_server_smoke" time="0.991491" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;integration"/>
+		</properties>
+		<system-out>OK integration_server_smoke
+</system-out>
+	</testcase>
+	<testcase name="integration_server_concurrency" classname="integration_server_concurrency" time="0.771597" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;integration"/>
+		</properties>
+		<system-out>OK integration_server_concurrency
+</system-out>
+	</testcase>
+	<testcase name="integration_server_chunked" classname="integration_server_chunked" time="1.91441" status="run">
+		<properties>
+			<property name="cmake_labels" value="fast;hermetic;integration"/>
+		</properties>
+		<system-out>OK integration_server_chunked
+</system-out>
+	</testcase>
+</testsuite>

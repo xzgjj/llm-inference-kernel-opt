@@ -80,7 +80,8 @@ bool parse_double(const std::string& text, double& out) {
 bool is_sched_key(const std::string& key) {
     return key == "--max-num-batched-tokens" || key == "--queue-capacity" ||
            key == "--block-size" || key == "--watermark-ratio" || key == "--chunk-size" ||
-           key == "--disable-prefix-cache";
+           key == "--aging-threshold-ms" || key == "--max-consecutive-preemptions" ||
+           key == "--preempt-trace" || key == "--disable-prefix-cache" || key == "--fairness-aging";
 }
 
 ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::string& value) {
@@ -89,6 +90,21 @@ ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::st
     }
     if (key == "--chunk-size") {
         return parse_int(value, cfg.chunk_size) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    if (key == "--aging-threshold-ms") {
+        return parse_int(value, cfg.aging_threshold_ms) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    if (key == "--max-consecutive-preemptions") {
+        return parse_int(value, cfg.max_consecutive_preemptions) ? ErrCode::Ok
+                                                                 : ErrCode::InvalidJson;
+    }
+    if (key == "--preempt-trace") {
+        cfg.preempt_trace_path = value;
+        return ErrCode::Ok;
+    }
+    if (key == "--fairness-aging") {
+        cfg.fairness_aging = true;
+        return ErrCode::Ok;
     }
     if (key == "--queue-capacity") {
         return parse_int(value, cfg.queue_capacity) ? ErrCode::Ok : ErrCode::InvalidJson;
@@ -160,6 +176,22 @@ const char* env_string(const char* name, std::string& out) {
     return raw;
 }
 
+// 阶段 3 抢占/公平性 env：与通用调度参数分开，保持 load_env 单函数可读。
+void load_preempt_env(ServerConfig& cfg) {
+    std::int32_t number = 0;
+    if (env_int("LLMOPT_CHUNK_SIZE", number)) {
+        cfg.chunk_size = number;
+    }
+    if (env_int("LLMOPT_AGING_THRESHOLD_MS", number)) {
+        cfg.aging_threshold_ms = number;
+    }
+    if (env_int("LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS", number)) {
+        cfg.max_consecutive_preemptions = number;
+    }
+    (void)env_string("LLMOPT_PREEMPT_TRACE", cfg.preempt_trace_path);
+    (void)env_bool("LLMOPT_FAIRNESS_AGING", cfg.fairness_aging);
+}
+
 ErrCode load_env(ServerConfig& cfg, std::string& message) {
     (void)env_string("LLMOPT_MODEL", cfg.model_path);
     (void)env_string("LLMOPT_HOST", cfg.host);
@@ -178,9 +210,7 @@ ErrCode load_env(ServerConfig& cfg, std::string& message) {
     if (env_int("LLMOPT_MAX_NUM_BATCHED_TOKENS", number)) {
         cfg.max_num_batched_tokens = number;
     }
-    if (env_int("LLMOPT_CHUNK_SIZE", number)) {
-        cfg.chunk_size = number;
-    }
+    load_preempt_env(cfg);
     if (env_int("LLMOPT_QUEUE_CAPACITY", number)) {
         cfg.queue_capacity = number;
     }
@@ -238,6 +268,14 @@ ErrCode validate_sched_config(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.watermark_ratio < 0.0 || cfg.watermark_ratio > 0.2) {
         message = "watermark-ratio 必须在 0.0..0.2";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.aging_threshold_ms < 1 || cfg.aging_threshold_ms > 3'600'000) {
+        message = "aging-threshold-ms 必须在 1..3600000";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.max_consecutive_preemptions < 1 || cfg.max_consecutive_preemptions > 32) {
+        message = "max-consecutive-preemptions 必须在 1..32";
         return ErrCode::InvalidJson;
     }
     return ErrCode::Ok;
@@ -316,7 +354,8 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
         for (int index = 1; index < argc; ++index) {
             const std::string key = argv[index];
             std::string value;
-            const bool needs_value = key != "--allow-force-on" && key != "--disable-prefix-cache";
+            const bool needs_value = key != "--allow-force-on" && key != "--disable-prefix-cache" &&
+                                     key != "--fairness-aging";
             if (needs_value) {
                 if (index + 1 >= argc) {
                     message = "参数 " + key + " 缺少取值";

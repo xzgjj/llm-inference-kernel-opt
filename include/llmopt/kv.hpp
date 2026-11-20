@@ -83,6 +83,7 @@ public:
 
     std::int32_t num_free_blocks() const noexcept;
     std::int32_t num_total_blocks() const noexcept;
+    std::int32_t blocks_for_tokens(std::int32_t tokens) const noexcept;
     std::int32_t block_capacity_tokens() const noexcept;
     std::int32_t watermark_blocks() const noexcept;
     KVUsage usage() const;
