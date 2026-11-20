@@ -1,6 +1,7 @@
 // http_server.cpp — M1 接入层：路由、准入、SSE 写回；handler 只构造值对象入队。
 // 线程归属：socket 写只发生在持连接的 httplib 线程；推理线程只 push 有界帧队列。
 #include "httplib.h"
+#include "llmopt/auth.hpp"
 #include "llmopt/log.hpp"
 #include "llmopt/protocol.hpp"
 #include "llmopt/rate_limit.hpp"
@@ -279,6 +280,13 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
     std::vector<std::string> submitted;
     try {
         ctx->metrics->inc(MetricId::HttpRequests);
+        // D6-2：配置了 api-key 才校验；/healthz、/readyz、/metrics 走独立路由，不受影响。
+        if (!bearer_allowed(request.get_header_value("Authorization"), ctx->config->api_key)) {
+            logger()->warn("http unauthorized path={}", request.path);
+            response.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");
+            send_error(response, make_error(ErrCode::Unauthorized, "缺少或无效的 Bearer token"));
+            return;
+        }
         // 限流先于解析：超额请求既不建 sink 也不占调度预算（C-15）。
         if (ctx->limiter && !ctx->limiter->try_acquire()) {
             ctx->metrics->inc(MetricId::RateLimitedTotal);
@@ -433,7 +441,12 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     server.Post("/v1/chat/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
         inference_handler(ctx, req, res, true);
     });
-    server.Get("/v1/models", [ctx](const httplib::Request&, httplib::Response& res) {
+    server.Get("/v1/models", [ctx](const httplib::Request& req, httplib::Response& res) {
+        if (!bearer_allowed(req.get_header_value("Authorization"), ctx->config->api_key)) {
+            res.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");
+            send_error(res, make_error(ErrCode::Unauthorized, "缺少或无效的 Bearer token"));
+            return;
+        }
         res.set_content(render_models_body(model_id_from_path(ctx->config->model_path)),
                         "application/json");
     });

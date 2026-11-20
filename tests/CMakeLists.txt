@@ -40,6 +40,7 @@ llmopt_add_doctest(unit_sink "unit;fast;hermetic" SOURCES unit/sink_test.cc)
 llmopt_add_doctest(unit_metrics "unit;fast;hermetic" SOURCES unit/metrics_test.cc)
 llmopt_add_doctest(unit_service "unit;fast;hermetic" SOURCES unit/service_test.cc)
 llmopt_add_doctest(unit_rate_limit "unit;fast;hermetic" SOURCES unit/rate_limit_test.cc)
+llmopt_add_doctest(unit_auth "unit;fast;hermetic" SOURCES unit/auth_test.cc)
 llmopt_add_doctest(unit_resource "unit;fast" SOURCES unit/resource_test.cc)
 llmopt_add_doctest(chunk_planner_test "unit;fast;hermetic"
                    SOURCES unit/scheduler/chunk_planner_test.cc)
@@ -98,6 +99,15 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(integration_server_config_sources PROPERTIES
                          LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_config_sources PROPERTIES TIMEOUT 120)
+
+    # D6-2：配置 api-key 后 /v1/** 必须 Bearer；探针与 /metrics 开放。
+    add_test(NAME auth_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_auth.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(auth_test PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(auth_test PROPERTIES TIMEOUT 120)
 
     # 6-G4：令牌桶超额 429 + Retry-After，回填后恢复。
     add_test(NAME backpressure_test

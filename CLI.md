@@ -171,6 +171,9 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | `UnsupportedField` | 400 | `unsupported_field` | 否 |
 | `Unavailable` | 503 | `SERVICE_UNAVAILABLE` | 是 |
 | `RateLimited` | 429 | `RATE_LIMITED` | 是 |
+| `Unauthorized` | 401 | `UNAUTHORIZED` | 否 |
+
+鉴权语义（D6-2，默认关）：配置 `--api-key` 后，`/v1/completions`、`/v1/chat/completions`、`/v1/models` 必须带 `Authorization: Bearer <api-key>`；缺失或错误回 401 `UNAUTHORIZED` + `WWW-Authenticate: Bearer`。`/healthz`、`/readyz`、`/metrics` 不校验，供探针与 Prometheus 抓取。
 
 限流语义（6-G4）：`--rate-limit-rps > 0` 时先过令牌桶再解析；超额回 429 `RATE_LIMITED` + `Retry-After: 1`，不进队列、不占调度预算，并累加 `llmopt_rate_limited_total`。
 
@@ -229,7 +232,7 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | `LLMOPT_ALLOW_STUB=1` | 允许 stub 后端，供测试与 CI | 未设置即拒绝 |
 | `LLMOPT_LLAMA_ROOT` | CMake 查 llama.cpp 头/库的根 | `/root/llm-src/llama.cpp` |
 
-- 默认只绑 `127.0.0.1`；`--api-key` 只做单 token Bearer 预留（默认关，校验行为待用户确认边界后接入），不做多租户/配额。对外暴露仍建议反向代理承担 TLS 与更强认证。
+- 默认只绑 `127.0.0.1`；`--api-key` 提供单 token Bearer（默认关，空值不校验），不做多租户/配额。对外暴露仍建议反向代理承担 TLS 与更强认证。
 - 请求体上限 4 MB；读超时 5 s；写超时 120 s；单请求非流式排空上限 120 s。
 - 队列容量 32，满即 429；等待中的请求只占分词后的 token 数组，不占 KV。
 

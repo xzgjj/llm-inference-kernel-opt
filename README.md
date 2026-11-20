@@ -42,4 +42,5 @@ Qwen2.5-0.5B
 - 限流：`--rate-limit-rps/--rate-limit-burst` 原子令牌桶，超额 429 + `Retry-After: 1`，不进队列。
 - 指标：全部 family 带 `# TYPE/# HELP`；请求 id 进该请求日志行；`llmopt_rate_limited_total`、`llmopt_drain_timeout_total` 已登记。
 - 部署：`scripts/release/Dockerfile`、`llmopt.service`、`docker_smoke.sh`；`soak.py` 30 min + `.github/workflows/nightly.yml`（TSan 10 轮 / ASan / soak）。说明见 `scripts/release/README.md`。
-- 边界：单 token Bearer（D6-2）仍未启用，待用户确认是否修订 01 §2.3；慢客户端 ≤10% 退化与 sanitizer 结论以 Linux/真后端为准。
+- 鉴权：配置 `--api-key` 后 `/v1/**` 校验 `Authorization: Bearer`，`/healthz`、`/readyz`、`/metrics` 保持开放；默认关。
+- 边界：慢客户端 ≤10% 退化与 sanitizer 结论以 Linux/真后端为准；D6-2 已按用户确认修订 01 §2.3。

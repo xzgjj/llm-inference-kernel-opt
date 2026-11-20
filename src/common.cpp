@@ -11,6 +11,8 @@ int http_status(ErrCode code) noexcept {
     case ErrCode::PromptTooLong:
     case ErrCode::ContextOverflow:
         return 400;
+    case ErrCode::Unauthorized:
+        return 401;
     case ErrCode::ModelNotLoaded:
     case ErrCode::Unavailable:
         return 503;
@@ -66,6 +68,8 @@ const char* error_code_name(ErrCode code) noexcept {
         return "SERVICE_UNAVAILABLE";
     case ErrCode::RateLimited:
         return "RATE_LIMITED";
+    case ErrCode::Unauthorized:
+        return "UNAUTHORIZED";
     }
     return "EXECUTION_FAILED";
 }

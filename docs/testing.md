@@ -214,6 +214,12 @@ CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规
 - `.github/workflows/nightly.yml`（登记名 `sanitizer_nightly`）：TSan 10 轮、ASan/UBSan 一轮、30 min soak；不进 PR 阻塞链路。本机 Windows 不能跑 sanitizer，口径为“脚本与 workflow 已固化，结论以 CI 运行为准”。
 - systemd 模板 `scripts/release/llmopt.service`；部署说明见 `scripts/release/README.md`。
 
+D6-2 的可选 Bearer（用户确认实现，默认关）：
+
+- `tests/unit/auth_test.cc`（`unit_auth`，3 例）：空 token 放行；`Bearer` 前缀、大小写、长度、尾随空格严格匹配；`secure_equals` 长度不同即失败。
+- `tests/integration/test_auth.py`（`auth_test`）：配置 `--api-key secret-token` 后无 header/错误 token 均 401 `UNAUTHORIZED` + `WWW-Authenticate: Bearer`，正确 token 的 chat 200；`/healthz`、`/readyz`、`/metrics` 仍 200，`/v1/models` 无 token 401。
+
+
 
 
 
