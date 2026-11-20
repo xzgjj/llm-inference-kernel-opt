@@ -66,6 +66,8 @@ jobs:
       - name: install clang 18
         if: matrix.compiler == 'clang'
         run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-18 clang-tidy-18
+      # -Wno-error=#warnings：doctest 2.4.11 在 clang 下无条件带 <ciso646>，libstdc++ 15 对该头抛
+      # #warning；只把它降级为告警，其余类别仍是 -Werror。
       - name: configure
         env:
           CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++-18' }}
@@ -73,7 +75,7 @@ jobs:
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Debug
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-          -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"
+          -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror ${{ matrix.compiler == 'clang' && '-Wno-error=#warnings' || '' }}"
       - name: build
         run: cmake --build build --parallel
       - name: clang-tidy
