@@ -1,0 +1,16 @@
+{
+  "1-short": {"pd": "not_triggered", "row": "data_insufficient"},
+  "1-long": {"pd": "not_triggered", "row": "data_insufficient"},
+  "2-short": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "2-long": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "4-short": {"pd": "candidate_pending_chunk", "row": "candidate_pending_chunk"},
+  "4-long": {"pd": "candidate_pending_chunk", "row": "candidate_pending_chunk"},
+  "8-short": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "8-long": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "16-short": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "16-long": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "32-short": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "32-long": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "64-short": {"pd": "data_insufficient", "row": "data_insufficient"},
+  "64-long": {"pd": "data_insufficient", "row": "data_insufficient"}
+}
