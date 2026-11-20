@@ -82,6 +82,27 @@ class TraceAndPercentileTest(unittest.TestCase):
                             encoding="utf-8")
             self.assertIsNone(spec5.load_trace(path))
 
+    def test_bad_trace_field_counts_as_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "steps-p2.jsonl"
+            path.write_text('{"ts_ns":0,"decode_tokens":1}\n'
+                            '{"ts_ns":5000000,"decode_tokens":"x","prefill_tokens":2}\n'
+                            '{"ts_ns":10000000,"decode_tokens":1,"prefill_tokens":2}\n'
+                            '{"ts_ns":15000000,"decode_tokens":1,"prefill_tokens":0}\n'
+                            '{"ts_ns":250000000,"decode_tokens":1,"prefill_tokens":2}\n',
+                            encoding="utf-8")
+            profile = spec5.load_trace(path)
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile["share"], 1.0)
+
+    def test_blank_csv_rows_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.csv"
+            path.write_text(",".join(spec5.REQUIRED_COLUMNS) + "\n\n1,short,ok,30,10,100\n",
+                            encoding="utf-8")
+            rows = spec5.read_csv_rows(path, spec5.REQUIRED_COLUMNS)
+        self.assertEqual(len(rows), 1)
+
 
 class InputValidationTest(unittest.TestCase):
     def test_missing_column_is_fatal(self) -> None:
@@ -152,6 +173,14 @@ class PdCriteriaTest(unittest.TestCase):
             route_ms=0.0, delta_stall_ms=10.0, overlap_ms=0.0))
         self.assertIsNone(missing)
 
+    def test_chunk_gains_require_same_scope_and_valid_rows(self) -> None:
+        baseline = [row(4, "long", itl=100.0)]
+        tuned = [row(4, "long", itl=98.0, status="tier_timeout"),
+                 row(4, "long", itl=95.0, n=29),
+                 row(4, "long", itl=90.0)]
+        gains = spec5.chunk_gains(tuned, baseline)
+        self.assertAlmostEqual(gains[(4, "long")], 0.10)
+
 
 class SpecCriteriaTest(unittest.TestCase):
     def test_missing_draft_measurement_is_insufficient(self) -> None:
@@ -172,6 +201,12 @@ class SpecCriteriaTest(unittest.TestCase):
         self.assertEqual(hit["spec_verdict"], "spec_triggered")
         self.assertEqual(miss["spec_verdict"], "not_triggered")
         self.assertEqual(miss["spec_reason"], "itl_degraded")
+
+    def test_baseline_falls_back_to_matrix_row(self) -> None:
+        result = evaluate(specs={(4, "long"): {"baseline_tok_s": None, "draft_tok_s": 120.0,
+                                               "itl_delta_pct": 3.0}})
+        self.assertEqual(result["spec_verdict"], "spec_triggered")
+        self.assertEqual(result["spec_gain_pct"], "20.000000")
 
     def test_alpha_k_cost_only_estimates_not_evidence(self) -> None:
         # α=0.7、k=4：E[a]=1.7731，除以 (1+c·k)=1.8 得 0.985；仅展示，不构成翻案证据。

@@ -114,7 +114,15 @@ def read_csv_rows(path: Path, required: tuple[str, ...]) -> list[dict[str, str]]
         missing = [name for name in required if name not in header]
         if missing:
             raise DataError(f"{path} 缺少必需列：{','.join(missing)}")
-        return [dict(row) for row in reader if any((v or "").strip() for v in row.values())]
+        return [dict(row) for row in reader if any(str(value or "").strip() for value in row.values())]
+
+
+def _int_field(record: dict[str, Any], name: str) -> int:
+    """JSONL 字段容错：坏值按 0 处理，不让一条脏样本毁掉整档证据。"""
+    try:
+        return int(record.get(name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def load_trace(path: Path) -> dict[str, Any] | None:
@@ -142,13 +150,16 @@ def load_trace(path: Path) -> dict[str, Any] | None:
     mixed: list[bool] = []
     for index in range(1, len(steps)):
         current, previous = steps[index], steps[index - 1]
-        if int(current.get("decode_tokens", 0) or 0) <= 0:
+        if _int_field(current, "decode_tokens") <= 0:
             continue
-        delta = (float(current["ts_ns"]) - float(previous["ts_ns"])) / 1e6
+        try:
+            delta = (float(current["ts_ns"]) - float(previous["ts_ns"])) / 1e6
+        except (TypeError, ValueError, KeyError):
+            continue
         if delta <= 0:
             continue
         intervals.append(delta)
-        mixed.append(int(current.get("prefill_tokens", 0) or 0) > 0)
+        mixed.append(_int_field(current, "prefill_tokens") > 0)
     if len(intervals) < 2:
         return None
     bound = percentile(intervals, 99)
@@ -163,8 +174,9 @@ def load_trace(path: Path) -> dict[str, Any] | None:
     }
 
 
-def chunk_gains(rows: list[dict[str, str]], baseline: list[dict[str, str]]) -> dict[tuple[int, str], float]:
-    """调参后矩阵相对基线的 ITL 改善比例：只接受同 P、同档的十二列报告。"""
+def chunk_gains(rows: list[dict[str, str]], baseline: list[dict[str, str]],
+                min_samples: int = 30) -> dict[tuple[int, str], float]:
+    """调参后矩阵相对基线的 ITL 改善比例：只接受同 P、同档、同口径的十二列报告。"""
     base_map: dict[tuple[int, str], float] = {}
     for row in baseline:
         value = parse_number(row.get("itl_p99_ms"))
@@ -177,11 +189,16 @@ def chunk_gains(rows: list[dict[str, str]], baseline: list[dict[str, str]]) -> d
     gains: dict[tuple[int, str], float] = {}
     for row in rows:
         value = parse_number(row.get("itl_p99_ms"))
+        samples = parse_number(row.get("n_requests"))
         try:
             key = (int(row["concurrency_p"]), str(row["prompt_tier"]))
         except (KeyError, ValueError):
             continue
         before = base_map.get(key)
+        if (row.get("status") or "").strip() != "ok":
+            continue
+        if samples is None or samples < min_samples:
+            continue
         if value is None or not before:
             continue
         gains[key] = (before - value) / before
@@ -326,7 +343,9 @@ def evaluate_row(
     spec = specs.get((concurrency, tier))
     spec_verdict, spec_reason = "data_insufficient", "no_draft_measurement"
     if spec is not None:
-        base, draft = spec.get("baseline_tok_s"), spec.get("draft_tok_s")
+        # 优先用对照行自带的基线吞吐；缺失时回落到同一矩阵行，避免两套基线。
+        base = spec.get("baseline_tok_s") or parse_number(row.get("total_tok_s"))
+        draft = spec.get("draft_tok_s")
         if base and draft is not None and base > 0:
             gain = (draft - base) / base
             out["spec_gain_pct"] = _pct(gain)
@@ -496,7 +515,7 @@ def render_report(rows: list[dict[str, str]], summary: dict[str, Any], meta: dic
         "翻案条件勾选: [{}] PD 不等式成立   [{}] 投机增益 >10% 且 p99 未恶化   [{}] 第二机/双进程成本已评估".format(
             "x" if fired_pd else " ", "x" if fired_spec else " ", " "),
         "",
-        f"遗留: 未触发条目保留 SPEC-5 §1.3 接口草案；判据表见 `{Path(meta['out']) / 'criteria.csv'}`。",
+        f"遗留: 未触发条目保留 SPEC-5 §1.3 接口草案；判据表见 `{meta['out']}/criteria.csv`。",
     ])
     if candidates:
         lines.append(f"候选（不构成翻案）: {len(candidates)} 行；"
@@ -569,7 +588,8 @@ def run(args: argparse.Namespace) -> int:
     out_dir = args.out or (csv_path.parent / "spec5")
     try:
         baseline = read_csv_rows(csv_path, REQUIRED_COLUMNS)
-        gains = chunk_gains(read_csv_rows(args.chunk_csv, REQUIRED_COLUMNS), baseline) if args.chunk_csv else {}
+        gains = chunk_gains(read_csv_rows(args.chunk_csv, REQUIRED_COLUMNS), baseline,
+                            args.min_samples) if args.chunk_csv else {}
         specs = load_spec_rows(args.spec_csv)
     except DataError as exc:
         print(f"[spec5] 输入不可用：{exc}", file=sys.stderr)
