@@ -315,7 +315,6 @@ private:
     bool preempted_this_pump_ = false;
     bool shutting_down_ = false;
     std::vector<std::int64_t> schedule_samples_;
-    std::size_t schedule_pos_ = 0;
     std::int64_t scheduler_ns_total_ = 0;
     std::int64_t scheduler_steps_total_ = 0;
     std::int32_t batch_size_peak_ = 0;
