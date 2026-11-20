@@ -179,10 +179,35 @@ TEST_CASE("chunk-size 只接受四档，预算可小于上下文") {
     std::string message;
     CHECK(load({"--model", "m.gguf", "--ctx-tokens", "4096", "--max-num-batched-tokens", "2048"},
                cfg, message) == ErrCode::Ok);
-    CHECK(load({"--model", "m.gguf", "--chunk-size", "16"}, cfg, message) == ErrCode::InvalidJson);
-    CHECK(load({"--model", "m.gguf", "--chunk-size", "512"}, cfg, message) == ErrCode::InvalidJson);
-    CHECK(load({"--model", "m.gguf", "--chunk-size", "64"}, cfg, message) == ErrCode::Ok);
-    CHECK(cfg.chunk_size == 64);
+    for (const std::int32_t size : {32, 64, 128, 256}) {
+        CHECK(is_valid_chunk_size(size));
+        CHECK(load({"--model", "m.gguf", "--chunk-size", std::to_string(size)}, cfg, message) ==
+              ErrCode::Ok);
+        CHECK(cfg.chunk_size == size);
+    }
+    for (const std::int32_t size : {0, 16, 48, 512, -1}) {
+        CHECK_FALSE(is_valid_chunk_size(size));
+        CHECK(load({"--model", "m.gguf", "--chunk-size", std::to_string(size)}, cfg, message) ==
+              ErrCode::InvalidJson);
+    }
+    // CLI 覆盖 env；env 单独生效时同样走四档校验。
+    set_env("LLMOPT_CHUNK_SIZE", "32");
+    CHECK(load({"--model", "m.gguf", "--chunk-size", "256"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.chunk_size == 256);
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.chunk_size == 32);
+    clear_env();
+}
+
+TEST_CASE("预算等于并发数可启动，低于并发数拒绝") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf", "--max-concurrency", "8", "--max-num-batched-tokens", "8",
+                "--ctx-tokens", "2048"},
+               cfg, message) == ErrCode::Ok);
+    CHECK(load({"--model", "m.gguf", "--max-concurrency", "8", "--max-num-batched-tokens", "7"},
+               cfg, message) == ErrCode::InvalidJson);
 }
 
 // 回归：llama 纯 CPU 后端没有统一 KV stream，seq_cp 会跨 stream 复制并重置目标

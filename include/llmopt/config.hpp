@@ -34,6 +34,8 @@ struct ServerConfig {
 // 返回 Ok 或用例错误；message 带具体参数名，main 负责映射退出码。
 ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& message) noexcept;
 bool parse_gate_mode(const std::string& text, GateMode& out) noexcept;
+// chunk 宽度只允许 32/64/128/256；CLI、env 与调度配置共用同一判定。
+bool is_valid_chunk_size(std::int32_t value) noexcept;
 // 前缀复用只有在后端确认能零拷贝共享 KV 时才启用；请求开启但后端不支持时降级为关闭。
 bool effective_prefix_cache(bool requested, bool backend_supports) noexcept;
 const char* server_backend_env();

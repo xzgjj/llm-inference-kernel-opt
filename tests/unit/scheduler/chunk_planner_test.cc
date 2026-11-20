@@ -49,3 +49,24 @@ TEST_CASE("短 prompt 一步即末块，非法宽度收敛为 1") {
     CHECK(bad.chunk_size() == 1);
     CHECK(bad.next(4, 0, 4).n_tokens == 1);
 }
+
+TEST_CASE("批次构成快照按 phase 区分 prefill 与 decode") {
+    Batch batch;
+    SequenceStep prefill;
+    prefill.phase = Phase::PrefillChunk;
+    prefill.n_tokens = 7;
+    SequenceStep last;
+    last.phase = Phase::PrefillLast;
+    last.n_tokens = 3;
+    SequenceStep decode;
+    decode.phase = Phase::Decode;
+    decode.n_tokens = 1;
+    batch.steps = {prefill, last, decode};
+    batch.total_tokens = 11;
+    const BatchComposition composition = batch_composition(batch);
+    CHECK(composition.prefill_tokens == 10);
+    CHECK(composition.decode_tokens == 1);
+    CHECK(composition.prefill_seqs == 2);
+    CHECK(composition.decode_seqs == 1);
+    CHECK(composition.steps() == 3);
+}

@@ -224,8 +224,7 @@ ErrCode validate_sched_config(const ServerConfig& cfg, std::string& message) {
         return ErrCode::InvalidJson;
     }
     // chunked prefill 后允许 token 预算小于 ctx；预算仍必须至少容纳一个并发槽。
-    if (cfg.chunk_size != 32 && cfg.chunk_size != 64 && cfg.chunk_size != 128 &&
-        cfg.chunk_size != 256) {
+    if (!is_valid_chunk_size(cfg.chunk_size)) {
         message = "chunk-size 只接受 32/64/128/256";
         return ErrCode::InvalidJson;
     }
@@ -283,6 +282,10 @@ ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
 }
 
 } // namespace
+
+bool is_valid_chunk_size(std::int32_t value) noexcept {
+    return value == 32 || value == 64 || value == 128 || value == 256;
+}
 
 bool parse_gate_mode(const std::string& text, GateMode& out) noexcept {
     if (text == "off") {

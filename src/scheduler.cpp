@@ -56,6 +56,20 @@ std::int32_t ChunkPlanner::chunk_size() const noexcept {
     return chunk_size_;
 }
 
+BatchComposition batch_composition(const Batch& batch) noexcept {
+    BatchComposition composition;
+    for (const SequenceStep& step : batch.steps) {
+        if (step.phase == Phase::Decode) {
+            composition.decode_tokens += step.n_tokens;
+            ++composition.decode_seqs;
+        } else {
+            composition.prefill_tokens += step.n_tokens;
+            ++composition.prefill_seqs;
+        }
+    }
+    return composition;
+}
+
 TokenBudget::TokenBudget(std::int32_t max_seqs, std::int32_t max_tokens) noexcept
     : max_seqs_(max_seqs), max_tokens_(max_tokens) {}
 
@@ -392,19 +406,7 @@ void SchedulerCore::publish_kv_usage() {
 void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point started,
                                          std::int32_t steps, std::int32_t tokens,
                                          const Batch& batch) {
-    std::int32_t prefill_tokens = 0;
-    std::int32_t decode_tokens = 0;
-    std::int32_t prefill_seqs = 0;
-    std::int32_t decode_seqs = 0;
-    for (const SequenceStep& step : batch.steps) {
-        if (step.phase == Phase::Decode) {
-            decode_tokens += step.n_tokens;
-            ++decode_seqs;
-        } else {
-            prefill_tokens += step.n_tokens;
-            ++prefill_seqs;
-        }
-    }
+    const BatchComposition composition = batch_composition(batch);
     const std::int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     std::chrono::steady_clock::now() - started)
                                     .count();
@@ -422,10 +424,10 @@ void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point s
     metrics_.set("llmopt_batch_size_peak", batch_size_peak_);
     metrics_.set("llmopt_batch_tokens_last", tokens);
     metrics_.set("llmopt_batch_tokens_peak", batch_tokens_peak_);
-    metrics_.set("llmopt_batch_prefill_tokens_last", prefill_tokens);
-    metrics_.set("llmopt_batch_decode_tokens_last", decode_tokens);
-    metrics_.set("llmopt_batch_prefill_seqs_last", prefill_seqs);
-    metrics_.set("llmopt_batch_decode_seqs_last", decode_seqs);
+    metrics_.set("llmopt_batch_prefill_tokens_last", composition.prefill_tokens);
+    metrics_.set("llmopt_batch_decode_tokens_last", composition.decode_tokens);
+    metrics_.set("llmopt_batch_prefill_seqs_last", composition.prefill_seqs);
+    metrics_.set("llmopt_batch_decode_seqs_last", composition.decode_seqs);
     std::vector<std::int64_t> sorted = schedule_samples_;
     std::sort(sorted.begin(), sorted.end());
     const std::size_t index = sorted.empty() ? 0 : (sorted.size() - 1) * 99 / 100;

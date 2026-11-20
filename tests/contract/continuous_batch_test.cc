@@ -345,6 +345,27 @@ TEST_CASE("切块输出与整段 prefill 逐 token 一致") {
     CHECK(chunked.metrics.get("llmopt_kv_reconcile_diffs_total") == 0);
 }
 
+// 3-G1：chunk 宽大于单步预算时按预算截断，跨 tick 推进；只有末块需要采样。
+TEST_CASE("chunk 宽大于预算时按预算截断并跨 tick 推进") {
+    CbHarness harness(1, 8, 64, 0.0, 128);
+    const auto sink = harness.submit("req-chunk-budget", 20, 2, 100);
+    harness.run_until_closed({sink});
+    const std::vector<Batch> batches = harness.runner->batches();
+    REQUIRE(batches.size() == 4);
+    CHECK(batches[0].total_tokens == 8);
+    REQUIRE(batches[0].new_reqs.size() == 1);
+    CHECK(batches[0].new_reqs.front().prefill_token_ids.size() == 8);
+    CHECK_FALSE(batches[0].steps.front().needs_sampling);
+    CHECK_FALSE(batches[1].steps.front().needs_sampling);
+    CHECK(batches[2].steps.front().needs_sampling);
+    CHECK(batches[2].steps.front().n_tokens == 4);
+    CHECK(harness.metrics.get("llmopt_prefill_tokens_total") == 20);
+    CHECK(harness.metrics.get("llmopt_chunk_prefill_steps_total") == 2);
+    CHECK(harness.metrics.get("llmopt_chunk_prefill_tokens_total") == 16);
+    CHECK(drain(sink).size() == 2);
+    harness.shutdown_flush();
+}
+
 // 3-G1 / F-03：在跑 decode 先保位，续 prefill 取下一 chunk，两者同批且总量受预算约束。
 TEST_CASE("长 prompt 切块与在跑 decode 混批，decode 保位") {
     CbHarness harness(2, 256, 256, 0.0, 128);

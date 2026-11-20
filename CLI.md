@@ -1,6 +1,6 @@
 # CLI 与接口契约（阶段 1 冻结版 v1.1 / 阶段 3 chunk-size 补充）
 
-> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，其余不变。对应 SPEC-1（C-01…C-13）与 SPEC-3 F-04。
+> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，2026-11-20 经用户确认纳入冻结契约，其余不变。对应 SPEC-1（C-01…C-13）与 SPEC-3 F-04。
 > 与 SPEC 冲突处已记录在 `implementation-notes.md`。适用进程：`llmopt_server`。`tools/dev.py` 参数命名独立，见第 8 节。
 
 

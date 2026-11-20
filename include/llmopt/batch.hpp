@@ -60,6 +60,19 @@ struct Batch {
     std::int32_t total_tokens = 0;
 };
 
+// 批次构成快照：把 prefill/decode 的 token 与序列数从 steps 中一次抽出，供指标与日志复用。
+struct BatchComposition {
+    std::int32_t prefill_tokens = 0;
+    std::int32_t decode_tokens = 0;
+    std::int32_t prefill_seqs = 0;
+    std::int32_t decode_seqs = 0;
+    [[nodiscard]] std::int32_t steps() const noexcept {
+        return prefill_seqs + decode_seqs;
+    }
+};
+
+[[nodiscard]] BatchComposition batch_composition(const Batch& batch) noexcept;
+
 struct RunnerInput {
     std::vector<std::int32_t> token_ids;
     std::vector<std::int32_t> pos_ids;

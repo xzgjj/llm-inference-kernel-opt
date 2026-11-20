@@ -27,6 +27,11 @@ def check(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
+def has_metric(body: bytes, name: str) -> bool:
+    """确认指标键真的出现在 /metrics，而不是缺省读到 0。"""
+    return any(line.startswith(name + " ") for line in body.decode().splitlines())
+
+
 def stream_tokens(port: int, prompt: str, max_tokens: int = 8) -> list[int]:
     """发 SSE 并返回 token_id 序列；[DONE] 与 finish 帧不计入 token。"""
     status, body = post(port, "/completion",
@@ -89,13 +94,20 @@ def main() -> int:
               "prompt 小于 256 时不应产生中间 chunk")
         check(metric(chunked_metrics, "llmopt_kv_reconcile_diffs_total") == 0,
               "chunked prefill 的 KV 位置对账应零差异")
+        for name in ("llmopt_chunk_prefill_steps_total", "llmopt_chunk_prefill_tokens_total",
+                     "llmopt_chunk_deferred_total", "llmopt_batch_prefill_tokens_last",
+                     "llmopt_batch_decode_tokens_last", "llmopt_batch_prefill_seqs_last",
+                     "llmopt_batch_decode_seqs_last"):
+            check(has_metric(chunked_metrics, name), f"缺少指标键 {name}")
 
         # 阶段 2 的启动限制已放开：prompt 长于单步预算仍能推进，不会队头挂死。
         long_prompt = "budget-" + "y" * 300
         long_tokens, long_metrics = run_case(SERVER, model, env, 64, 128, long_prompt)
         check(len(long_tokens) == 8, f"预算 128 下长 prompt 应完成 8 token，实际 {len(long_tokens)}")
-        check(metric(long_metrics, "llmopt_chunk_deferred_total") >= 0,
-              "chunk 指标应存在")
+        check(metric(long_metrics, "llmopt_chunk_prefill_steps_total") >= 1,
+              "预算 128 下长 prompt 必须产生中间 chunk")
+        check(metric(long_metrics, "llmopt_kv_reconcile_diffs_total") == 0,
+              "长 prompt chunk 的 KV 位置对账应零差异")
         print("OK integration_server_chunked")
     return 0
 
