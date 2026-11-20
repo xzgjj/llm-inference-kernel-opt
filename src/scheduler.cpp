@@ -29,19 +29,18 @@ Event make_event(EventKind kind, RequestId id) {
     return event;
 }
 
-// 供日志/指标使用的简易原因名，避免分支里写字符串字面量。
-const char* alloc_reason_name(AllocFailReason reason) {
+// 准入拒绝原因 → 冻结指标 ID；SequenceTooLong 归入 context_overflow（容量类拒绝）。
+MetricId admission_metric_id(AllocFailReason reason) {
     switch (reason) {
     case AllocFailReason::NoFreeBlock:
-        return "no_free_block";
+        return MetricId::AdmissionNoFreeBlock;
     case AllocFailReason::BelowWatermark:
-        return "below_watermark";
+        return MetricId::AdmissionBelowWatermark;
     case AllocFailReason::ContextOverflow:
-        return "context_overflow";
     case AllocFailReason::SequenceTooLong:
-        return "sequence_too_long";
+        return MetricId::AdmissionContextOverflow;
     default:
-        return "none";
+        return MetricId::Count;
     }
 }
 
@@ -230,7 +229,7 @@ void StepExecutor::loop() {
             output.error = make_error(ErrCode::ExecutionFailed, "执行线程未知异常");
             logger()->error("executor unknown exception");
         }
-        metrics_.inc("llmopt_forward_steps_total");
+        metrics_.inc(MetricId::ForwardSteps);
         // 即使 runner 提前失败也要逐条回投，避免 Core 永久等待 pending。
         // sampled 只按“需要采样”的步骤顺序排列，非末块 chunk 不占位。
         std::size_t sample_index = 0;
@@ -260,7 +259,16 @@ SchedulerCore::SchedulerCore(ModelRunner& runner, KVBlockManager& kv, MetricsReg
       fairness_{0, config.fairness_aging_enabled, config.aging_threshold_ns,
                 config.max_consecutive_preemptions},
       trace_(std::make_unique<PreemptTrace>(config.preempt_trace_path)),
-      mailbox_(config.queue_capacity), executor_(runner, mailbox_, metrics) {}
+      mailbox_(config.max_concurrency + config.queue_capacity),
+      executor_(runner, mailbox_, metrics), started_ns_(now_ns()) {
+    if (!config_.step_trace_path.empty()) {
+        step_trace_.open(config_.step_trace_path, std::ios::out | std::ios::trunc);
+        step_trace_open_ = step_trace_.is_open();
+        if (!step_trace_open_) {
+            logger()->warn("step trace 打不开，已关闭: {}", config_.step_trace_path);
+        }
+    }
+}
 
 SchedulerCore::~SchedulerCore() {
     shutdown();
@@ -268,6 +276,11 @@ SchedulerCore::~SchedulerCore() {
 
 ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> prompt_ids,
                               std::shared_ptr<ResponseSink> sink) {
+    if (!try_reserve_admission()) {
+        metrics_.inc(MetricId::AdmissionQueue);
+        metrics_.inc(MetricId::RequestsQueueFull);
+        return ErrCode::QueueFull;
+    }
     try {
         auto group = std::make_shared<SequenceGroup>();
         group->req_id = req.req_id;
@@ -280,19 +293,25 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         group->seq.prompt_len = static_cast<std::int32_t>(group->prompt_ids.size());
         group->seq.prompt_token_ids = group->prompt_ids;
         group->seq.sampling = group->sampling;
+        group->enqueued_ns = now_ns();
+        group->last_progress_ns = group->enqueued_ns;
         Event event = make_event(EventKind::AddRequest, group->req_id);
         event.group = std::move(group);
         if (!mailbox_.push(std::move(event))) {
-            metrics_.inc("llmopt_requests_total{status=\"queue_full\"}");
+            release_admission();
+            metrics_.inc(MetricId::AdmissionQueue);
+            metrics_.inc(MetricId::RequestsQueueFull);
             return ErrCode::QueueFull;
         }
         return ErrCode::Ok;
     } catch (const std::bad_alloc&) {
-        metrics_.inc("llmopt_requests_total{status=\"error\"}");
+        release_admission();
+        metrics_.inc(MetricId::RequestsError);
         logger()->error("submit 内存分配失败");
         return ErrCode::ResourceInsufficient;
     } catch (const std::exception& exc) {
-        metrics_.inc("llmopt_requests_total{status=\"error\"}");
+        release_admission();
+        metrics_.inc(MetricId::RequestsError);
         logger()->error("submit 异常: {}", exc.what());
         return ErrCode::ExecutionFailed;
     }
@@ -309,21 +328,43 @@ void SchedulerCore::shutdown() noexcept {
 }
 
 bool SchedulerCore::accepting() const noexcept {
-    return waiting_depth_.load(std::memory_order_relaxed) < config_.queue_capacity;
+    const std::int32_t live = running_depth_.load(std::memory_order_relaxed) +
+                              waiting_depth_.load(std::memory_order_relaxed) +
+                              inflight_admissions_.load(std::memory_order_relaxed);
+    return live < admission_capacity();
 }
 
 std::int32_t SchedulerCore::queue_capacity() const noexcept {
     return config_.queue_capacity;
 }
 
+std::int32_t SchedulerCore::admission_capacity() const noexcept {
+    return config_.max_concurrency + config_.queue_capacity;
+}
+
+bool SchedulerCore::try_reserve_admission() noexcept {
+    const std::int32_t live = running_depth_.load(std::memory_order_relaxed) +
+                              waiting_depth_.load(std::memory_order_relaxed) +
+                              inflight_admissions_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    if (live > admission_capacity()) {
+        release_admission();
+        return false;
+    }
+    return true;
+}
+
+void SchedulerCore::release_admission() noexcept {
+    inflight_admissions_.fetch_sub(1, std::memory_order_acq_rel);
+}
+
 // handle 的兜底拒绝单独成函数，避免单函数超出行数闸门（CI-COD-003）。
 void SchedulerCore::reject_over_capacity(const std::shared_ptr<SequenceGroup>& group) {
-    metrics_.inc("llmopt_admission_rejected_total{reason=\"queue\"}");
-    metrics_.inc("llmopt_requests_total{status=\"queue_full\"}");
+    metrics_.inc(MetricId::AdmissionQueue);
+    metrics_.inc(MetricId::RequestsQueueFull);
     finish(group, FinishReason::Error,
            make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
-                      "depth=" + std::to_string(waiting_.size()) +
-                              " cap=" + std::to_string(config_.queue_capacity)));
+                      "depth=" + std::to_string(waiting_.size() + running_.size()) +
+                              " cap=" + std::to_string(admission_capacity())));
 }
 
 void SchedulerCore::run() {
@@ -366,22 +407,30 @@ bool SchedulerCore::run_once(int wait_ms) {
     return true;
 }
 
+// AddRequest 单独成函数：准入预留兑现、队列兜底拒绝与深度镜像都在这里收口。
+void SchedulerCore::handle_add_request(Event& event) {
+    auto group = std::move(event.group);
+    metrics_.inc(MetricId::RequestsAccepted);
+    // 预算按 running+waiting 总量判定；只看 waiting 会在“有空位可立即准入”时误拒。
+    if (static_cast<std::int32_t>(waiting_.size() + running_.size()) >= admission_capacity()) {
+        // 正常情况下入口已按 accepting() 拒绝；这里是 mailbox 与队列之间的兜底。
+        release_admission();
+        reject_over_capacity(group);
+        return;
+    }
+    waiting_.push_back(std::move(group));
+    // 先更新深度镜像再释放预留，避免窗口期内 HTTP 读到偏低的占用而超发。
+    waiting_depth_.store(static_cast<std::int32_t>(waiting_.size()), std::memory_order_relaxed);
+    metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
+    metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
+    release_admission();
+}
+
 void SchedulerCore::handle(Event& event) {
     switch (event.kind) {
-    case EventKind::AddRequest: {
-        auto group = std::move(event.group);
-        metrics_.inc("llmopt_requests_total{status=\"accepted\"}");
-        group->enqueued_ns = now_ns();
-        group->last_progress_ns = group->enqueued_ns;
-        if (static_cast<std::int32_t>(waiting_.size()) >= config_.queue_capacity) {
-            // 正常情况下入口已按 accepting() 拒绝；这里是 mailbox 与队列之间的兜底。
-            reject_over_capacity(group);
-            break;
-        }
-        waiting_.push_back(std::move(group));
-        metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+    case EventKind::AddRequest:
+        handle_add_request(event);
         break;
-    }
     case EventKind::Cancel:
         if (auto running = find_running(event.seq_id)) {
             running->seq.cancel_requested.store(true);
@@ -394,7 +443,10 @@ void SchedulerCore::handle(Event& event) {
             if ((*it)->req_id == event.seq_id) {
                 finish(*it, FinishReason::Aborted);
                 waiting_.erase(it);
-                metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+                waiting_depth_.store(static_cast<std::int32_t>(waiting_.size()),
+                                     std::memory_order_relaxed);
+                metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
+                metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
                 break;
             }
         }
@@ -416,7 +468,9 @@ void SchedulerCore::handle(Event& event) {
             finish(waiting_.front(), FinishReason::Aborted);
             waiting_.pop_front();
         }
-        metrics_.set("llmopt_queue_depth", 0);
+        metrics_.set(MetricId::QueueDepth, 0);
+        metrics_.set(MetricId::RequestsQueued, 0);
+        waiting_depth_.store(0, std::memory_order_relaxed);
         break;
     default:
         break;
@@ -463,7 +517,7 @@ void SchedulerCore::admit_waiting(TokenBudget& budget) {
             break;
         }
         if (budget.tokens_remain() < 1) {
-            metrics_.inc("llmopt_admission_rejected_total{reason=\"token_budget\"}");
+            metrics_.inc(MetricId::AdmissionTokenBudget);
             break;
         }
         std::size_t index = waiting_.size();
@@ -479,13 +533,18 @@ void SchedulerCore::admit_waiting(TokenBudget& budget) {
         auto group = waiting_[index];
         // 先摘出候选：admit 内的抢占会把 victim push_front，不能再用原下标定位。
         waiting_.erase(waiting_.begin() + static_cast<std::ptrdiff_t>(index));
-        metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+        waiting_depth_.store(static_cast<std::int32_t>(waiting_.size()), std::memory_order_relaxed);
+        metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
+        metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
         if (!admit(group, budget)) {
             // 终态组不得塞回队列；仍可重试的组按原位置插回。
             if (group->seq.status != SeqStatus::Finished && !group->admitted) {
                 waiting_.insert(waiting_.begin() + static_cast<std::ptrdiff_t>(index), group);
             }
-            metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+            waiting_depth_.store(static_cast<std::int32_t>(waiting_.size()),
+                                 std::memory_order_relaxed);
+            metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
+            metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
             break;
         }
     }
@@ -541,20 +600,37 @@ void SchedulerCore::pump() {
     if (!submit_scheduled(batch, started)) {
         return;
     }
-    metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
-    metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+    const std::int32_t live = static_cast<std::int32_t>(running_.size());
+    running_peak_ = std::max(running_peak_, live);
+    metrics_.set(MetricId::RunningSequences, live);
+    metrics_.set(MetricId::RequestsRunning, live);
+    metrics_.set(MetricId::RequestsRunningPeak, running_peak_);
+    metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
+    metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
     publish_kv_usage();
 }
 
 // 块表快照统一从这里发布，准入、收尾与关停看到的 used/cached/held 口径一致。
+// 内部碎片按块计：1 - (运行序列所需块 + cached donor 块) / 已占用块；含 max_tokens 预留。
 void SchedulerCore::publish_kv_usage() {
     const KVUsage usage = kv_.usage();
-    metrics_.set("llmopt_kv_used_blocks", usage.used_blocks);
-    metrics_.set("llmopt_kv_cached_blocks", usage.cached_blocks);
-    metrics_.set("llmopt_kv_shared_blocks", usage.shared_blocks);
-    metrics_.set("llmopt_kv_free_blocks", usage.free_blocks);
-    metrics_.set("llmopt_kv_watermark_blocks", usage.watermark_blocks);
-    metrics_.set("llmopt_kv_held_blocks", usage.used_blocks - usage.cached_blocks);
+    metrics_.set(MetricId::KvUsedBlocks, usage.used_blocks);
+    metrics_.set(MetricId::KvCachedBlocks, usage.cached_blocks);
+    metrics_.set(MetricId::KvSharedBlocks, usage.shared_blocks);
+    metrics_.set(MetricId::KvFreeBlocks, usage.free_blocks);
+    metrics_.set(MetricId::KvWatermarkBlocks, usage.watermark_blocks);
+    metrics_.set(MetricId::KvHeldBlocks, usage.used_blocks - usage.cached_blocks);
+    std::int32_t needed_blocks = usage.cached_blocks;
+    for (const auto& group : running_) {
+        needed_blocks += kv_.blocks_for_tokens(context_tokens(group->seq));
+    }
+    double frag_ratio = 0.0;
+    if (usage.used_blocks > 0) {
+        frag_ratio =
+                1.0 - static_cast<double>(needed_blocks) / static_cast<double>(usage.used_blocks);
+        frag_ratio = std::clamp(frag_ratio, 0.0, 1.0);
+    }
+    metrics_.set_float(MetricId::KvInternalFragRatio, frag_ratio);
 }
 
 void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point started,
@@ -564,29 +640,41 @@ void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point s
     const std::int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                     std::chrono::steady_clock::now() - started)
                                     .count();
-    scheduler_ns_total_ += ns;
-    ++scheduler_steps_total_;
-    schedule_samples_.push_back(ns);
-    if (schedule_samples_.size() > 256) {
-        schedule_samples_.erase(schedule_samples_.begin());
-    }
+    const std::int64_t now = now_ns();
+    metrics_.inc(MetricId::SchedulerNsTotal, ns);
+    metrics_.inc(MetricId::SchedulerStepsTotal);
+    metrics_.set(MetricId::ScheduleStepNsLast, ns);
     batch_size_peak_ = std::max(batch_size_peak_, steps);
     batch_tokens_peak_ = std::max(batch_tokens_peak_, tokens);
-    metrics_.set("llmopt_scheduler_ns_total", scheduler_ns_total_);
-    metrics_.set("llmopt_scheduler_steps_total", scheduler_steps_total_);
-    metrics_.set("llmopt_batch_size_last", steps);
-    metrics_.set("llmopt_batch_size_peak", batch_size_peak_);
-    metrics_.set("llmopt_batch_tokens_last", tokens);
-    metrics_.set("llmopt_batch_tokens_peak", batch_tokens_peak_);
-    metrics_.set("llmopt_batch_prefill_tokens_last", composition.prefill_tokens);
-    metrics_.set("llmopt_batch_decode_tokens_last", composition.decode_tokens);
-    metrics_.set("llmopt_batch_prefill_seqs_last", composition.prefill_seqs);
-    metrics_.set("llmopt_batch_decode_seqs_last", composition.decode_seqs);
-    std::vector<std::int64_t> sorted = schedule_samples_;
-    std::sort(sorted.begin(), sorted.end());
-    const std::size_t index = sorted.empty() ? 0 : (sorted.size() - 1) * 99 / 100;
-    metrics_.set("llmopt_schedule_step_p99_ns",
-                 sorted.empty() ? 0 : sorted[static_cast<std::size_t>(index)]);
+    metrics_.set(MetricId::BatchSizeLast, steps);
+    metrics_.set(MetricId::BatchSizePeak, batch_size_peak_);
+    metrics_.set(MetricId::BatchTokensLast, tokens);
+    metrics_.set(MetricId::BatchTokensPeak, batch_tokens_peak_);
+    metrics_.set(MetricId::BatchPrefillTokensLast, composition.prefill_tokens);
+    metrics_.set(MetricId::BatchDecodeTokensLast, composition.decode_tokens);
+    metrics_.set(MetricId::BatchPrefillSeqsLast, composition.prefill_seqs);
+    metrics_.set(MetricId::BatchDecodeSeqsLast, composition.decode_seqs);
+    // K-2 只统计纯 decode 步；mixed 步单独计数，作为分母污染程度的显式说明。
+    pending_pure_decode_ = composition.prefill_tokens == 0 && composition.decode_tokens > 0;
+    if (pending_pure_decode_) {
+        metrics_.inc(MetricId::DecodeStepsTotal);
+    }
+    if (composition.prefill_tokens > 0 && composition.decode_tokens > 0) {
+        metrics_.inc(MetricId::MixedStepsTotal);
+    }
+    const std::int64_t elapsed = std::max<std::int64_t>(1, now - started_ns_);
+    metrics_.set_float(MetricId::SchedCpuRatio,
+                       static_cast<double>(metrics_.get(MetricId::SchedulerNsTotal)) /
+                               static_cast<double>(elapsed));
+    const std::int64_t generated = metrics_.get(MetricId::TokensGenerated);
+    metrics_.set_float(MetricId::TokensPerSec,
+                       static_cast<double>(generated) * 1e9 / static_cast<double>(elapsed));
+    if (step_trace_open_) {
+        step_trace_ << "{\"ts_ns\":" << now << ",\"steps\":" << steps << ",\"tokens\":" << tokens
+                    << ",\"prefill_tokens\":" << composition.prefill_tokens
+                    << ",\"decode_tokens\":" << composition.decode_tokens << ",\"ns\":" << ns
+                    << "}\n";
+    }
 }
 
 // 前缀命中优先用块表 donor；后端支持 live prefix 时再找在飞序列。返回命中 token 数。
@@ -606,12 +694,12 @@ std::int32_t SchedulerCore::apply_prefix_hit(const std::shared_ptr<SequenceGroup
             seq.num_computed = hit_tokens;
             group->prefix_source = donor;
             group->prefix_tokens = hit_tokens;
-            metrics_.inc("llmopt_prefix_hits_total");
-            metrics_.inc("llmopt_prefix_hit_tokens_total", hit_tokens);
+            metrics_.inc(MetricId::PrefixHits);
+            metrics_.inc(MetricId::PrefixHitTokens, hit_tokens);
         }
         return hit_tokens;
     }
-    metrics_.inc("llmopt_prefix_misses_total");
+    metrics_.inc(MetricId::PrefixMisses);
     return 0;
 }
 
@@ -641,14 +729,16 @@ bool SchedulerCore::acquire_blocks(const std::shared_ptr<SequenceGroup>& group,
         if (decision.retry_ok) {
             alloc = kv_.acquire(seq, total_tokens, 0, true);
         } else {
-            metrics_.inc("llmopt_preempt_stalls_total");
+            metrics_.inc(MetricId::PreemptStalls);
         }
     }
     if (alloc.ok()) {
         return true;
     }
-    metrics_.inc(std::string("llmopt_admission_rejected_total{reason=\"") +
-                 alloc_reason_name(alloc.reason) + "\"}");
+    const MetricId reject_id = admission_metric_id(alloc.reason);
+    if (reject_id != MetricId::Count) {
+        metrics_.inc(reject_id);
+    }
     if (alloc.reason == AllocFailReason::ContextOverflow) {
         finish(group, FinishReason::Error,
                make_error(ErrCode::ContextOverflow, "prompt+max_tokens 超过 KV 块容量",
@@ -681,7 +771,7 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
     const ChunkSlice slice =
             planner_.next(context_tokens(seq), seq.num_computed, budget.tokens_remain());
     if (slice.n_tokens <= 0) {
-        metrics_.inc("llmopt_chunk_deferred_total");
+        metrics_.inc(MetricId::ChunkDeferred);
         kv_.free(seq);
         runner_.release_sequence(group->req_id, 0);
         finish(group, FinishReason::Error,
@@ -745,12 +835,17 @@ void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTri
         event.cap_error = cap_error;
         trace_->record(event);
 
-        metrics_.inc("llmopt_preemptions_total");
-        metrics_.inc("llmopt_preempted_tokens_total", recompute_tokens);
-        metrics_.inc("llmopt_preempt_recompute_total");
+        if (trigger == PreemptTrigger::Admission) {
+            metrics_.inc(MetricId::PreemptionsAdmission);
+        } else {
+            metrics_.inc(MetricId::PreemptionsChunkPlan);
+        }
+        metrics_.inc(MetricId::PreemptedTokens, recompute_tokens);
+        metrics_.inc(MetricId::PreemptRecompute);
         if (cap_error) {
-            metrics_.inc("llmopt_preempt_cap_errors_total");
-            metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+            metrics_.inc(MetricId::PreemptCapErrors);
+            metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
+            metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
             finish(group, FinishReason::Error,
                    make_error(
                            ErrCode::ExecutionFailed, "连续抢占次数超限，请求终止",
@@ -759,11 +854,13 @@ void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTri
             continue;
         }
         waiting_.push_front(group);
-        metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
+        metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
+        metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
     }
-    metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
+    metrics_.set(MetricId::RunningSequences, static_cast<std::int64_t>(running_.size()));
+    metrics_.set(MetricId::RequestsRunning, static_cast<std::int64_t>(running_.size()));
     if (decision.aging_exempt > 0) {
-        metrics_.inc("llmopt_aging_exempt_total", decision.aging_exempt);
+        metrics_.inc(MetricId::AgingExempt, decision.aging_exempt);
     }
     publish_kv_usage();
 }
@@ -826,13 +923,13 @@ bool SchedulerCore::append_prefill_chunk(Batch& batch, const std::shared_ptr<Seq
     } else {
         slice = planner_.next(target, seq.num_computed, budget.tokens_remain());
         if (slice.n_tokens <= 0) {
-            metrics_.inc("llmopt_chunk_deferred_total");
+            metrics_.inc(MetricId::ChunkDeferred);
             return false;
         }
         budget.commit(0, slice.n_tokens);
     }
     if (slice.n_tokens <= 0) {
-        metrics_.inc("llmopt_chunk_deferred_total");
+        metrics_.inc(MetricId::ChunkDeferred);
         return false;
     }
     NewRequestData data;
@@ -948,11 +1045,11 @@ void SchedulerCore::advance_chunk(const std::shared_ptr<SequenceGroup>& group,
     seq.num_computed = completion.computed_tokens;
     if (previous < seq.prompt_len && seq.num_computed > previous) {
         const std::int32_t upper = std::min(seq.num_computed, seq.prompt_len);
-        metrics_.inc("llmopt_prefill_tokens_total", upper - previous);
+        metrics_.inc(MetricId::PrefillTokens, upper - previous);
     }
     if (seq.num_computed < seq.prompt_len) {
-        metrics_.inc("llmopt_chunk_prefill_steps_total");
-        metrics_.inc("llmopt_chunk_prefill_tokens_total", seq.num_computed - previous);
+        metrics_.inc(MetricId::ChunkPrefillSteps);
+        metrics_.inc(MetricId::ChunkPrefillTokens, seq.num_computed - previous);
     }
     kv_.mark_written(seq, seq.num_computed);
     reconcile(seq);
@@ -960,12 +1057,32 @@ void SchedulerCore::advance_chunk(const std::shared_ptr<SequenceGroup>& group,
     if (group->recompute_active && seq.num_computed >= context_tokens(seq)) {
         group->recompute_active = false;
         group->consecutive_preemptions = 0;
-        metrics_.inc("llmopt_preempt_recovered_total");
+        metrics_.inc(MetricId::PreemptRecovered);
     } else if (!group->recompute_active) {
         group->consecutive_preemptions = 0;
     }
     if (seq.cancel_requested.load() || shutting_down_) {
         finish(group, FinishReason::Aborted);
+    }
+}
+
+// K-1：服务端 TTFT 从入队（HTTP 受理）到首 token；K-2 只取纯 decode 步间隔。
+void SchedulerCore::record_token_metrics(const std::shared_ptr<SequenceGroup>& group,
+                                         std::int64_t token_ns, std::int32_t previous,
+                                         bool first_token) {
+    Sequence& seq = group->seq;
+    if (first_token) {
+        const double ttft_ms = static_cast<double>(token_ns - group->enqueued_ns) / 1e6;
+        metrics_.add_float(MetricId::TtftMsSum, ttft_ms);
+        metrics_.inc(MetricId::TtftMsCount);
+    } else if (pending_pure_decode_) {
+        const double itl_ms = static_cast<double>(token_ns - group->last_token_ns) / 1e6;
+        metrics_.add_float(MetricId::ItlMsSum, itl_ms);
+        metrics_.inc(MetricId::ItlMsCount);
+    }
+    group->last_token_ns = token_ns;
+    if (previous < seq.prompt_len && seq.num_computed >= seq.prompt_len) {
+        metrics_.inc(MetricId::PrefillTokens, seq.prompt_len - previous);
     }
 }
 
@@ -1002,20 +1119,20 @@ void SchedulerCore::apply_completion(const Completion& completion) {
         return;
     }
     const std::int32_t previous = seq.num_computed;
+    const std::int64_t token_ns = now_ns();
+    const bool first_token = seq.num_output == 0;
     seq.num_computed = completion.computed_tokens;
     seq.num_output += 1;
     seq.output_token_ids.push_back(completion.sampled.front().token_id);
     kv_.mark_written(seq, seq.num_computed);
-    metrics_.inc("llmopt_tokens_generated_total");
-    if (previous < seq.prompt_len && seq.num_computed >= seq.prompt_len) {
-        metrics_.inc("llmopt_prefill_tokens_total", seq.prompt_len - previous);
-    }
+    metrics_.inc(MetricId::TokensGenerated);
+    record_token_metrics(group, token_ns, previous, first_token);
     reconcile(seq);
-    group->last_progress_ns = now_ns();
+    group->last_progress_ns = token_ns;
     if (group->recompute_active && seq.num_computed >= context_tokens(seq)) {
         group->recompute_active = false;
         group->consecutive_preemptions = 0;
-        metrics_.inc("llmopt_preempt_recovered_total");
+        metrics_.inc(MetricId::PreemptRecovered);
     } else if (!group->recompute_active) {
         group->consecutive_preemptions = 0;
     }
@@ -1057,7 +1174,7 @@ SchedulerCore::DeliverResult SchedulerCore::deliver(const std::shared_ptr<Sequen
         if (overflow_after > overflow_before) {
             const std::int64_t dropped =
                     static_cast<std::int64_t>(overflow_after - overflow_before);
-            metrics_.inc("llmopt_sink_overflow_total", dropped);
+            metrics_.inc(MetricId::SinkOverflow, dropped);
             logger()->warn("sink 溢出 req={} overflow={} frames_dropped={}", group->req_id,
                            overflow_after, dropped);
         }
@@ -1110,16 +1227,17 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
         reap_donors();
     }
     if (reason == FinishReason::Aborted) {
-        metrics_.inc("llmopt_requests_total{status=\"cancelled\"}");
+        metrics_.inc(MetricId::RequestsCancelled);
     } else if (reason == FinishReason::Error) {
-        metrics_.inc("llmopt_requests_total{status=\"error\"}");
+        metrics_.inc(MetricId::RequestsError);
         const ErrCode code = error.ok() ? ErrCode::ExecutionFailed : error.code;
         logger()->warn("request failed req={} code={} retryable={} msg={} detail={}", group->req_id,
                        error_code_name(code), retryable(code), error.message, error.detail);
     } else {
-        metrics_.inc("llmopt_requests_total{status=\"ok\"}");
+        metrics_.inc(MetricId::RequestsOk);
     }
-    metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
+    metrics_.set(MetricId::RunningSequences, static_cast<std::int64_t>(running_.size()));
+    metrics_.set(MetricId::RequestsRunning, static_cast<std::int64_t>(running_.size()));
     publish_kv_usage();
     if (!shutting_down_ && !pending_step_) {
         pump();
@@ -1129,7 +1247,7 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
 void SchedulerCore::reap_donors() {
     for (const RequestId& donor : kv_.take_dropped_donors()) {
         runner_.release_sequence(donor, 0);
-        metrics_.inc("llmopt_prefix_evictions_total");
+        metrics_.inc(MetricId::PrefixEvictions);
     }
 }
 
@@ -1140,7 +1258,7 @@ void SchedulerCore::reconcile(const Sequence& seq) {
         return;
     }
     if (backend_pos != expected) {
-        metrics_.inc("llmopt_kv_reconcile_diffs_total");
+        metrics_.inc(MetricId::KvReconcileDiffs);
         logger()->warn("kv 对账差异 req={} backend_pos={} expected={}", seq.group_id, backend_pos,
                        expected);
     }
@@ -1199,6 +1317,12 @@ void SchedulerCore::abort_all(const Error& error) {
     pending_step_ = false;
     waiting_depth_.store(0, std::memory_order_relaxed);
     running_depth_.store(0, std::memory_order_relaxed);
+    // 仍在 mailbox 里的提交不会再被处理，预留名额必须一并归零。
+    inflight_admissions_.store(0, std::memory_order_relaxed);
+    metrics_.set(MetricId::QueueDepth, 0);
+    metrics_.set(MetricId::RequestsQueued, 0);
+    metrics_.set(MetricId::RunningSequences, 0);
+    metrics_.set(MetricId::RequestsRunning, 0);
     publish_kv_usage();
 }
 

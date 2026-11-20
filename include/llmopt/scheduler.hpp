@@ -37,6 +37,8 @@ struct SchedulerConfig {
     std::int32_t max_consecutive_preemptions = 3;
     // 预留：抢占事件 CSV；空串表示不落盘。
     std::string preempt_trace_path{};
+    // 步级 trace（JSONL）：只给离线 p99 复算用，空串关闭，避免热路径写盘。
+    std::string step_trace_path{};
 };
 
 // Chunked prefill 切块结果：n_tokens 为本步可算 token 数，is_last 标记末块需采样。
@@ -100,6 +102,8 @@ struct SequenceGroup {
     bool scheduled_this_pump = false;
     std::int64_t last_progress_ns = 0;
     std::int64_t enqueued_ns = 0;
+    // 上一个成立 token 的到达时刻；只用于纯 decode 步的 ITL 样本。
+    std::int64_t last_token_ns = 0;
 };
 
 // 已生成 token 已写入 KV 的长度：prompt 之后只差“最后一个已采样、尚未回填”的 token。
@@ -254,7 +258,10 @@ public:
     // 入口准入判定：HTTP 线程读镜像值，达到队列容量即回 429，不再先进队后报错。
     bool accepting() const noexcept;
     std::int32_t queue_capacity() const noexcept;
+    // 准入预算 = max_concurrency + queue_capacity；含尚未被 Core 取走的在飞提交。
+    std::int32_t admission_capacity() const noexcept;
     void cancel(const RequestId& req_id) noexcept;
+
     void shutdown() noexcept;
 
     // 线程体：运行到 Shutdown 且无在飞序列为止。
@@ -271,6 +278,9 @@ private:
     enum class DeliverResult : std::uint8_t { Continue, Finished, Failed };
 
     void handle(Event& event);
+    void handle_add_request(Event& event);
+    void record_token_metrics(const std::shared_ptr<SequenceGroup>& group, std::int64_t token_ns,
+                              std::int32_t previous, bool first_token);
     void pump();
     void preempt_for_waiting();
     void admit_waiting(TokenBudget& budget);
@@ -278,6 +288,9 @@ private:
     void publish_kv_usage();
     void record_schedule_step(std::chrono::steady_clock::time_point started, std::int32_t steps,
                               std::int32_t tokens, const Batch& batch);
+    // 准入预留：先占坑再投递，避免突发并发同时看到旧镜像而集体越界。
+    bool try_reserve_admission() noexcept;
+    void release_admission() noexcept;
     bool admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget);
     std::int32_t apply_prefix_hit(const std::shared_ptr<SequenceGroup>& group);
     bool acquire_blocks(const std::shared_ptr<SequenceGroup>& group, std::int32_t total_tokens,
@@ -322,17 +335,23 @@ private:
     std::vector<std::int32_t> pending_serials_;
     std::int32_t pending_remaining_ = 0;
     bool pending_step_ = false;
+    // 本批是否为纯 decode（无 prefill token）；只有这种步的 token 间隔进 K-2。
+    bool pending_pure_decode_ = false;
     bool pumping_ = false;
     bool preempted_this_pump_ = false;
     bool shutting_down_ = false;
     // 队列深度镜像：只有 Core 线程写，HTTP 线程只读，用于入口准入。
     std::atomic<std::int32_t> waiting_depth_{0};
     std::atomic<std::int32_t> running_depth_{0};
-    std::vector<std::int64_t> schedule_samples_;
-    std::int64_t scheduler_ns_total_ = 0;
-    std::int64_t scheduler_steps_total_ = 0;
+    // 已受理、尚未被 Core 处理的在飞提交数；准入预留的唯一原子锚点。
+    std::atomic<std::int32_t> inflight_admissions_{0};
+    std::int64_t started_ns_ = 0;
+    std::int32_t running_peak_ = 0;
     std::int32_t batch_size_peak_ = 0;
     std::int32_t batch_tokens_peak_ = 0;
+    // 步级 trace：可选，默认关闭；开启时每步一行 JSONL，供离线复算 p99。
+    std::ofstream step_trace_;
+    bool step_trace_open_ = false;
 };
 
 } // namespace llmopt

@@ -2,14 +2,31 @@
 // 不模拟真实语义，只保证同种子逐 token 可复现、边界与真后端一致。
 #include "llmopt/runner.hpp"
 
+#include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace llmopt {
 namespace {
+
+// 测试钩子：仅 stub 后端读取 LLMOPT_TEST_STUB_DELAY_MS，用来稳定复现准入/背压竞态。
+// 生产后端不经过这里；默认 0，不改变任何现有行为。
+std::int32_t stub_step_delay_ms() {
+    const char* text = std::getenv("LLMOPT_TEST_STUB_DELAY_MS");
+    if (text == nullptr) {
+        return 0;
+    }
+    const int value = std::atoi(text);
+    if (value <= 0) {
+        return 0;
+    }
+    return value > 1000 ? 1000 : value;
+}
 
 // FNV-1a：把 prompt token 序列压成稳定哈希，作为缺省种子。
 std::uint64_t hash_tokens(const std::vector<std::int32_t>& ids) {
@@ -51,6 +68,9 @@ public:
 
     // 执行一步：按步骤投影推进 n_past；前缀借用必须存在 donor，否则整批失败。
     RunnerStepOutput decode_step(const Batch& batch) override {
+        if (const std::int32_t delay = stub_step_delay_ms(); delay > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delay));
+        }
         RunnerStepOutput output;
         std::lock_guard<std::mutex> lock(mutex_);
         std::size_t new_index = 0;

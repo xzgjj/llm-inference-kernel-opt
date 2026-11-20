@@ -270,8 +270,10 @@ TEST_CASE("decode_step 失败仍回投完成事件并关闭 sink") {
     CHECK(saw_error);
 }
 
-TEST_CASE("mailbox 满时 submit 返回 QueueFull") {
+TEST_CASE("准入预算满时 submit 返回 QueueFull") {
     Harness harness(SchedulerConfig{1, 2, 2});
+    // 预算 = max_concurrency(1) + queue_capacity(2)；mailbox 与预算同宽，不再提前背压。
+    CHECK(harness.core.submit(InferenceRequest{}, {}, nullptr) == ErrCode::Ok);
     CHECK(harness.core.submit(InferenceRequest{}, {}, nullptr) == ErrCode::Ok);
     CHECK(harness.core.submit(InferenceRequest{}, {}, nullptr) == ErrCode::Ok);
     CHECK(harness.core.submit(InferenceRequest{}, {}, nullptr) == ErrCode::QueueFull);

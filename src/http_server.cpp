@@ -35,9 +35,13 @@ void handle_signal(int) {
 }
 
 // 统一错误回包：状态码与 code 由 C-03 映射，禁止各路由自行编造。
+// 429 必须带 Retry-After：客户端可据此退避，而不是把队列满误当成执行错误重试。
 void send_error(httplib::Response& res, const Error& error) {
     const Error payload = error.ok() ? make_error(ErrCode::ExecutionFailed, "服务内部错误") : error;
     res.status = http_status(payload.code);
+    if (res.status == 429) {
+        res.set_header("Retry-After", "1");
+    }
     res.set_content(render_error_body(payload), "application/json");
 }
 
@@ -135,19 +139,19 @@ Error submit_request(AppContext& ctx, const std::string& body, InferenceRequest&
                                   " ctx=" + std::to_string(limit));
     }
     if (!ctx.core->accepting()) {
-        ctx.metrics->inc("llmopt_admission_rejected_total{reason=\"queue\"}");
-        ctx.metrics->inc("llmopt_requests_total{status=\"queue_full\"}");
+        ctx.metrics->inc(MetricId::AdmissionQueue);
+        ctx.metrics->inc(MetricId::RequestsQueueFull);
         return make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
-                          "cap=" + std::to_string(ctx.core->queue_capacity()));
+                          "cap=" + std::to_string(ctx.core->admission_capacity()));
     }
     sink = std::make_shared<BoundedSink>(256);
     prompt_tokens = static_cast<int>(ids.size());
     code = ctx.core->submit(req, std::move(ids), sink);
     if (code != ErrCode::Ok) {
         if (code == ErrCode::QueueFull) {
-            ctx.metrics->inc("llmopt_requests_total{status=\"queue_full\"}");
+            // 预留竞争由 Core 记账，避免同一拒绝在两层各加一次。
             return make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
-                              "cap=" + std::to_string(ctx.core->queue_capacity()));
+                              "cap=" + std::to_string(ctx.core->admission_capacity()));
         }
         return make_error(code, code == ErrCode::ResourceInsufficient ? "服务资源不足，请稍后重试"
                                                                       : "请求无法入队");
@@ -161,7 +165,7 @@ void completions_handler(const std::shared_ptr<AppContext>& ctx, const httplib::
                          httplib::Response& response) {
     bool responded = false;
     try {
-        ctx->metrics->inc("llmopt_http_requests_total");
+        ctx->metrics->inc(MetricId::HttpRequests);
         InferenceRequest req;
         std::shared_ptr<ResponseSink> sink;
         int prompt_tokens = 0;

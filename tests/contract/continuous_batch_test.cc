@@ -420,7 +420,7 @@ TEST_CASE("调度与 KV 指标随批次和收尾更新") {
     CHECK(harness.metrics.get("llmopt_batch_size_peak") == 4);
     CHECK(harness.metrics.get("llmopt_batch_tokens_peak") == 24);
     CHECK(harness.metrics.get("llmopt_scheduler_steps_total") >= 1);
-    CHECK(harness.metrics.get("llmopt_schedule_step_p99_ns") >= 0);
+    CHECK(harness.metrics.get("llmopt_schedule_step_ns_last") >= 0);
     CHECK(harness.metrics.get("llmopt_kv_held_blocks") ==
           harness.metrics.get("llmopt_kv_used_blocks") -
                   harness.metrics.get("llmopt_kv_cached_blocks"));

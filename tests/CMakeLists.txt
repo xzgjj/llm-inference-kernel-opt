@@ -37,6 +37,7 @@ llmopt_add_doctest(unit_gguf "unit;fast;hermetic" SOURCES unit/gguf_test.cc)
 llmopt_add_doctest(unit_stub_runner "unit;fast;hermetic" SOURCES unit/stub_runner_test.cc)
 llmopt_add_doctest(unit_text "unit;fast;hermetic" SOURCES unit/text_test.cc)
 llmopt_add_doctest(unit_sink "unit;fast;hermetic" SOURCES unit/sink_test.cc)
+llmopt_add_doctest(unit_metrics "unit;fast;hermetic" SOURCES unit/metrics_test.cc)
 llmopt_add_doctest(chunk_planner_test "unit;fast;hermetic"
                    SOURCES unit/scheduler/chunk_planner_test.cc)
 llmopt_add_doctest(cost_model_test "unit;fast;hermetic"
@@ -47,6 +48,7 @@ llmopt_add_doctest(contract_continuous_batch "contract;fast;hermetic"
 llmopt_add_doctest(preempt_test "contract;fast;hermetic" SOURCES contract/preempt_test.cc)
 llmopt_add_doctest(state_test "contract;fast;hermetic" SOURCES contract/state_test.cc)
 llmopt_add_doctest(lifecycle_test "contract;fast;hermetic" SOURCES contract/lifecycle_test.cc)
+llmopt_add_doctest(admission_test "contract;fast;hermetic" SOURCES contract/admission_test.cc)
 
 if(Python3_Interpreter_FOUND)
     add_test(NAME integration_server_smoke
@@ -68,6 +70,21 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:llmopt_server>)
     set_tests_properties(integration_server_chunked PROPERTIES LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_chunked PROPERTIES TIMEOUT 180)
+
+    add_test(NAME integration_server_metrics
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_metrics.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_metrics PROPERTIES LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_metrics PROPERTIES TIMEOUT 120)
+
+    add_test(NAME integration_server_admission
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_admission.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_admission PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_admission PROPERTIES TIMEOUT 180)
 
     # 真实服务契约：需要外部已运行的真模型服务（LLMOPT_REAL_BASE）；未设置即 SKIP(77)。
     add_test(NAME e2e_real_service_contract

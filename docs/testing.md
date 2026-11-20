@@ -165,6 +165,14 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 阶段 4 的回包队列改造按同一约定固化：`tests/unit/sink_test.cc`（4 例）锁“队列满立即失败并关闭”“关闭后 pop 不阻塞”“溢出只计队列满、关闭后的写入不算”。计时断言一律用 `std::chrono::milliseconds` 比较，不用 `steady_clock::count()` 直接比常量——MSVC 的 period 是 100ns，`50'000'000` 实际是 5 秒，测不出 2 秒阻塞回归。
 
+阶段 4 的指标/准入层补三组用例：
+
+- `tests/unit/metrics_test.cc`（9 例）：`MetricId` 表与 KPI 冻结名、8 线程分片累加不丢、gauge 覆盖、标签白名单、sum/count、每个 family 唯一 TYPE/HELP、snapshot、reset 语义。
+- `tests/contract/admission_test.cc`（2 例）：预算 `max_concurrency + queue_capacity` 的突发拒绝只计一次；预留兑现后 `accepting()` 恢复且不重复拒绝。
+- `tests/integration/test_server_metrics.py` / `test_server_admission.py`：进程级校验 TYPE/HELP 与 KPI 计数一致；8 并发打满预算 3 时回 3×200 + 5×429，429 带 `Retry-After: 1`，退避后重试 200。
+
+准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
+
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 
 ## 8 维护

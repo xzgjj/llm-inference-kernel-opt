@@ -115,6 +115,22 @@ bool resolve_prefix_cache(const ServerConfig& cfg, const ModelRunner& runner) {
     return enabled;
 }
 
+// K-9：门控结论一次落指标；矩阵侧据此判断启动时是否发生降级。
+void report_gate_metrics(MetricsRegistry& metrics, const GateResult& gate) {
+    switch (gate.decision) {
+    case GateDecision::Eligible:
+        metrics.inc(MetricId::GateEligible);
+        break;
+    case GateDecision::Degraded:
+        metrics.inc(MetricId::GateDegraded);
+        break;
+    case GateDecision::Blocked:
+        metrics.inc(MetricId::GateBlocked);
+        break;
+    }
+    metrics.set(MetricId::Degraded, gate.downgrade_concurrency ? 1 : 0);
+}
+
 // 启动前预算检查：读模型元数据、按 L2 口径估算并返回退出码（0 表示放行）。
 std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::int32_t& ctx_total,
                           GateResult& gate) {
@@ -173,6 +189,9 @@ std::int32_t run(const ServerConfig& cfg) {
     if (gate_rc != kExitOk) {
         return gate_rc;
     }
+    // K-9：门控结论一次落指标，矩阵侧可直接对账启动时是否发生降级。
+    MetricsRegistry metrics;
+    report_gate_metrics(metrics, gate);
 
     std::string message;
     std::unique_ptr<ModelRunner> runner = make_runner(cfg, message);
@@ -197,7 +216,6 @@ std::int32_t run(const ServerConfig& cfg) {
     const bool prefix_cache = resolve_prefix_cache(cfg, *runner);
     KVBlockManager kv(
             KVConfig{cfg.block_tokens, blocks, cfg.watermark_ratio, prefix_cache, kDonorSlots});
-    MetricsRegistry metrics;
     SchedulerConfig scheduler_cfg;
     scheduler_cfg.max_concurrency = concurrency;
     scheduler_cfg.max_num_batched_tokens = cfg.max_num_batched_tokens;
