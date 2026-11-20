@@ -11,14 +11,24 @@ using namespace llmopt; // NOLINT：用例短名与契约同名
 
 namespace {
 
-// 组装 prefill 批次，只填 stub 需要的字段。
+// 组装 prefill 批次：C-05 以 steps 驱动，runner 按步骤投影取 token。
 Batch prefill_batch(const RequestId& id, const std::vector<std::int32_t>& tokens) {
     Batch batch;
     NewRequestData data;
     data.req_id = id;
     data.prefill_token_ids = tokens;
     batch.new_reqs.push_back(std::move(data));
-    batch.total_tokens = static_cast<std::int32_t>(tokens.size());
+    SequenceStep step;
+    step.seq_id = id;
+    step.route.req_id = id;
+    step.phase = Phase::PrefillLast;
+    step.pos_begin = 0;
+    step.pos_end = static_cast<std::int32_t>(tokens.size());
+    step.n_tokens = step.pos_end;
+    step.needs_sampling = true;
+    step.sample_pos = step.pos_end - 1;
+    batch.total_tokens = step.n_tokens;
+    batch.steps.push_back(step);
     return batch;
 }
 
@@ -89,6 +99,16 @@ TEST_CASE("decode 步推进 n_past，释放后状态被清除") {
     cached.req_id = "req-step";
     cached.new_token_ids = {4};
     decode.cached_reqs.push_back(cached);
+    SequenceStep step;
+    step.seq_id = "req-step";
+    step.route.req_id = "req-step";
+    step.phase = Phase::Decode;
+    step.pos_begin = 3;
+    step.pos_end = 4;
+    step.n_tokens = 1;
+    step.needs_sampling = true;
+    step.sample_pos = 3;
+    decode.steps.push_back(step);
     decode.total_tokens = 1;
     CHECK(runner->decode_step(decode).err == ErrCode::Ok);
     runner->release_sequence("req-step");

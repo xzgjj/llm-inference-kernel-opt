@@ -16,6 +16,9 @@ struct NewRequestData {
     std::vector<std::int32_t> prefill_token_ids;
     std::vector<BlockRef> block_ids;
     SamplingParams sampling;
+    // C-P2-13：命中的前缀从该序列零拷贝借用，prefill 只补 prefix_tokens 之后的部分。
+    RequestId prefix_source;
+    std::int32_t prefix_tokens = 0;
 };
 
 struct CachedRequestData {
@@ -74,6 +77,8 @@ struct Completion {
     RequestId seq_id;
     // 内部序号：同一 req_id 被复用或请求已收尾时，用它丢弃过期完成事件。
     std::int32_t seq_serial = -1;
+    // 本步写入后的 KV token 总数，回写与对账都以它为准。
+    std::int32_t computed_tokens = 0;
     std::vector<SampledToken> sampled;
     ErrCode err = ErrCode::Ok;
 };

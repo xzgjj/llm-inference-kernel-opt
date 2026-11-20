@@ -1,4 +1,4 @@
-// runner_stub.cpp — 确定性假后端：字节级分词 + 种子派生 token，供无 GPU 单测与 CI。
+// runner_stub.cpp — 确定性假后端：多序列 n_past 记账 + 前缀借用校验，供无 GPU 单测与 CI。
 // 不模拟真实语义，只保证同种子逐 token 可复现、边界与真后端一致。
 #include "llmopt/runner.hpp"
 
@@ -20,10 +20,11 @@ std::uint64_t hash_tokens(const std::vector<std::int32_t>& ids) {
     return value;
 }
 
-// 假后端单序列状态：已写 KV 的 token 数与派生种子。
+// 假后端单序列状态：已写 KV 的 token 数与派生种子；留置序列保留 n_past。
 struct StubState {
     std::int32_t n_past = 0;
     std::uint64_t seed = 0;
+    bool retained = false;
 };
 
 } // namespace
@@ -33,7 +34,6 @@ class StubRunner final : public ModelRunner {
 public:
     // 记录配置；n_ctx 由 --ctx-tokens 决定，供 HTTP 准入复用。
     ErrCode load_model(const ModelConfig& config) override {
-        config_ = config;
         n_ctx_ = config.n_ctx;
         return ErrCode::Ok;
     }
@@ -48,32 +48,52 @@ public:
         return ErrCode::Ok;
     }
 
-    // 执行一步：prefill 写入 n_past，decode 前进一格，随后派生一个 token。
+    // 执行一步：按步骤投影推进 n_past；前缀借用必须存在 donor，否则整批失败。
     RunnerStepOutput decode_step(const Batch& batch) override {
         RunnerStepOutput output;
         std::lock_guard<std::mutex> lock(mutex_);
-        for (const NewRequestData& request : batch.new_reqs) {
-            StubState& state = states_[request.req_id];
-            state.n_past = static_cast<std::int32_t>(request.prefill_token_ids.size());
-            output.req_ids.push_back(request.req_id);
-            output.sampled.push_back(sample_token(state));
-            output.num_nans.push_back(0);
-        }
-        for (const CachedRequestData& request : batch.cached_reqs) {
-            StubState& state = states_[request.req_id];
-            state.n_past += static_cast<std::int32_t>(request.new_token_ids.size());
-            output.req_ids.push_back(request.req_id);
-            output.sampled.push_back(sample_token(state));
-            output.num_nans.push_back(0);
+        std::size_t new_index = 0;
+        std::size_t cached_index = 0;
+        for (const SequenceStep& step : batch.steps) {
+            if (step.phase == Phase::Decode) {
+                if (cached_index >= batch.cached_reqs.size()) {
+                    return failed(output);
+                }
+                const CachedRequestData& data = batch.cached_reqs[cached_index++];
+                StubState& state = states_[data.req_id];
+                state.n_past = step.pos_end;
+                emit(state, output);
+                continue;
+            }
+            if (new_index >= batch.new_reqs.size()) {
+                return failed(output);
+            }
+            const NewRequestData& data = batch.new_reqs[new_index++];
+            auto donor = states_.find(data.prefix_source);
+            if (data.prefix_tokens > 0 && (data.prefix_source.empty() || donor == states_.end())) {
+                return failed(output);
+            }
+            StubState& state = states_[data.req_id];
+            state.n_past = step.pos_end;
+            emit(state, output);
         }
         output.err = ErrCode::Ok;
         return output;
     }
 
-    // 释放序列状态；真后端在这里清 KV，假后端只擦状态。
-    void release_sequence(const RequestId& req_id) override {
+    // 释放序列：keep_tokens>0 时把 n_past 截到前缀长度并保留为 donor。
+    void release_sequence(const RequestId& req_id, std::int32_t keep_tokens = 0) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        states_.erase(req_id);
+        auto it = states_.find(req_id);
+        if (it == states_.end()) {
+            return;
+        }
+        if (keep_tokens > 0) {
+            it->second.n_past = keep_tokens;
+            it->second.retained = true;
+            return;
+        }
+        states_.erase(it);
     }
 
     // 无模型资源可释放，保持接口对称。
@@ -108,24 +128,53 @@ public:
         return n_ctx_;
     }
 
+    // 对账锚点：返回后端已写入的最大位置。
+    std::int32_t seq_pos_max(const RequestId& req_id) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = states_.find(req_id);
+        if (it == states_.end() || it->second.n_past <= 0) {
+            return -1;
+        }
+        return it->second.n_past - 1;
+    }
+
+    // 假后端没有物理 cell 限制，可直接从运行中的序列借前缀。
+    bool supports_live_prefix() const noexcept override {
+        return true;
+    }
+
+    // stub 用 token 数组模拟 KV，前缀共享是纯内存拷贝，不存在 stream 约束。
+    bool supports_prefix_share() const noexcept override {
+        return true;
+    }
+
     // 后端名进入启动摘要，避免把假后端误当真实推理。
     const char* backend_name() const noexcept override {
         return "stub";
     }
 
 private:
+    // 整批失败：清空已累积结果，避免按步回投时把半批 token 当成成功。
+    static RunnerStepOutput failed(RunnerStepOutput output) {
+        output.req_ids.clear();
+        output.sampled.clear();
+        output.num_nans.clear();
+        output.err = ErrCode::ExecutionFailed;
+        return output;
+    }
+
     // 采样公式：种子 ⊕ 步数 → 可打印 ASCII；同种子同序列完全可复现。
-    static SampledToken sample_token(StubState& state) {
+    static void emit(StubState& state, RunnerStepOutput& output) {
         const std::uint64_t mixed = state.seed + static_cast<std::uint64_t>(state.n_past) * 131ULL;
         SampledToken token;
         token.token_id = 256 + 32 + static_cast<std::int32_t>(mixed % 94ULL);
         token.logprob = -0.01F;
-        return token;
+        output.sampled.push_back(token);
+        output.num_nans.push_back(0);
     }
 
-    ModelConfig config_;
     std::int32_t n_ctx_ = 2048;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::map<RequestId, StubState> states_;
 };
 

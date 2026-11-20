@@ -1,10 +1,11 @@
-// runner_llama.cpp — C-07 真实后端适配：llama.cpp 上下文/批/采样链全部收在本文件。
-// 耦合点：batch 无公开 cell 字段、无 cell 查询 getter；阶段 1 单序列，释放时清整段 KV。
+// runner_llama.cpp — C-07 真实后端适配：多序列 batch、按输出序采样、seq_cp 前缀复用。
+// 耦合点：cell 由 llama 内部 find_slot 决定；这里只用 seq_id+pos 间接表达逻辑块表。
 #include "llama.h"
 #include "llmopt/runner.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -15,10 +16,12 @@
 namespace llmopt {
 namespace {
 
-// 每个序列一个采样链：惩罚 → top-k → top-p → min-p → 温度 → dist（已冻结顺序）。
+// 每个序列一个采样链与一个 llama seq 槽；retained 表示 KV 前缀仍被借用。
 struct LlamaSeqState {
     llama_sampler* sampler = nullptr;
+    std::int32_t slot = -1;
     std::int32_t n_past = 0;
+    bool retained = false;
 };
 
 // 进程级后端初始化只做一次；重复调用无害。
@@ -51,10 +54,11 @@ public:
         release();
     }
 
-    // 加载模型并建上下文；n_ctx/n_batch/n_ubatch 来自 CLI，n_gpu_layers=0 即 CPU。
+    // 加载模型并建上下文；n_ctx_total 是整机 KV 容量，n_seq_max 容纳运行与留置序列。
     ErrCode load_model(const ModelConfig& config) override {
         ensure_backend();
         config_ = config;
+        n_gpu_layers_ = config.n_gpu_layers;
         llama_model_params mparams = llama_model_default_params();
         mparams.n_gpu_layers = config.n_gpu_layers;
         model_ = llama_model_load_from_file(config.model_path.c_str(), mparams);
@@ -64,11 +68,11 @@ public:
         vocab_ = llama_model_get_vocab(model_);
         n_vocab_ = static_cast<std::int32_t>(llama_vocab_n_tokens(vocab_));
         llama_context_params cparams = llama_context_default_params();
-        cparams.n_ctx = static_cast<std::uint32_t>(config.n_ctx);
+        cparams.n_ctx = static_cast<std::uint32_t>(std::max(config.n_ctx_total, config.n_ctx));
         cparams.n_batch = static_cast<std::uint32_t>(std::max(config.n_batch, 1));
         cparams.n_ubatch = static_cast<std::uint32_t>(
                 std::min(std::max(config.n_ubatch, 1), static_cast<std::int32_t>(cparams.n_batch)));
-        cparams.n_seq_max = 1;
+        cparams.n_seq_max = static_cast<std::uint32_t>(std::max(config.n_seq_max, 1));
         const std::int32_t threads =
                 config.threads > 0 ? config.threads
                                    : static_cast<std::int32_t>(std::thread::hardware_concurrency());
@@ -85,14 +89,23 @@ public:
             release();
             return ErrCode::ModelNotLoaded;
         }
+        slots_.clear();
+        for (std::int32_t slot = cparams.n_seq_max - 1; slot >= 0; --slot) {
+            slots_.push_back(slot);
+        }
         n_ctx_ = config.n_ctx;
         return ErrCode::Ok;
     }
 
-    // 为序列建独立采样链，并把 prompt 喂给惩罚统计以对齐 llama.cpp 口径。
+    // 为序列分配 llama seq 槽并建独立采样链；prompt 全量喂给惩罚统计。
     ErrCode add_sequence(const Sequence& seq) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (slots_.empty()) {
+            return ErrCode::ExecutionFailed;
+        }
         LlamaSeqState state;
+        state.slot = slots_.back();
+        slots_.pop_back();
         state.sampler = build_chain(seq.sampling, n_vocab_);
         for (std::int32_t id : seq.prompt_token_ids) {
             llama_sampler_accept(state.sampler, id);
@@ -101,7 +114,7 @@ public:
         return ErrCode::Ok;
     }
 
-    // 一步前向：prefill 全量入批，decode 单 token 入批；仅最后位置取 logits。
+    // 一步前向：按步骤投影逐序列加 token；每步只取最后位置 logits，再按输出序采样。
     RunnerStepOutput decode_step(const Batch& batch) override {
         RunnerStepOutput output;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -110,51 +123,32 @@ public:
             return output;
         }
         llama_batch_ext_clear(batch_);
-        std::int32_t token_index = 0;
-        for (const NewRequestData& request : batch.new_reqs) {
-            LlamaSeqState& state = states_[request.req_id];
-            const std::int32_t size = static_cast<std::int32_t>(request.prefill_token_ids.size());
-            for (std::int32_t i = 0; i < size; ++i) {
-                const std::int32_t idx = add_token(request.prefill_token_ids[i], i);
-                if (idx < 0) {
-                    output.err = ErrCode::ExecutionFailed;
-                    return output;
-                }
-                if (i == size - 1) {
-                    (void)llama_batch_ext_set_output_logits(batch_, idx, true);
-                }
-                token_index = idx;
+        std::size_t new_index = 0;
+        std::size_t cached_index = 0;
+        std::vector<RequestId> ordered;
+        std::vector<std::int32_t> output_indexes;
+        for (const SequenceStep& step : batch.steps) {
+            const std::int32_t output_idx = step.phase == Phase::Decode
+                                                    ? add_decode_step(step, batch, cached_index)
+                                                    : add_prefill_step(step, batch, new_index);
+            if (output_idx < 0) {
+                return failed(output);
             }
-            state.n_past = size;
-            output.req_ids.push_back(request.req_id);
+            ordered.push_back(step.route.req_id);
+            output_indexes.push_back(output_idx);
         }
-        for (const CachedRequestData& request : batch.cached_reqs) {
-            LlamaSeqState& state = states_[request.req_id];
-            const std::int32_t idx = add_token(request.new_token_ids.front(), state.n_past);
-            if (idx < 0) {
-                output.err = ErrCode::ExecutionFailed;
-                return output;
-            }
-            (void)llama_batch_ext_set_output_logits(batch_, idx, true);
-            state.n_past += 1;
-            token_index = idx;
-            output.req_ids.push_back(request.req_id);
-        }
-        if (batch.total_tokens <= 0) {
-            output.err = ErrCode::ExecutionFailed;
-            return output;
+        if (batch.total_tokens <= 0 || ordered.empty()) {
+            return failed(output);
         }
         if (llama_process(ctx_, LLAMA_PROCESS_TYPE_DECODE, batch_) != 0) {
-            output.err = ErrCode::ExecutionFailed;
-            return output;
+            return failed(output);
         }
-        (void)token_index;
-        for (const RequestId& req_id : output.req_ids) {
-            SampledToken token = sample(req_id);
+        for (std::size_t index = 0; index < ordered.size(); ++index) {
+            SampledToken token = sample(ordered[index], output_indexes[index]);
             if (token.token_id < 0) {
-                output.err = ErrCode::ExecutionFailed;
-                return output;
+                return failed(output);
             }
+            output.req_ids.push_back(ordered[index]);
             output.sampled.push_back(token);
             output.num_nans.push_back(0);
         }
@@ -162,26 +156,41 @@ public:
         return output;
     }
 
-    // 释放序列：擦采样链并清空 KV；单序列阶段清整段是安全的。
-    void release_sequence(const RequestId& req_id) override {
+    // 释放序列：keep_tokens>0 时只删尾部，前缀留在 KV 中供后续 seq_cp。
+    void release_sequence(const RequestId& req_id, std::int32_t keep_tokens = 0) override {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = states_.find(req_id);
-        if (it != states_.end()) {
+        if (it == states_.end()) {
+            return;
+        }
+        if (it->second.sampler) {
             llama_sampler_free(it->second.sampler);
-            states_.erase(it);
+            it->second.sampler = nullptr;
+        }
+        const std::int32_t slot = it->second.slot;
+        if (keep_tokens > 0 && ctx_) {
+            (void)llama_memory_seq_rm(llama_get_memory(ctx_), slot, keep_tokens, -1);
+            it->second.n_past = keep_tokens;
+            it->second.retained = true;
+            return;
         }
         if (ctx_) {
-            llama_memory_clear(llama_get_memory(ctx_), true);
+            (void)llama_memory_seq_rm(llama_get_memory(ctx_), slot, -1, -1);
         }
+        slots_.push_back(slot);
+        states_.erase(it);
     }
 
     // 全量释放：采样链、批、上下文、模型、后端，顺序与创建相反。
     void release() override {
         std::lock_guard<std::mutex> lock(mutex_);
         for (auto& entry : states_) {
-            llama_sampler_free(entry.second.sampler);
+            if (entry.second.sampler) {
+                llama_sampler_free(entry.second.sampler);
+            }
         }
         states_.clear();
+        slots_.clear();
         if (batch_) {
             llama_batch_ext_free(batch_);
             batch_ = nullptr;
@@ -246,9 +255,20 @@ public:
         return vocab_ ? token_id == llama_vocab_eos(vocab_) : false;
     }
 
-    // 上下文长度取启动配置，供 HTTP 准入。
+    // 单请求上下文上限进入 HTTP 准入。
     std::int32_t n_ctx() const noexcept override {
         return n_ctx_;
+    }
+
+    // 对账锚点：后端已写入该 llama seq 的最大位置。
+    std::int32_t seq_pos_max(const RequestId& req_id) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = states_.find(req_id);
+        if (it == states_.end() || !ctx_) {
+            return -1;
+        }
+        return static_cast<std::int32_t>(
+                llama_memory_seq_pos_max(llama_get_memory(ctx_), it->second.slot));
     }
 
     // 后端名进入启动摘要。
@@ -256,10 +276,83 @@ public:
         return "llama.cpp";
     }
 
+    // 只有 GPU offload 才走统一 KV stream；纯 CPU 的 seq_cp 是跨 stream 复制，
+    // 会 reset 目标 cells 并与本批写入冲突（实测 ExecutionFailed）。
+    bool supports_prefix_share() const noexcept override {
+        return n_gpu_layers_ > 0;
+    }
+
 private:
+    // 整批失败：清空已完成采样，交给 Core 统一走 Error 收尾。
+    static RunnerStepOutput failed(RunnerStepOutput output) {
+        output.req_ids.clear();
+        output.sampled.clear();
+        output.num_nans.clear();
+        output.err = ErrCode::ExecutionFailed;
+        return output;
+    }
+
+    // prefill：可选 seq_cp 借用前缀，再按 pos 逐 token 入批；返回末 token 的批内下标。
+    std::int32_t add_prefill_step(const SequenceStep& step, const Batch& batch,
+                                  std::size_t& index) {
+        if (index >= batch.new_reqs.size()) {
+            return -1;
+        }
+        const NewRequestData& data = batch.new_reqs[index++];
+        auto it = states_.find(data.req_id);
+        if (it == states_.end()) {
+            return -1;
+        }
+        LlamaSeqState& state = it->second;
+        if (data.prefix_tokens > 0) {
+            auto donor = states_.find(data.prefix_source);
+            if (donor == states_.end() || !ctx_ || !donor->second.retained) {
+                return -1;
+            }
+            // 只从已截断到前缀的 donor 借：cross-stream 的 seq_cp 只支持整段复制。
+            llama_memory_seq_cp(llama_get_memory(ctx_), donor->second.slot, state.slot, -1, -1);
+            state.n_past = data.prefix_tokens;
+        }
+        const std::int32_t size = static_cast<std::int32_t>(data.prefill_token_ids.size());
+        std::int32_t last_idx = -1;
+        for (std::int32_t offset = 0; offset < size; ++offset) {
+            last_idx =
+                    add_token(step.pos_begin + offset, data.prefill_token_ids[offset], state.slot);
+            if (last_idx < 0) {
+                return -1;
+            }
+        }
+        if (last_idx >= 0) {
+            (void)llama_batch_ext_set_output_logits(batch_, last_idx, true);
+        }
+        state.n_past = step.pos_end;
+        return last_idx;
+    }
+
+    // decode：单个新 token 入批并出 logits；返回该 token 的批内下标。
+    std::int32_t add_decode_step(const SequenceStep& step, const Batch& batch, std::size_t& index) {
+        if (index >= batch.cached_reqs.size()) {
+            return -1;
+        }
+        const CachedRequestData& data = batch.cached_reqs[index++];
+        auto it = states_.find(data.req_id);
+        if (it == states_.end() || data.new_token_ids.empty()) {
+            return -1;
+        }
+        const std::int32_t idx =
+                add_token(step.pos_begin, data.new_token_ids.front(), it->second.slot);
+        if (idx < 0) {
+            return -1;
+        }
+        (void)llama_batch_ext_set_output_logits(batch_, idx, true);
+        it->second.n_past = step.pos_end;
+        return idx;
+    }
+
     // 往批里加一个 token 并设位置；返回批内下标，负值即失败。
-    std::int32_t add_token(std::int32_t token_id, std::int32_t pos) {
-        const std::int32_t idx = llama_batch_ext_add_token(batch_, 0, token_id);
+    std::int32_t add_token(std::int32_t pos, std::int32_t token_id, std::int32_t slot) {
+        const std::int32_t idx =
+                llama_batch_ext_add_token(batch_, static_cast<llama_seq_id>(slot), token_id);
         if (idx < 0) {
             return idx;
         }
@@ -268,13 +361,16 @@ private:
         return idx;
     }
 
-    // 用序列自己的采样链取一个 token，并 accept 进历史；失败返回 -1。
-    SampledToken sample(const RequestId& req_id) {
+    // 按批内输出下标取 token；下标必须与 set_output_logits 的位置一致。
+    SampledToken sample(const RequestId& req_id, std::int32_t output_index) {
         auto it = states_.find(req_id);
         if (it == states_.end() || !it->second.sampler) {
             return SampledToken{};
         }
-        const llama_token token = llama_sampler_sample(it->second.sampler, ctx_, -1);
+        const llama_token token = llama_sampler_sample(it->second.sampler, ctx_, output_index);
+        if (token < 0) {
+            return SampledToken{};
+        }
         llama_sampler_accept(it->second.sampler, token);
         SampledToken out;
         out.token_id = token;
@@ -289,8 +385,10 @@ private:
     llama_batch_ext* batch_ = nullptr;
     std::int32_t n_vocab_ = 0;
     std::int32_t n_ctx_ = 2048;
+    std::int32_t n_gpu_layers_ = 0;
     bool backend_ready_ = true;
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
+    std::vector<std::int32_t> slots_;
     std::map<RequestId, LlamaSeqState> states_;
 };
 
