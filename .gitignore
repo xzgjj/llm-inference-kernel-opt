@@ -2,9 +2,14 @@
 # llm-inference-kernel-opt / .gitignore
 # ============================================================
 
-# ---------- 文档与本地资料（不上传） ----------
-docs/
-docs/**
+# ---------- 文档与本地资料 ----------
+# 默认不入库（论文/笔记/草稿）；CI 规则与测试注册表例外：
+# 它们必须是仓库内的唯一事实来源，否则 CI 与 agent 读不到同一份规则。
+docs/*
+!docs/ci.md
+!docs/testing.md
+!docs/ci/
+!docs/ci/**
 
 # ---------- 本地个人笔记 / 流程文件（按需生成，一律不入库） ----------
 CLAUDE.md
@@ -15,10 +20,37 @@ AGENT_EXECUTION_PROTOCOL.md
 implementation-notes.md
 SPEC.md
 
-# ---------- 测试（统一在 test/ 下生成，不入库） ----------
+# ---------- 测试 ----------
+# tests/ 入库：测试是 CI 的执行对象，docs/testing.md 按路径与其对齐
+# 仅忽略 tests/ 下的运行产物与缓存，测试源码必须入库
+# test/ 为历史目录、Testing/ 为 CTest 产物，不入库
 test/
-tests/
 Testing/
+tests/**/*.log
+tests/**/__pycache__/
+tests/**/*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# ---------- 崩溃现场 / 覆盖率原始数据 / 回退备份 ----------
+*.dmp
+core
+core.*
+*.profraw
+*.profdata
+*.bak
+*.orig
+*.rej
+
+# ---------- 本地构建临时文件（除 build/ 之外的零散产物） ----------
+.cmake/
+*.rsp
+*.tlog
+*.su
+*.moc
 
 # ---------- 日志 ----------
 *.log
@@ -67,15 +99,23 @@ install_manifest.txt
 *.pch
 
 # ---------- 依赖 / 缓存 ----------
+# 依赖由 CMake FetchContent 拉取到 third_party/_deps，或由 tools/dev.py sync 缓存；
+# 二进制/源码副本一律不入库，只保留版本清单（cmake/deps.json）。
 .cache/
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 node_modules/
-third_party/_deps/
+third_party/
+vendor/
 .cpm/
 _concurrent_build/
+
+# ---------- 基准运行产物 ----------
+# 原始 JSONL、CSV、manifest 体积大且可重建，只入库脚本与配置。
+tools/bench/results/
+tools/bench/out/
 
 # ---------- IDE / 编辑器 ----------
 .idea/

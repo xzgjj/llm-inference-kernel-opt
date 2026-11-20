@@ -1,0 +1,10 @@
+# 规则文件与闸门的负责人。改动这些文件需要对应负责人 review。
+# rule: CI-RUL-001
+
+*                   @xzgjj
+
+/.github/           @xzgjj
+/scripts/ci/        @xzgjj
+/docs/ci/           @xzgjj
+/docs/ci.md         @xzgjj
+/docs/testing.md    @xzgjj

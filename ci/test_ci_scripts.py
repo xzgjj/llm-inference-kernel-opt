@@ -1,0 +1,81 @@
+"""CI 工具自测：规则也是代码，也需要测试。
+
+rule: CI-TST-001
+"""
+
+from __future__ import annotations
+
+import sys
+import unittest
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "scripts" / "ci"))
+
+import check_diff  # noqa: E402
+import check_docs  # noqa: E402
+import check_tests  # noqa: E402
+import ci_common  # noqa: E402
+
+
+class WordCountTest(unittest.TestCase):
+    def test_chinese_counted_per_char(self) -> None:
+        self.assertEqual(ci_common.count_words("文档预算"), 4)
+
+    def test_code_fence_ignored(self) -> None:
+        text = "正文\n```bash\npython scripts/ci/run_ci.py --mode fast\n```"
+        self.assertEqual(ci_common.count_words(text), 2)
+
+    def test_paths_count_as_one_token(self) -> None:
+        self.assertEqual(ci_common.count_words("docs/testing.md"), 1)
+
+
+class RegistryTest(unittest.TestCase):
+    def test_header_and_rows(self) -> None:
+        text = ci_common.read_text(REPO / "docs/testing.md")
+        self.assertIn("| Scope | Level | Runner | Args | Metadata |", text)
+        rows = ci_common.iter_table_rows(text, "Scope")
+        self.assertGreaterEqual(len(rows), 1)
+        for row in rows:
+            self.assertEqual(len(row), 5, f"行列数不符：{row}")
+
+    def test_registry_gate_passes(self) -> None:
+        result = check_tests.run()
+        self.assertTrue(result.passed, [f"{v.rule}:{v.path}:{v.message}" for v in result.errors])
+
+    def test_every_test_file_registered(self) -> None:
+        files = check_tests._test_files()
+        self.assertTrue(files, "tests/ 下应至少有一个测试文件")
+        result = check_tests.run()
+        self.assertFalse(
+            [v for v in result.errors if v.rule == "CI-TST-003"],
+            "存在未登记的测试文件",
+        )
+
+
+class DocsGateTest(unittest.TestCase):
+    def test_docs_gate_passes(self) -> None:
+        result = check_docs.run()
+        self.assertTrue(result.passed, [f"{v.rule}:{v.path}:{v.message}" for v in result.errors])
+
+    def test_ci_md_within_budget(self) -> None:
+        words = ci_common.count_words(ci_common.read_text(REPO / "docs/ci.md"))
+        self.assertLessEqual(words, 3000)
+
+    def test_spec_declares_script_rules(self) -> None:
+        spec = ci_common.read_text(REPO / "docs/ci/ci-spec.md")
+        declared = ci_common.declared_rules(spec)
+        self.assertIn("CI-DOC-001", declared)
+        self.assertTrue(any(v.startswith("script:") for v in declared.values()))
+
+
+class WaiverTest(unittest.TestCase):
+    def test_waivers_file_is_valid(self) -> None:
+        result = ci_common.CheckResult("waivers")
+        waivers = check_diff.load_waivers(result)
+        self.assertTrue(result.passed, [f"{v.rule}:{v.path}:{v.message}" for v in result.errors])
+        self.assertEqual(waivers, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

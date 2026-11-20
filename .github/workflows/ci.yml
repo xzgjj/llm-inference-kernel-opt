@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 18 * * *"   # UTC 18:00 = 北京 02:00，夜间长任务
+  workflow_dispatch:
+
+# rule: CI-GAT-004 —— 同 ref 的新推送取消旧运行，避免排队浪费
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  probe:
+    name: probe
+    runs-on: ubuntu-latest
+    outputs:
+      has_cmake: ${{ steps.detect.outputs.has_cmake }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        run: |
+          if [ -f CMakeLists.txt ]; then
+            echo "has_cmake=true" >> "$GITHUB_OUTPUT"
+            echo "检测到 CMakeLists.txt，构建与 sanitizer 作业启用"
+          else
+            echo "has_cmake=false" >> "$GITHUB_OUTPUT"
+            echo "SKIP(build/sanitizers): 尚无 CMakeLists.txt，项目处于初始化阶段" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # rule: CI-GAT-001 —— L1 闸门预算 3 分钟
+  gates:
+    name: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install clang-format
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-format
+      - name: fast gates (docs + registry + code)
+        run: python scripts/ci/run_ci.py --mode fast
+      - name: upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-reports
+          path: build/ci-reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+  diff:
+    name: diff
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: diff budget and approvals
+        env:
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          CI_ENFORCE_LABELS: "1"
+        run: python scripts/ci/check_diff.py --base "origin/${{ github.base_ref }}"
+      - name: upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-diff-reports
+          path: build/ci-reports/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # rule: CI-COD-002 —— 警告即错误；Linux 双编译器
+  # rule: CI-COD-005 —— 未使用符号/参数由 -Wunused 与 clang-tidy 同时拦截
+  build:
+    name: build
+    needs: probe
+    if: needs.probe.outputs.has_cmake == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+        build_type: [Debug]
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        env:
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+          -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"
+      - name: build
+        run: cmake --build build --parallel
+      - name: clang-tidy
+        if: matrix.compiler == 'clang'
+        run: |
+          sudo apt-get install -y -qq clang-tidy
+          files=$(find src include benchmarks \( -name '*.cc' -o -name '*.cpp' \) 2>/dev/null | head -50)
+          if [ -z "$files" ]; then
+            echo "SKIP(clang-tidy): 暂无 C++ 源文件" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          clang-tidy -p build $files
+
+  registered-tests:
+    name: registered-tests
+    needs: [probe, build]
+    if: needs.probe.outputs.has_cmake == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: local build for registry tests
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+          cmake --build build --parallel
+      - name: run fast tests from registry
+        run: python scripts/ci/run_registry.py --speed fast --exclude needs-gpu,needs-vm,needs-network
+
+  # rule: CI-MEM-001 —— ASan + UBSan
+  # rule: CI-MEM-002 —— TSan 单独一个 job，与 ASan 互斥
+  sanitizers:
+    name: sanitizers
+    needs: probe
+    if: needs.probe.outputs.has_cmake == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: asan-ubsan
+            flags: -fsanitize=address,undefined -fno-omit-frame-pointer -g
+          - name: tsan
+            flags: -fsanitize=thread -fno-omit-frame-pointer -g
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        env:
+          CXXFLAGS: ${{ matrix.flags }}
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+        run: |
+          cmake -S . -B build-san-${{ matrix.name }} \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
+      - name: build
+        run: cmake --build build-san-${{ matrix.name }} --parallel
+      - name: run fast tests under sanitizer
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: python scripts/ci/run_registry.py --speed fast --exclude needs-gpu,needs-vm,needs-network
+
+  # rule: CI-PRF-001 —— 吞吐/延迟回退 >5%
+  # rule: CI-PRF-002 —— 基准离散度 >8% 作废
+  nightly:
+    name: nightly
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: slow tests
+        run: python scripts/ci/run_registry.py --speed slow --exclude needs-gpu,needs-vm
+      - name: perf guard
+        run: |
+          if python scripts/ci/run_registry.py --speed slow --only perf --dry-run | grep -q "DRY"; then
+            python scripts/ci/run_registry.py --speed slow --only perf
+          else
+            echo "SKIP(perf): 注册表中尚无 perf 基线，数据不足以判定回退" >> "$GITHUB_STEP_SUMMARY"
+          fi

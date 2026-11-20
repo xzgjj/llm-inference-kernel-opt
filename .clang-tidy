@@ -1,0 +1,23 @@
+# 只开启与"可读性、正确性"直接相关的检查；风格交给 clang-format。
+# 复杂度阈值与 docs/ci/ci-spec.md 第 6 节保持一致（25 / 60 行）。
+Checks: >-
+  -*,
+  bugprone-*,
+  performance-*,
+  readability-*,
+  modernize-*,
+  misc-unused-*,
+  -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
+  -readability-magic-numbers,
+  -readability-identifier-length
+WarningsAsErrors: 'bugprone-*,misc-unused-*'
+HeaderFilterRegex: '^(src|include)/'
+FormatStyle: file
+CheckOptions:
+  - key: readability-function-cognitive-complexity.Threshold
+    value: '25'
+  - key: readability-function-size.LineThreshold
+    value: '60'
+  - key: readability-function-size.StatementThreshold
+    value: '80'

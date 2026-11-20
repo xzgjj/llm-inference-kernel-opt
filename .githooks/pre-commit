@@ -1,0 +1,9 @@
+#!/bin/sh
+# L0 闸门：提交前同步执行 L1 的全部判定，10 秒内出结论。
+# 启用方式：git config core.hooksPath .githooks
+
+python scripts/ci/run_ci.py --mode fast || {
+    echo ""
+    echo "提交已拦截。修复后重试，或用 docs/ci/waivers.json 申请例外（需规则负责人批准）。"
+    exit 1
+}
