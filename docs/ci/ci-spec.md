@@ -122,7 +122,7 @@ CI 的职责是把**可判定**的部分变成机器红灯，把**不可判定**
 | CI-COD-006 | 悬空 TODO | 自动 | 只允许 `TODO(owner):` 形式，无主 TODO 计入失败 | `script:check_code.py:todos` | 无 |
 | CI-LLM-001 | 真实后端可编译 | 自动 | `runner_llama.cpp` 在固定版本 llama.cpp 头文件下零警告编译通过 | `workflow:llama-compile` | 找不到固定版本时失败并留痕，不静默跳过 |
 
-编译器版本与冻结依赖对齐：`build-clang` 固定 clang 18，不跟随 runner 预装的最新 clang。原因不是版本洁癖——spdlog 1.14.1 内嵌的 fmt 10.2 在 clang ≥19 会以 `call to consteval function ... is not a constant expression` 硬报错（实测 clang 21.1.8 全量构建失败），而升级 fmt 属于改 SPEC 冻结表，应由依赖变更单独评审。故此处锁 clang 18 并在 workflow 内注明；clang-tidy 同样用 18，避免 lint 与编译版本错位。另有两处第三方头噪声单独豁免、不外扩：doctest 2.4.11 在 clang 下无条件 `#include <ciso646>`，libstdc++ 15 对该头抛 `#warning`，故 clang 作业加 `-Wno-error=#warnings`（仅降级该类，其余仍 error）；doctest 与 concurrentqueue 的 include 目录一律标 SYSTEM，不参与本项目告警面。
+编译器版本：`build-clang` 用 runner 预装的 clang（当前 21.1.8），不锁旧版本。此前 `spdlog 1.14.1` 内嵌的 fmt 10.2 在 clang ≥19 会以 `call to consteval function ... is not a constant expression` 硬报错，导致全量构建失败；根因在依赖侧而不是编译器侧，故把 spdlog 升到 1.17.0（内嵌 fmt 11），冻结表同步更新，编译器不再需要降级。第三方头噪声单独豁免、不外扩：doctest 2.4.11 在 clang 下无条件 `#include <ciso646>`，libstdc++ 15 对该头抛 `#warning`，故 clang 作业加 `-Wno-error=#warnings`（仅降级该类，其余仍 error）；concurrentqueue 的 include 目录标 SYSTEM，不参与本项目告警面。
 
 ### 4.4.1 覆盖率
 

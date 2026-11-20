@@ -19,7 +19,7 @@ FetchContent_Declare(nlohmann_json
     URL https://github.com/nlohmann/json/archive/refs/tags/v3.11.3.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_Declare(spdlog
-    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.14.1.tar.gz
+    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 FetchContent_Declare(concurrentqueue
     URL https://github.com/cameron314/concurrentqueue/archive/refs/tags/v1.0.3.tar.gz

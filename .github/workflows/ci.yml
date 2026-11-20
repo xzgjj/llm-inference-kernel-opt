@@ -60,17 +60,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # clang 固定 18：spdlog 1.14.1 内嵌的 fmt 10.2 在 clang ≥19 上会以
-      # "call to consteval function ... is not a constant expression" 硬报错；
-      # 升级 fmt 需同步改 SPEC 冻结表，故此处对齐冻结依赖而非追新编译器。
-      - name: install clang 18
-        if: matrix.compiler == 'clang'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang-18 clang-tidy-18
       # -Wno-error=#warnings：doctest 2.4.11 在 clang 下无条件带 <ciso646>，libstdc++ 15 对该头抛
       # #warning；只把它降级为告警，其余类别仍是 -Werror。
       - name: configure
         env:
-          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++-18' }}
+          CXX: ${{ matrix.compiler == 'gcc' && 'g++' || 'clang++' }}
         run: >
           cmake -S . -B build
           -DCMAKE_BUILD_TYPE=Debug
@@ -81,12 +75,13 @@ jobs:
       - name: clang-tidy
         if: matrix.compiler == 'clang'
         run: |
+          sudo apt-get install -y -qq clang-tidy
           files=$(find src include \( -name '*.cc' -o -name '*.cpp' \) | head -50)
           if [ -z "$files" ]; then
             echo "SKIP(clang-tidy): 暂无 C++ 源文件" >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          clang-tidy-18 -p build $files
+          clang-tidy -p build $files
       - name: registered fast tests
         run: python scripts/ci/run_registry.py --speed fast --junit-dir build/ci-reports/junit
       - name: upload reports
