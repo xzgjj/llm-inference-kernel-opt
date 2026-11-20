@@ -130,6 +130,8 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 
 已落地的例子：真实 llama 纯 CPU 后端没有统一 KV stream，`llama_memory_seq_cp` 会跨 stream 整段复制并 reset 目标 cells，与批内写入冲突，实测 4 条请求 `ExecutionFailed`。回归用例在 `tests/unit/config_test.cc` 的「后端不支持共享时前缀复用降级为关闭」，锁定 `effective_prefix_cache(true, false) == false`；真实后端用 `scripts/bench/verify_prefix.sh` 配 `NGL=0 EXPECT_SHARE=0` 复核“零命中、零崩溃、零对账差异”。
 
+另一个真实后端缺陷：`n_ctx_total = ctx × concurrency`，但 `n_seq_max = concurrency + donor_slots`，llama.cpp 会把总数均分给所有槽，8 并发 + 4 donor 时单序列只剩 `8/12` 上下文，约 840 token 的 prompt 直接 `failed to find a memory slot`。修复为 `n_ctx_total = ctx × (concurrency + 实际需要的 donor 槽)`，且 CPU（前缀共享已关闭）不再预留 donor。回归证据是 2-G2 的 8 路约 920-token prompt：修复前 `decode` 报 batch of size 840 失败，修复后 24/24 成功、利用率 85.39%、`reconcile=0`（`docs/阶段2-证据.md`）。
+
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。
 
 ## 8 维护

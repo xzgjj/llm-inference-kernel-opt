@@ -317,3 +317,24 @@ TEST_CASE("KV watermark 指标随准入上报") {
     CHECK(usage.watermark_blocks > 0);
     CHECK(harness.metrics.get("llmopt_kv_watermark_blocks") == usage.watermark_blocks);
 }
+
+// 2-G2/2-G4/2-G7 的证据口径：批大小峰值、调度步数与 p99、held 收尾必须能直接读。
+TEST_CASE("调度与 KV 指标随批次和收尾更新") {
+    CbHarness harness(4, 64, 64);
+    std::vector<std::shared_ptr<BoundedSink>> sinks;
+    for (std::int32_t index = 0; index < 4; ++index) {
+        sinks.push_back(harness.submit("req-m" + std::to_string(index), 6, 2, 100 + index * 10));
+    }
+    (void)harness.core.run_once(20);
+    (void)wait_batches(harness, 1);
+    CHECK(harness.metrics.get("llmopt_batch_size_peak") == 4);
+    CHECK(harness.metrics.get("llmopt_batch_tokens_peak") == 24);
+    CHECK(harness.metrics.get("llmopt_scheduler_steps_total") >= 1);
+    CHECK(harness.metrics.get("llmopt_schedule_step_p99_ns") >= 0);
+    CHECK(harness.metrics.get("llmopt_kv_held_blocks") ==
+          harness.metrics.get("llmopt_kv_used_blocks") -
+                  harness.metrics.get("llmopt_kv_cached_blocks"));
+    harness.run_until_closed(sinks);
+    CHECK(harness.metrics.get("llmopt_kv_held_blocks") == 0);
+    CHECK(harness.metrics.get("llmopt_kv_reconcile_diffs_total") == 0);
+}

@@ -20,6 +20,14 @@ MetricsRegistry::MetricsRegistry() {
     values_["llmopt_kv_cached_blocks"] = 0;
     values_["llmopt_kv_shared_blocks"] = 0;
     values_["llmopt_kv_watermark_blocks"] = 0;
+    values_["llmopt_kv_held_blocks"] = 0;
+    values_["llmopt_scheduler_ns_total"] = 0;
+    values_["llmopt_scheduler_steps_total"] = 0;
+    values_["llmopt_schedule_step_p99_ns"] = 0;
+    values_["llmopt_batch_size_last"] = 0;
+    values_["llmopt_batch_size_peak"] = 0;
+    values_["llmopt_batch_tokens_last"] = 0;
+    values_["llmopt_batch_tokens_peak"] = 0;
     values_["llmopt_prefix_hits_total"] = 0;
     values_["llmopt_prefix_misses_total"] = 0;
     values_["llmopt_prefix_hit_tokens_total"] = 0;

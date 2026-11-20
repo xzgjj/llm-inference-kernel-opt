@@ -80,15 +80,22 @@ std::unique_ptr<ModelRunner> make_runner(const ServerConfig& cfg, std::string& m
 #endif
 }
 
-// 组装后端配置：单请求上下文与整机 KV 容量分开，n_seq_max 预留 donor 槽。
+// donor 槽只在 GPU offload（统一 KV stream）且请求了前缀复用时才需要；
+// CPU 后端不支持零拷贝共享，前缀缓存会被降级关闭，多留 4 个槽只会稀释单序列上下文。
+std::int32_t donor_slots_for(const ServerConfig& cfg) {
+    return (cfg.enable_prefix_cache && cfg.n_gpu_layers > 0) ? kDonorSlots : 0;
+}
+
+// 组装后端配置：n_ctx_total 按“每序列上下文 × 全部序列槽”计，donor 槽也各占一份，
+// 否则 llama.cpp 会把 n_ctx_total 均分给 n_seq_max，单序列有效上下文被 donor 稀释。
 ModelConfig build_model_config(const ServerConfig& cfg, std::int32_t concurrency) {
     ModelConfig model_cfg;
     model_cfg.model_path = cfg.model_path;
     model_cfg.n_ctx = cfg.ctx_tokens;
-    model_cfg.n_ctx_total = cfg.ctx_tokens * concurrency;
+    model_cfg.n_seq_max = concurrency + donor_slots_for(cfg);
+    model_cfg.n_ctx_total = cfg.ctx_tokens * model_cfg.n_seq_max;
     model_cfg.n_batch = std::max(cfg.max_num_batched_tokens, cfg.ctx_tokens);
     model_cfg.n_ubatch = 512;
-    model_cfg.n_seq_max = concurrency + kDonorSlots;
     model_cfg.threads = cfg.threads;
     model_cfg.n_gpu_layers = cfg.n_gpu_layers;
     return model_cfg;
@@ -104,25 +111,53 @@ bool resolve_prefix_cache(const ServerConfig& cfg, const ModelRunner& runner) {
     return enabled;
 }
 
-// 组装并运行：Gate 通过后才加载权重；HTTP 与调度线程按 http→core→executor 顺序收尾。
-std::int32_t run(const ServerConfig& cfg) {
+// 启动前预算检查：读模型元数据、按 L2 口径估算并返回退出码（0 表示放行）。
+std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::int32_t& ctx_total,
+                          GateResult& gate) {
     const GgufMeta meta = read_gguf_meta(cfg.model_path);
     if (!meta.ok) {
         std::cerr << "读取模型元数据失败: " << meta.error << "\n";
         return kExitStartFail;
     }
-    const std::int32_t requested = std::max<std::int32_t>(cfg.max_concurrency, 1);
-    const std::int32_t ctx_total = cfg.ctx_tokens * requested;
+    // KV 预算按 n_seq_max 计，含 donor 槽；与 build_model_config 的 n_ctx_total 保持一致。
+    const std::int32_t kv_slots = requested + donor_slots_for(cfg);
+    ctx_total = cfg.ctx_tokens * kv_slots;
     EstBudget budget;
     budget.model_bytes = meta.file_bytes;
     budget.kv_bytes = estimate_kv_bytes(meta, ctx_total);
     budget.required_bytes = budget.model_bytes + budget.kv_bytes;
     budget.safety_ratio = cfg.safety_ratio;
     const CapabilitySnapshot snapshot = probe_capabilities();
-    GateResult gate = evaluate_gate(snapshot, budget, cfg.mode, cfg.allow_force_on);
+    gate = evaluate_gate(snapshot, budget, cfg.mode, cfg.allow_force_on);
     print_budget(gate);
     if (!gate.allow_start) {
         return gate.budget.required_bytes > gate.budget.free_bytes ? kExitResource : kExitGate;
+    }
+    return kExitOk;
+}
+
+// 关停收尾：清空 donor 缓存并打印块表终态，作为零泄漏与对账证据。
+void report_shutdown(KVBlockManager& kv, ModelRunner& runner) {
+    for (const RequestId& donor : kv.flush_cache()) {
+        runner.release_sequence(donor, 0);
+    }
+    const KVUsage final_usage = kv.usage();
+    std::string invariant_why;
+    const bool invariants_ok = kv.check_invariants(invariant_why);
+    std::cout << "shutdown: kv_used=" << final_usage.used_blocks
+              << " cached=" << final_usage.cached_blocks << " free=" << final_usage.free_blocks
+              << " total=" << final_usage.total_blocks << " shared=" << final_usage.shared_blocks
+              << " invariants=" << (invariants_ok ? "ok" : invariant_why) << "\n";
+}
+
+// 组装并运行：Gate 通过后才加载权重；HTTP 与调度线程按 http→core→executor 顺序收尾。
+std::int32_t run(const ServerConfig& cfg) {
+    const std::int32_t requested = std::max<std::int32_t>(cfg.max_concurrency, 1);
+    std::int32_t ctx_total = 0;
+    GateResult gate;
+    const std::int32_t gate_rc = gate_startup(cfg, requested, ctx_total, gate);
+    if (gate_rc != kExitOk) {
+        return gate_rc;
     }
 
     std::string message;
@@ -159,6 +194,8 @@ std::int32_t run(const ServerConfig& cfg) {
     const std::int32_t rc = run_server(cfg, *runner, metrics, core, gate);
     core.shutdown();
     core_thread.join();
+    // 关停后显式清空 donor 缓存再释放后端，日志里的 used/free 是“零泄漏”证据。
+    report_shutdown(kv, *runner);
     runner->release();
     return rc;
 }

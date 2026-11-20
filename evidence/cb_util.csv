@@ -1,0 +1,2 @@
+concurrency,requests,tokens,seconds,tokens_per_s,ttft_p50_ms,ttft_p95_ms,ttft_p99_ms,itl_p50_ms,itl_p99_ms,itl_p99_over_p50,latency_p50_ms,kv_util_median_pct,running_peak,batch_size_peak,scheduler_cpu_pct,schedule_step_p99_us,held_end,cached_end,free_end,watermark_end,reconcile_diffs
+8,24,768,3.259,235.64,136.41,561.81,821.07,16.07,71.85,4.47,891.07,85.39,8,8,0.212,199.703,0,240,272,26,0

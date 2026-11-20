@@ -309,6 +309,7 @@ void SchedulerCore::pump() {
     if (pending_step_ || shutting_down_) {
         return;
     }
+    const auto started = std::chrono::steady_clock::now();
     // 上一 tick 淘汰的 donor 此刻才能真正释放：本批若还要借前缀，必须等复制完成。
     reap_donors();
     Batch batch;
@@ -340,25 +341,61 @@ void SchedulerCore::pump() {
     if (batch.steps.empty()) {
         return;
     }
+    const std::int32_t batch_steps = static_cast<std::int32_t>(batch.steps.size());
+    const std::int32_t batch_tokens = batch.total_tokens;
     pending_serials_.clear();
     for (const SequenceStep& step : batch.steps) {
         pending_serials_.push_back(step.kv.seq_id);
     }
-    pending_remaining_ = static_cast<std::int32_t>(batch.steps.size());
+    pending_remaining_ = batch_steps;
     const bool submitted = executor_.submit(std::move(batch));
     if (!submitted) {
         pending_remaining_ = 0;
+        record_schedule_step(started, batch_steps, batch_tokens);
         return;
     }
     pending_step_ = true;
     metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
     metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
-    KVUsage usage = kv_.usage();
+    publish_kv_usage();
+    record_schedule_step(started, batch_steps, batch_tokens);
+}
+
+// 块表快照统一从这里发布，准入、收尾与关停看到的 used/cached/held 口径一致。
+void SchedulerCore::publish_kv_usage() {
+    const KVUsage usage = kv_.usage();
     metrics_.set("llmopt_kv_used_blocks", usage.used_blocks);
     metrics_.set("llmopt_kv_cached_blocks", usage.cached_blocks);
     metrics_.set("llmopt_kv_shared_blocks", usage.shared_blocks);
     metrics_.set("llmopt_kv_free_blocks", usage.free_blocks);
     metrics_.set("llmopt_kv_watermark_blocks", usage.watermark_blocks);
+    metrics_.set("llmopt_kv_held_blocks", usage.used_blocks - usage.cached_blocks);
+}
+
+void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point started,
+                                         std::int32_t steps, std::int32_t tokens) {
+    const std::int64_t ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                    std::chrono::steady_clock::now() - started)
+                                    .count();
+    scheduler_ns_total_ += ns;
+    ++scheduler_steps_total_;
+    schedule_samples_.push_back(ns);
+    if (schedule_samples_.size() > 256) {
+        schedule_samples_.erase(schedule_samples_.begin());
+    }
+    batch_size_peak_ = std::max(batch_size_peak_, steps);
+    batch_tokens_peak_ = std::max(batch_tokens_peak_, tokens);
+    metrics_.set("llmopt_scheduler_ns_total", scheduler_ns_total_);
+    metrics_.set("llmopt_scheduler_steps_total", scheduler_steps_total_);
+    metrics_.set("llmopt_batch_size_last", steps);
+    metrics_.set("llmopt_batch_size_peak", batch_size_peak_);
+    metrics_.set("llmopt_batch_tokens_last", tokens);
+    metrics_.set("llmopt_batch_tokens_peak", batch_tokens_peak_);
+    std::vector<std::int64_t> sorted = schedule_samples_;
+    std::sort(sorted.begin(), sorted.end());
+    const std::size_t index = sorted.empty() ? 0 : (sorted.size() - 1) * 99 / 100;
+    metrics_.set("llmopt_schedule_step_p99_ns",
+                 sorted.empty() ? 0 : sorted[static_cast<std::size_t>(index)]);
 }
 
 bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget) {
@@ -601,7 +638,7 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
         metrics_.inc("llmopt_requests_total{status=\"ok\"}");
     }
     metrics_.set("llmopt_running_sequences", static_cast<std::int64_t>(running_.size()));
-    metrics_.set("llmopt_kv_free_blocks", kv_.num_free_blocks());
+    publish_kv_usage();
     if (!shutting_down_ && !pending_step_) {
         pump();
     }

@@ -13,16 +13,31 @@ REQUESTS=${REQUESTS:-8}
 MAX_TOKENS=${MAX_TOKENS:-32}
 CONCURRENCY=${CONCURRENCY:-1,2,4}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-4}
+BATCH_TOKENS=${BATCH_TOKENS:-1024}
 NGL=${NGL:-99}
 THREADS=${THREADS:-0}
 OUT=${OUT:-evidence/cb_curve.csv}
 METRICS=${METRICS:-evidence/cb_metrics.txt}
+PROMPT_REPEAT=${PROMPT_REPEAT:-1}
+PROMPTS_FILE=${PROMPTS_FILE:-}
+TIER=${TIER:-short}
+WARMUP=${WARMUP:-0}
+BASELINE_CSV=${BASELINE_CSV:-}
+BASELINE_ROUND=${BASELINE_ROUND:-2}
+BASELINE_TIER=${BASELINE_TIER:-short}
+ASSERT_GATES=${ASSERT_GATES:-0}
+GATES=${GATES:-}
+SHUTDOWN_OUT=${SHUTDOWN_OUT:-evidence/kv_shutdown.txt}
 LOG=${LOG:-/tmp/llmopt-cb-bench.log}
+PREFIX_FLAG=()
+if [ "${PREFIX_CACHE:-1}" = "0" ]; then
+    PREFIX_FLAG=(--disable-prefix-cache)
+fi
 
 rm -f "$LOG"
 "$SERVER" --model "$MODEL" --host 127.0.0.1 --port "$PORT" --backend llama \
-    --mode off --ctx-tokens 1024 --max-concurrency "$MAX_CONCURRENCY" --max-num-batched-tokens 1024 \
-    --block-size 16 --n-gpu-layers "$NGL" --threads "$THREADS" --log-level info >"$LOG" 2>&1 &
+    --mode off --ctx-tokens 1024 --max-concurrency "$MAX_CONCURRENCY" --max-num-batched-tokens "$BATCH_TOKENS" \
+    --block-size 16 --n-gpu-layers "$NGL" --threads "$THREADS" --log-level info "${PREFIX_FLAG[@]}" >"$LOG" 2>&1 &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT
 
@@ -41,12 +56,25 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 grep -E "config:|estimate:|decision=" "$LOG" | head -5 || true
+extra=()
+if [ -n "$BASELINE_CSV" ]; then
+    extra+=(--baseline-csv "$BASELINE_CSV" --baseline-round "$BASELINE_ROUND"
+            --baseline-tier "$BASELINE_TIER")
+fi
+if [ "$ASSERT_GATES" = "1" ]; then
+    extra+=(--assert-gates --gates "$GATES")
+fi
+if [ -n "$PROMPTS_FILE" ]; then
+    extra+=(--prompts-file "$PROMPTS_FILE" --tier "$TIER" --warmup "$WARMUP")
+fi
 python3 scripts/bench/bench_cb.py --port "$PORT" --concurrency "$CONCURRENCY" \
-    --requests "$REQUESTS" --max-tokens "$MAX_TOKENS" --output "$OUT"
+    --requests "$REQUESTS" --max-tokens "$MAX_TOKENS" --prompt-repeat "$PROMPT_REPEAT" \
+    --output "$OUT" "${extra[@]}"
 curl -s "http://127.0.0.1:$PORT/metrics" >"$METRICS"
-grep -E "llmopt_(running|kv_|prefix|admission|requests_total|tokens_generated|forward_steps)" \
+grep -E "llmopt_(running|kv_|prefix|admission|requests_total|tokens_generated|forward_steps|scheduler|schedule|batch)" \
     "$METRICS" || true
 
 kill "$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
+grep "shutdown: kv_" "$LOG" >"$SHUTDOWN_OUT" || true
 trap - EXIT

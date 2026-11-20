@@ -1,0 +1,1 @@
+shutdown: kv_used=0 cached=0 free=512 total=512 shared=0 invariants=ok

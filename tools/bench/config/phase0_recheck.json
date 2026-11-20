@@ -1,0 +1,31 @@
+{
+  "model": "/root/llm-src/models/qwen2.5-0.5b-q4.gguf",
+  "host": "127.0.0.1",
+  "port": 8081,
+  "server": {
+    "bin": "/root/llm-src/llama.cpp/build-cuda/bin/llama-server",
+    "extra_args": ["--no-cache-prompt"]
+  },
+  "ctx_tokens": 2048,
+  "batch": 2048,
+  "ubatch": 512,
+  "threads": 8,
+  "n_gpu_layers": 0,
+  "concurrency": [1, 4],
+  "tiers": [
+    {"name": "short", "max_prompt_tokens": 128, "n": 30}
+  ],
+  "max_tokens": 64,
+  "seed": 42,
+  "rounds": 1,
+  "warmup": 5,
+  "request_timeout_s": 120,
+  "idle_between_cells_s": 2,
+  "sampling": {
+    "temperature": 0.7,
+    "top_k": 40,
+    "top_p": 0.95,
+    "min_p": 0.05,
+    "repeat_penalty": 1.0
+  }
+}
