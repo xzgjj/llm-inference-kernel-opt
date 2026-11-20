@@ -113,13 +113,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # -Wno-error=maybe-uninitialized：RelWithDebInfo + ASan 下 GCC 对 libstdc++ <regex>
+      # 的 std::_StateT 报假阳性；只降级该类，告警仍打印。
       - name: configure
         env:
           CXXFLAGS: ${{ matrix.flags }}
         run: |
           cmake -S . -B build-san-${{ matrix.name }} \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_CXX_FLAGS="${{ matrix.flags }}"
+            -DCMAKE_CXX_FLAGS="${{ matrix.flags }} -Wno-error=maybe-uninitialized"
       - name: build
         run: cmake --build build-san-${{ matrix.name }} --parallel
       - name: fast tests under sanitizer
