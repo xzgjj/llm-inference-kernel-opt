@@ -207,6 +207,14 @@ CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规
 - `tests/integration/test_rate_limit.py`（登记名 `backpressure_test`）：`--rate-limit-rps 2 --rate-limit-burst 2` 下连续三次请求为 200/200/429，429 带 `Retry-After: 1`、code `RATE_LIMITED`、`retryable=true`，等待 0.6 s 后恢复 200；`llmopt_rate_limited_total` 精确等于 1。
 - 慢客户端隔离沿用 `integration_server_slow_client`（`scripts/bench/slow_client.py`）的 `fast_itl_p99_ms`/溢出列；本机为 stub 读数，真实 1 帧/s 慢读与 ≤10% 退化判定留待 WSL/真后端复测。
 
+阶段 6 的部署与健壮性（7-5）：
+
+- `scripts/release/docker_smoke.sh`（登记名 `deploy_smoke`）：Dockerfile 起服务 → `/readyz` 200 → chat 200 → `docker stop` 后退出码 0。Windows 本机无 Docker，只在 Linux/CI 跑。
+- `scripts/release/soak.py`（登记名 `soak_30m`）：持续流式请求 + 每 30 s 采 `llmopt_rss_mib`，断言非 200 为 0、RSS 相对基线增长 <5%，报告落 `build/evidence/soak_report.json`。本机 30 s 冒烟已验证（1566 请求 / 0 错误 / +0.95%）。
+- `.github/workflows/nightly.yml`（登记名 `sanitizer_nightly`）：TSan 10 轮、ASan/UBSan 一轮、30 min soak；不进 PR 阻塞链路。本机 Windows 不能跑 sanitizer，口径为“脚本与 workflow 已固化，结论以 CI 运行为准”。
+- systemd 模板 `scripts/release/llmopt.service`；部署说明见 `docs/deploy.md`。
+
+
 
 
 准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。

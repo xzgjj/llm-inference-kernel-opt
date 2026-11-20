@@ -1,0 +1,85 @@
+# nightly.yml — 6-G7：TSan 10 轮、ASan/UBSan、30 min soak（不阻塞 PR，只跑定时/手动）。
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 19 * * *" # UTC 19:00 = 北京 03:00
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  tsan-10x:
+    name: tsan-10x
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: configure
+        env:
+          CXXFLAGS: -fsanitize=thread -fno-omit-frame-pointer -g
+        run: >-
+          cmake -S . -B build-tsan -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer -g -Wno-error=maybe-uninitialized"
+      - name: build
+        run: cmake --build build-tsan --parallel
+      - name: fast tests x10
+        env:
+          TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+        run: |
+          for round in $(seq 1 10); do
+            echo "== TSan round $round =="
+            python scripts/ci/run_registry.py --speed fast --build-dir build-tsan
+          done
+
+  asan-ubsan:
+    name: asan-ubsan
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: configure
+        run: >-
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g -Wno-error=maybe-uninitialized"
+      - name: build
+        run: cmake --build build-asan --parallel
+      - name: fast tests
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: python scripts/ci/run_registry.py --speed fast --build-dir build-asan
+
+  soak-30m:
+    name: soak-30m
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build release
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel --target llmopt_server
+      - name: 30 min soak
+        run: python scripts/release/soak.py build/llmopt_server --seconds 1800 --report build/evidence/soak_report.json
+      - name: upload soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report
+          path: build/evidence/soak_report.json
+          if-no-files-found: warn

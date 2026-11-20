@@ -1,0 +1,22 @@
+# 6-G6：systemd 单元模板。安装：cp scripts/release/llmopt.service /etc/systemd/system/
+# 环境文件 /etc/llmopt/llmopt.env 里放 LLMOPT_ALLOW_STUB（仅 stub）等；真后端用 --config。
+[Unit]
+Description=llmopt single-node inference service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=llmopt
+Group=llmopt
+EnvironmentFile=-/etc/llmopt/llmopt.env
+ExecStart=/usr/local/bin/llmopt_server --config /etc/llmopt/config.json
+# SIGTERM 走 Draining：在飞请求收尾后退出 0，超 drain-deadline-seconds 强制停止。
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
