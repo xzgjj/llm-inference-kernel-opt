@@ -31,7 +31,7 @@ constexpr std::int32_t kDonorSlots = 4; // 前缀缓存最多保留的 donor 序
 
 // MiB 换算只用于启动摘要，避免把字节数直接怼给人看。
 std::int64_t to_mib(std::int64_t bytes) {
-    return bytes / (1024 * 1024);
+    return bytes / (1024LL * 1024);
 }
 
 // 配置错误到退出码：用法类 2，取值类 1。

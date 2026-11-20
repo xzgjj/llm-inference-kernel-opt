@@ -76,7 +76,9 @@ jobs:
         if: matrix.compiler == 'clang'
         run: |
           sudo apt-get install -y -qq clang-tidy
-          files=$(find src include \( -name '*.cc' -o -name '*.cpp' \) | head -50)
+          # runner_llama.cpp 只在 LLMOPT_ENABLE_LLAMA=ON 下可编译，默认构建没有 llama.h；
+          # 它的可编译性由 llama-compile 作业单独守着，这里不重复扫。
+          files=$(find src include \( -name '*.cc' -o -name '*.cpp' \) | grep -v 'src/runner_llama.cpp' | head -50)
           if [ -z "$files" ]; then
             echo "SKIP(clang-tidy): 暂无 C++ 源文件" >> "$GITHUB_STEP_SUMMARY"
             exit 0

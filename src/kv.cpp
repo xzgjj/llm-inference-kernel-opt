@@ -46,8 +46,9 @@ std::uint64_t KVBlockManager::chain_hash(std::uint64_t parent,
     const std::int32_t begin = index * config_.block_tokens;
     std::uint64_t value = parent * kHashPrime ^ kHashSalt;
     for (std::int32_t offset = 0; offset < config_.block_tokens; ++offset) {
-        value ^=
-                static_cast<std::uint64_t>(tokens[static_cast<std::size_t>(begin + offset)]) + 1ULL;
+        value ^= static_cast<std::uint64_t>(tokens[static_cast<std::size_t>(begin) +
+                                                   static_cast<std::size_t>(offset)]) +
+                 1ULL;
         value *= kHashPrime;
     }
     return value == 0 ? 1 : value;

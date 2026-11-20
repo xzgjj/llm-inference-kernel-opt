@@ -2,7 +2,9 @@
 # 复杂度阈值与 docs/ci/ci-spec.md 第 6 节保持一致（25 / 60 行）。
 # clang-tidy 21.1.6 的 modernize-use-scoped-lock 在 diagOnSingleLock 段错误（上游崩溃，
 # 触发点在本仓 std::lock_guard 用法，非代码缺陷），故在 Checks 里显式关闭该检查。
-# TODO(ci-owner): 上游修复后移除下面那行关闭项与本节说明。
+# bugprone-easily-swappable-parameters 在 C++ 里噪声极高（相邻同类型参数几乎必报），
+# 参数语义由命名与调用点约定承载，本仓不靠该检查拦截，故一并关闭。
+# TODO(ci-owner): 上游修复后移除 modernize-use-scoped-lock 那行关闭项与本节说明。
 Checks: >-
   -*,
   bugprone-*,
@@ -13,6 +15,7 @@ Checks: >-
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,
   -modernize-use-scoped-lock,
+  -bugprone-easily-swappable-parameters,
   -readability-magic-numbers,
   -readability-identifier-length
 WarningsAsErrors: 'bugprone-*,misc-unused-*'

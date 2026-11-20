@@ -232,7 +232,7 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     ctx->gate = gate;
 
     httplib::Server server;
-    server.set_payload_max_length(4 * 1024 * 1024);
+    server.set_payload_max_length(std::size_t{4} * 1024 * 1024);
     server.set_read_timeout(5, 0);
     server.set_write_timeout(120, 0);
     server.Post("/v1/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
