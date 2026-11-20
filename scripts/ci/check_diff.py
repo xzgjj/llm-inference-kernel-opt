@@ -37,7 +37,7 @@ ALLOWED_TOP = {
     "third_party", "benchmarks", "examples", "tools",
 }
 ALLOWED_ROOT_FILES = {
-    "README.md", "CMakeLists.txt", "CMakePresets.json", ".gitignore", ".gitattributes",
+    "README.md", "CLI.md", "CMakeLists.txt", "CMakePresets.json", ".gitignore", ".gitattributes",
     "LICENSE", "NOTICE", ".clang-format", ".clang-tidy", ".editorconfig", "CODE_OF_CONDUCT.md",
 }
 RULE_PATTERNS = [

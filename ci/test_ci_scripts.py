@@ -5,6 +5,7 @@ rule: CI-TST-001
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
 import unittest
@@ -102,6 +103,21 @@ class WaiverTest(unittest.TestCase):
         waivers = check_diff.load_waivers(result)
         self.assertTrue(result.passed, [f"{v.rule}:{v.path}:{v.message}" for v in result.errors])
         self.assertEqual(waivers, [])
+
+
+class ScopeWhitelistTest(unittest.TestCase):
+    def _violations(self, files: dict[str, str]) -> list[str]:
+        result = ci_common.CheckResult("scope")
+        args = argparse.Namespace(labels="", enforce=False)
+        check_diff.scope_whitelist(result, check_diff.Diff(files=files), args)
+        return [v.message for v in result.violations if v.rule == "CI-DIF-001"]
+
+    def test_root_contract_docs_are_allowed(self) -> None:
+        # CLI.md 是已入库的 CLI 契约，阶段 5 新增工具章节不能因白名单缺口被判越界。
+        self.assertEqual(self._violations({"CLI.md": "M", "README.md": "M"}), [])
+
+    def test_new_top_level_directory_is_rejected(self) -> None:
+        self.assertTrue(self._violations({"bench/recompute.py": "A"}))
 
 
 if __name__ == "__main__":

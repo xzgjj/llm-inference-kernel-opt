@@ -137,7 +137,7 @@ CI 的职责是把**可判定**的部分变成机器红灯，把**不可判定**
 
 | ID | 规则 | 判定 | 阈值 | 实现 | 豁免 |
 | --- | --- | --- | --- | --- | --- |
-| CI-DIF-001 | 范围白名单 | 自动 | 顶层目录只能是 `src/ include/ tests/ docs/ scripts/ cmake/ .github/` 与根级配置 | `script:check_diff.py:scope_whitelist` | 新顶层目录需批准 |
+| CI-DIF-001 | 范围白名单 | 自动 | 顶层目录只能是 `src/ include/ tests/ docs/ scripts/ cmake/ .github/` 与根级配置（含 `README.md`、`CLI.md`） | `script:check_diff.py:scope_whitelist` | 新顶层目录需批准 |
 | CI-DIF-002 | Diff 预算 | 自动 | 核心代码 ≤400 行警告，>800 行失败（不含测试与生成物） | `script:check_diff.py:diff_budget` | 重构例外需批准 |
 | CI-DIF-003 | 规则文件改动 | 自动 | 触碰 `.github/**`、`.githooks/**`、`scripts/ci/**`、`ci/**`、`docs/ci/**`、`docs/testing.md` 需 `ci-rule-change` 标签 | `script:check_diff.py:rule_files` | 无 |
 | CI-DIF-004 | 受保护测试改动 | 自动 | 删除/禁用受保护测试需 `behavior-change` 标签与说明块 | `script:check_diff.py:protected_tests` | 无 |
@@ -193,6 +193,7 @@ C++ 推理服务的两类高危缺陷（use-after-free、数据竞争）不会�
 | `ci/` | CI 工具自测（验闸门脚本本身） | 不计入产品覆盖率，带 `infra` 标签 |
 | `docs/` | 规则、测试策略、ADR、论文 | 只有 `ci.md`、`testing.md`、`ci/` 入库 |
 | `scripts/ci/` | 闸门脚本（仅标准库，无三方依赖） | 保证任何机器直接可跑 |
+| `CLI.md`（根级） | 服务 CLI 与预研工具契约 | 与 `README.md` 同属根级合同文档，已登记进 `ALLOWED_ROOT_FILES` |
 | `.github/` | workflow、CODEOWNERS、PR 模板 | 规则文件，改动需批准 |
 
 ### 5.2 无源码阶段的策略
