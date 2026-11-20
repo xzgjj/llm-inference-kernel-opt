@@ -176,7 +176,7 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 阶段 4 矩阵工具链的用例：
 
-- `tests/tools/test_matrix.py`（7 例）：JSON 配置必填/覆盖、§1.6 十二列、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`。
+- `tests/tools/test_matrix.py`（9 例）：JSON 配置必填/覆盖、§1.6 十二列、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`、压测窗口 K-4/K-5 峰值采样、比率列保留 6 位小数（防 K-4 被舍成 0）。
 - `tests/tools/test_report.py`（4 例）：仅凭 JSONL + manifest 离线重建报告、四张 PNG 签名、`/metrics` 计数漂移检测、偏差 `high` 返回非零。
 - `tests/tools/test_peak_sampler.py`、`tests/tools/test_bench_*`：采样与 SSE 解析口径。
 - `tests/integration/test_server_matrix.py`：真 stub 服务跑 2 并发 × 2 档 × 1 轮；校验 CSV 列、warmup 丢弃、manifest 哈希、RSS 峰值、`.prom` 快照、`step_summary.csv`，并回调 `aggregate.py --check-metrics --check-deviation`。

@@ -10,18 +10,10 @@
 
 using namespace llmopt;
 
-namespace {
-
-bool finite(double value) {
-    return std::isfinite(value);
-}
-
-} // namespace
-
 TEST_CASE("read_now 在无 GPU 依赖下也能拿到正的 RSS") {
     const ResourceReading reading = ResourceSampler::read_now(false);
     CHECK(reading.rss_mib > 0.0);
-    CHECK(finite(reading.rss_mib));
+    CHECK(std::isfinite(reading.rss_mib));
     CHECK_FALSE(reading.vram_known);
 }
 
@@ -34,8 +26,8 @@ TEST_CASE("sample_once 发布 RSS 且峰值只增不减") {
         CHECK(reading.rss_mib > 0.0);
         const double rss = metrics.get_float(MetricId::RssMib);
         const double peak = metrics.get_float(MetricId::RssPeakMib);
-        CHECK(finite(rss));
-        CHECK(finite(peak));
+        CHECK(std::isfinite(rss));
+        CHECK(std::isfinite(peak));
         CHECK(peak >= rss - 1e-9);
         CHECK(peak >= previous_peak);
         previous_peak = peak;
@@ -52,8 +44,8 @@ TEST_CASE("VRAM 未知时写 NaN 且 probe_ok=0，已知时三者自洽") {
     const std::int64_t probe = metrics.get(MetricId::VramProbeOk);
     if (reading.vram_known) {
         CHECK(probe == 1);
-        CHECK(finite(vram));
-        CHECK(finite(peak));
+        CHECK(std::isfinite(vram));
+        CHECK(std::isfinite(peak));
         CHECK(vram >= 0.0);
     } else {
         CHECK(probe == 0);
@@ -70,7 +62,7 @@ TEST_CASE("start/stop 幂等，后台线程停止后 gauge 仍可读") {
     std::this_thread::sleep_for(std::chrono::milliseconds(40));
     sampler.stop();
     sampler.stop();
-    CHECK(finite(metrics.get_float(MetricId::RssMib)));
+    CHECK(std::isfinite(metrics.get_float(MetricId::RssMib)));
     CHECK(metrics.get_float(MetricId::RssMib) > 0.0);
 }
 

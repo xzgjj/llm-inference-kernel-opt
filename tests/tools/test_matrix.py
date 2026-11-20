@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tools.bench import matrix
 
@@ -116,6 +118,41 @@ class SummarizeTest(unittest.TestCase):
         report, deviations = matrix.summarize(cfg, rows, {})
         self.assertEqual(report[0]["deviation_flag"], "insufficient")
         self.assertEqual(deviations[0]["verdict"], "insufficient")
+
+
+class ReportPrecisionTest(unittest.TestCase):
+    def test_ratio_fields_keep_small_sched_overhead(self) -> None:
+        """回归：K-4 常在 0.01% 量级，3 位小数会写成一列 0。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.csv"
+            matrix.write_report(path, [{"kv_internal_frag_ratio": 0.5,
+                                        "sched_cpu_ratio": 0.000123}],
+                                ["kv_internal_frag_ratio", "sched_cpu_ratio"])
+            text = path.read_text(encoding="utf-8")
+        self.assertIn("0.000123", text)
+        self.assertIn("0.5", text)
+
+
+class LiveMetricSamplerTest(unittest.TestCase):
+    def test_keeps_peak_when_cell_end_snapshot_is_drained(self) -> None:
+        """回归：格结束快照在排空后为 0，采样器必须保留压测窗口内的峰值。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.json"
+            path.write_text(json.dumps(config_dict()), encoding="utf-8")
+            cfg = matrix.load_config(path)
+        text = (
+            "# TYPE llmopt_kv_internal_frag_ratio gauge\n"
+            "llmopt_kv_internal_frag_ratio 0.0700\n"
+            "# TYPE llmopt_sched_cpu_ratio gauge\n"
+            "llmopt_sched_cpu_ratio 0.0021\n"
+        )
+        sampler = matrix._LiveMetricSampler(cfg, 1, interval_s=0.05)
+        with mock.patch.object(matrix, "fetch_metrics", return_value=text):
+            sampler.start()
+            time.sleep(0.22)
+            sampler.stop()
+        self.assertAlmostEqual(sampler.kv, 0.07)
+        self.assertAlmostEqual(sampler.sched, 0.0021)
 
 
 if __name__ == "__main__":

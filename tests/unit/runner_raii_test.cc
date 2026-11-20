@@ -2,7 +2,6 @@
 // 只在 LLMOPT_ENABLE_LLAMA=ON 的构建里登记；有真模型时走完整 load→release→reload。
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
-
 #include "llmopt/runner.hpp"
 
 #include <cstdlib>
@@ -56,7 +55,8 @@ TEST_CASE("真模型 load->tokenize->release->reload") {
     auto runner = make_llama_runner();
     REQUIRE(runner != nullptr);
     const ModelConfig config = config_for(model);
-    REQUIRE(runner->load_model(config) == ErrCode::Ok, runner->last_error().message.c_str());
+    const ErrCode loaded = runner->load_model(config);
+    REQUIRE(loaded == ErrCode::Ok);
     std::vector<std::int32_t> ids;
     CHECK(runner->tokenize("hello", ids) == ErrCode::Ok);
     CHECK_FALSE(ids.empty());

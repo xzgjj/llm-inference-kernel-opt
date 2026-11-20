@@ -14,6 +14,7 @@ import os
 import platform
 import socket
 import subprocess
+import threading
 import time
 import urllib.request
 from dataclasses import dataclass
@@ -334,6 +335,45 @@ def fetch_metrics(cfg: MatrixConfig, port: int) -> str:
         return ""
 
 
+class _LiveMetricSampler:
+    """压测窗口内轮询 /metrics，保存 K-4/K-5 的峰值。
+
+    格结束时的快照是在请求排空之后取的，gauge 已经被重置为 0；直接用它填
+    `kv_internal_frag_ratio` 会得到一列全 0。这里只提升精度，不伪造数据：
+    最终 CSV 仍写真实快照与采样峰值的较大者，原始 `.prom` 保持原样。
+    """
+
+    def __init__(self, cfg: MatrixConfig, port: int, interval_s: float = 0.5) -> None:
+        self._cfg = cfg
+        self._port = port
+        self._interval_s = interval_s
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.kv = 0.0
+        self.sched = 0.0
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, name="metrics-live", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._interval_s):
+            text = fetch_metrics(self._cfg, self._port)
+            if not text:
+                continue
+            kv = parse_named(text, "llmopt_kv_internal_frag_ratio")
+            sched = parse_named(text, "llmopt_sched_cpu_ratio")
+            if kv is not None:
+                self.kv = max(self.kv, kv)
+            if sched is not None:
+                self.sched = max(self.sched, sched)
+
+
 def read_new_trace(path: Path, start_line: int) -> tuple[list[dict], int]:
     """读 step trace 的新增行；返回 (本轮记录, 新行号)，避免每轮重读全文件。"""
     if not path.exists():
@@ -497,8 +537,12 @@ def _fmt_pct(value: float | None) -> float | str:
     return "" if value is None else round(value * 100.0, 3)
 
 
-def _fmt(value: float | None) -> float | str:
-    return "" if value is None else round(value, 3)
+RATIO_FIELDS = {"kv_internal_frag_ratio", "sched_cpu_ratio"}
+_METRIC_PRECISION = 3
+
+
+def _fmt(value: float | None, digits: int = _METRIC_PRECISION) -> float | str:
+    return "" if value is None else round(value, digits)
 
 
 def write_report(path: Path, rows: list[dict], fields: list[str]) -> None:
@@ -507,8 +551,11 @@ def write_report(path: Path, rows: list[dict], fields: list[str]) -> None:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
         for row in rows:
-            writer.writerow({key: _fmt(value) if isinstance(value, float) else value
-                             for key, value in row.items()})
+            writer.writerow({
+                key: _fmt(value, 6) if key in RATIO_FIELDS and isinstance(value, float)
+                else _fmt(value) if isinstance(value, float) else value
+                for key, value in row.items()
+            })
 
 
 def _sha256(path: Path) -> str:
@@ -598,14 +645,21 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
         try:
             _warmup(cfg, handle[0], concurrency, prompt_rows, records_path)
             for round_no in range(1, cfg.repeats + 1):
-                _run_round(cfg, handle[0], concurrency, prompt_rows, round_no, records_path)
+                live = _LiveMetricSampler(cfg, handle[0])
+                live.start()
+                try:
+                    _run_round(cfg, handle[0], concurrency, prompt_rows, round_no, records_path)
+                finally:
+                    live.stop()
                 metrics_text = fetch_metrics(cfg, handle[0])
                 (out_dir / f"metrics_p{concurrency}_r{round_no}.prom").write_text(
                     metrics_text, encoding="utf-8"
                 )
                 metrics_by_round[(concurrency, round_no)] = {
-                    "kv": parse_named(metrics_text, "llmopt_kv_internal_frag_ratio"),
-                    "sched": parse_named(metrics_text, "llmopt_sched_cpu_ratio"),
+                    "kv": max(parse_named(metrics_text, "llmopt_kv_internal_frag_ratio") or 0.0,
+                              live.kv),
+                    "sched": max(parse_named(metrics_text, "llmopt_sched_cpu_ratio") or 0.0,
+                                 live.sched),
                 }
                 time.sleep(cfg.idle_between_cells_s)
         finally:
