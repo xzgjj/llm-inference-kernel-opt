@@ -25,4 +25,4 @@ Qwen2.5-0.5B
 - 准入：预算 = `max_concurrency + queue_capacity`，超限返回 429 + `Retry-After: 1`。
 - 实验矩阵：`scripts/bench/matrix_runner.py` 按 JSON 配置跑并发档 × prompt 档，档间重启；产物含 `requests.jsonl`、`matrix_report.csv`、`deviation.csv`、`step_summary.csv`、`repro_manifest.json`。
 - 复现：`bash scripts/repro.sh --smoke`（stub，秒级）；真机用 `--backend llama` 并覆盖 `--server/--model`。
-- 当前限制：官方 7×2 两轮尚未在 CPU 主机跑完；已跑 4 档 × 2 档小样，结果与限制见 `docs/阶段4-实现记录.md` §5。chat 端点仍 404（501 待契约批准）。
+- 当前限制：官方 7×2 矩阵已在 CPU 主机跑完（14/14 行 `ok`，指标对账 PASS），但两轮偏差 12/14 行超差、P8 后吞吐不再增长，属 CPU 饱和负结果；不据此宣称性能达标。chat 端点仍 404（501 待契约批准）。
