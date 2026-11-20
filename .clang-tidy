@@ -1,5 +1,8 @@
 # 只开启与"可读性、正确性"直接相关的检查；风格交给 clang-format。
 # 复杂度阈值与 docs/ci/ci-spec.md 第 6 节保持一致（25 / 60 行）。
+# clang-tidy 21.1.6 的 modernize-use-scoped-lock 在 diagOnSingleLock 段错误（上游崩溃，
+# 触发点在本仓 std::lock_guard 用法，非代码缺陷），故在 Checks 里显式关闭该检查。
+# TODO(ci-owner): 上游修复后移除下面那行关闭项与本节说明。
 Checks: >-
   -*,
   bugprone-*,
@@ -9,8 +12,6 @@ Checks: >-
   misc-unused-*,
   -modernize-use-trailing-return-type,
   -modernize-use-nodiscard,
-  # clang-tidy 21.1.6 的 modernize-use-scoped-lock 在 diagOnSingleLock 段错误（上游崩溃，非本项目代码问题），
-  # TODO(ci-owner): 上游修复后移除本行
   -modernize-use-scoped-lock,
   -readability-magic-numbers,
   -readability-identifier-length

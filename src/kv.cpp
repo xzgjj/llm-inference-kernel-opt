@@ -109,6 +109,9 @@ void KVBlockManager::evict_donor(const RequestId& donor) {
     if (it == donors_.end()) {
         return;
     }
+    // donor 可能正是 donor_order_ 里的元素（ensure_free 传 front()），下面 erase 会让它悬空，
+    // 后续 push_back 必须用副本；ASan 下这里的 heap-use-after-free 是真实缺陷，不是误报。
+    const RequestId dropped_id = donor;
     for (std::int32_t id : it->second) {
         BlockState& block = blocks_[static_cast<std::size_t>(id)];
         if (block.owner == donor) {
@@ -120,7 +123,7 @@ void KVBlockManager::evict_donor(const RequestId& donor) {
     donors_.erase(it);
     donor_order_.erase(std::remove(donor_order_.begin(), donor_order_.end(), donor),
                        donor_order_.end());
-    dropped_.push_back(donor);
+    dropped_.push_back(dropped_id);
 }
 
 bool KVBlockManager::ensure_free(std::int32_t need) {

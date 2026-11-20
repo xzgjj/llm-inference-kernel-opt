@@ -116,9 +116,12 @@ def run_checks(port: int) -> None:
 
     status, body = post(port, "/completion", {"prompt": ""})
     check(status == 400, f"空 prompt 应 400，实际 {status}")
+    # 空 prompt 是语义错误而非上下文超限，避免客户端据此裁剪 prompt。
+    check(json.loads(body)["error"]["code"] == "INVALID_JSON", "空 prompt 应回 INVALID_JSON")
 
     status, body = post(port, "/completion", {"prompt": "hello", "max_tokens": 5000})
     check(status == 400, f"max_tokens 越界应 400，实际 {status}")
+    check("max_tokens" in json.loads(body)["error"]["message"], "错误信息应指出 max_tokens 字段")
 
 
 def stream_tokens(port: int, max_tokens: int = 8) -> list[dict]:

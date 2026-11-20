@@ -163,8 +163,30 @@ TEST_CASE("缓存占满时按 donor 淘汰并给出待释放序列") {
     CHECK(kv.check_invariants(why));
 }
 
-TEST_CASE("共享块在 ref_cnt>1 时不被回收，最后一个持有者释放后才空闲") {
-    KVBlockManager kv(KVConfig{4, 4, 0.0, true, 2});
+// ASan 抓到过 heap-use-after-free：donor_order_ 里被 erase 的元素正是传入的 donor 引用，
+// 再 push_back(donor) 就是读已释放内存。短 id 走 SSO 感知不到，故用超过 15 字节的 id 锁住该路径。
+TEST_CASE("长 donor id 淘汰后仍安全写入待释放列表") {
+    KVBlockManager kv(KVConfig{4, 4, 0.0, true, 1});
+    Sequence first;
+    init_sequence(first, 8, 16);
+    first.group_id = "req-0123456789abcdef";
+    REQUIRE(kv.acquire(first, 16, 0, true).ok());
+    kv.mark_written(first, 16);
+    REQUIRE(kv.retain(first) == 16);
+    CHECK(kv.num_free_blocks() == 0);
+
+    Sequence second;
+    init_sequence(second, 9, 4);
+    REQUIRE(kv.acquire(second, 4, 0, true).ok());
+    const std::vector<RequestId> dropped = kv.take_dropped_donors();
+    REQUIRE(dropped.size() == 1);
+    CHECK(dropped.front() == "req-0123456789abcdef");
+    kv.free(second);
+    std::string why;
+    CHECK(kv.check_invariants(why));
+}
+
+TEST_CASE("共享块在 ref_cnt>1 时不被回收，最后一个持有者释放后才空闲") {    KVBlockManager kv(KVConfig{4, 4, 0.0, true, 2});
     Sequence first;
     init_sequence(first, 10, 12);
     REQUIRE(kv.acquire(first, 12, 0, true).ok());

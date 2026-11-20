@@ -1,0 +1,173 @@
+{
+  "cases": [
+    {
+      "case": "healthz",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "body": "{\"status\":\"ready\"}"
+      }
+    },
+    {
+      "case": "metrics_first_screen",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "series": 48,
+        "has_type": false
+      }
+    },
+    {
+      "case": "sse_single",
+      "ok": true,
+      "detail": {
+        "frames": 17,
+        "done": true,
+        "ttft_ms": 76.41,
+        "gaps_ms": [
+          9.56,
+          10.08,
+          3.11,
+          3.46,
+          3.2,
+          3.17,
+          3.18,
+          3.33,
+          3.22,
+          3.16,
+          3.17,
+          3.17,
+          3.21,
+          3.19,
+          3.22,
+          0.02
+        ]
+      }
+    },
+    {
+      "case": "non_stream",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "usage": {
+          "completion_tokens": 8,
+          "prompt_tokens": 1,
+          "total_tokens": 9
+        },
+        "finish": "length"
+      }
+    },
+    {
+      "case": "concurrent_8",
+      "ok": true,
+      "detail": {
+        "completed": 8,
+        "tokens": 200,
+        "tok_s": 756.7
+      }
+    },
+    {
+      "case": "invalid_json",
+      "ok": true,
+      "detail": {
+        "status": 400,
+        "body": "{\"error\":{\"code\":\"INVALID_JSON\",\"message\":\"请求体不是合法 JSON 对象\",\"retryable\":false}}"
+      }
+    },
+    {
+      "case": "missing_prompt",
+      "ok": true,
+      "detail": {
+        "status": 400,
+        "body": "{\"error\":{\"code\":\"INVALID_JSON\",\"message\":\"prompt 必须是字符串\",\"retryable\":false}}"
+      }
+    },
+    {
+      "case": "empty_prompt",
+      "ok": true,
+      "detail": {
+        "status": 400,
+        "body": "{\"error\":{\"code\":\"PROMPT_TOO_LONG\",\"message\":\"prompt 不能为空\",\"retryable\":false}}"
+      }
+    },
+    {
+      "case": "max_tokens_zero",
+      "ok": true,
+      "detail": {
+        "status": 400,
+        "body": "{\"error\":{\"code\":\"INVALID_JSON\",\"message\":\"采样参数非法或越界\",\"retryable\":false}}"
+      }
+    },
+    {
+      "case": "max_tokens_oversize",
+      "ok": true,
+      "detail": {
+        "status": 400,
+        "body": "{\"error\":{\"code\":\"INVALID_JSON\",\"message\":\"采样参数非法或越界\",\"retryable\":false}}"
+      }
+    },
+    {
+      "case": "prompt_over_ctx",
+      "ok": true,
+      "detail": {
+        "status": 400,
+        "body": "{\"error\":{\"code\":\"CONTEXT_OVERFLOW\",\"message\":\"prompt + max_tokens 超过 ctx-tokens\",\"retryable\":false}}"
+      }
+    },
+    {
+      "case": "unknown_model_echo",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "note": "服务端未校验 model 字段"
+      }
+    },
+    {
+      "case": "duplicate_request_id",
+      "ok": true,
+      "detail": {
+        "status": 200,
+        "note": "重复 id 未被拒绝"
+      }
+    },
+    {
+      "case": "disconnect_cancel",
+      "ok": true,
+      "detail": {
+        "before": 0.0,
+        "after": 1.0
+      }
+    },
+    {
+      "case": "slow_client_isolation",
+      "ok": true,
+      "detail": {
+        "overflow_before": 0.0,
+        "overflow_after": 0.0,
+        "slow_frames": 3,
+        "slow_error": null,
+        "fast_error": null,
+        "fast_p99_ms": 16.54
+      }
+    },
+    {
+      "case": "queue_pressure",
+      "ok": false,
+      "detail": {
+        "codes": {
+          "200": 16
+        }
+      }
+    },
+    {
+      "case": "chat_endpoint_gap",
+      "ok": true,
+      "detail": {
+        "status": 404,
+        "body": "{\"error\":{\"code\":\"NOT_SUPPORTED\",\"message\":\"/v1/chat/completions 在阶段 1 未启用\",\"retryable\":false}}"
+      }
+    }
+  ],
+  "passed": 16,
+  "total": 17
+}
