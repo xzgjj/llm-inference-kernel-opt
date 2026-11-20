@@ -30,14 +30,27 @@ void set_env(const char* key, const char* value) {
 
 // 清掉上一例留下的变量，避免用例互相污染。
 void clear_env() {
-    for (const char* key :
-         {"LLMOPT_MODEL", "LLMOPT_HOST", "LLMOPT_PORT", "LLMOPT_CTX_TOKENS",
-          "LLMOPT_MAX_CONCURRENCY", "LLMOPT_MODE", "LLMOPT_BACKEND", "LLMOPT_SAFETY_RATIO",
-          "LLMOPT_ALLOW_STUB", "LLMOPT_ALLOW_FORCE_ON", "LLMOPT_MAX_NUM_BATCHED_TOKENS",
-          "LLMOPT_QUEUE_CAPACITY", "LLMOPT_BLOCK_SIZE", "LLMOPT_WATERMARK_RATIO",
-          "LLMOPT_CHUNK_SIZE", "LLMOPT_DISABLE_PREFIX_CACHE", "LLMOPT_FAIRNESS_AGING",
-          "LLMOPT_AGING_THRESHOLD_MS", "LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS",
-          "LLMOPT_PREEMPT_TRACE"}) {
+    for (const char* key : {"LLMOPT_MODEL",
+                            "LLMOPT_HOST",
+                            "LLMOPT_PORT",
+                            "LLMOPT_CTX_TOKENS",
+                            "LLMOPT_MAX_CONCURRENCY",
+                            "LLMOPT_MODE",
+                            "LLMOPT_BACKEND",
+                            "LLMOPT_SAFETY_RATIO",
+                            "LLMOPT_ALLOW_STUB",
+                            "LLMOPT_ALLOW_FORCE_ON",
+                            "LLMOPT_MAX_NUM_BATCHED_TOKENS",
+                            "LLMOPT_QUEUE_CAPACITY",
+                            "LLMOPT_BLOCK_SIZE",
+                            "LLMOPT_WATERMARK_RATIO",
+                            "LLMOPT_CHUNK_SIZE",
+                            "LLMOPT_DISABLE_PREFIX_CACHE",
+                            "LLMOPT_FAIRNESS_AGING",
+                            "LLMOPT_AGING_THRESHOLD_MS",
+                            "LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS",
+                            "LLMOPT_PREEMPT_TRACE",
+                            "LLMOPT_STEP_TRACE"}) {
         set_env(key, "");
     }
 }
@@ -229,19 +242,24 @@ TEST_CASE("阶段 3 抢占与公平性参数：无值开关、env 与范围校�
     CHECK(cfg.aging_threshold_ms == 100);
     CHECK(cfg.max_consecutive_preemptions == 5);
     CHECK(cfg.preempt_trace_path == "trace.csv");
+    CHECK(load({"--model", "m.gguf", "--step-trace", "steps.jsonl"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.step_trace_path == "steps.jsonl");
 
     set_env("LLMOPT_FAIRNESS_AGING", "1");
     set_env("LLMOPT_AGING_THRESHOLD_MS", "250");
     set_env("LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS", "4");
     set_env("LLMOPT_PREEMPT_TRACE", "env_trace.csv");
+    set_env("LLMOPT_STEP_TRACE", "env_steps.jsonl");
     CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
     CHECK(cfg.fairness_aging);
     CHECK(cfg.aging_threshold_ms == 250);
     CHECK(cfg.max_consecutive_preemptions == 4);
     CHECK(cfg.preempt_trace_path == "env_trace.csv");
+    CHECK(cfg.step_trace_path == "env_steps.jsonl");
     // CLI 覆盖 env。
-    CHECK(load({"--model", "m.gguf", "--aging-threshold-ms", "50",
-                "--max-consecutive-preemptions", "2"}, cfg, message) == ErrCode::Ok);
+    CHECK(load({"--model", "m.gguf", "--aging-threshold-ms", "50", "--max-consecutive-preemptions",
+                "2"},
+               cfg, message) == ErrCode::Ok);
     CHECK(cfg.aging_threshold_ms == 50);
     CHECK(cfg.max_consecutive_preemptions == 2);
     clear_env();

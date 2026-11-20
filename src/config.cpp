@@ -81,7 +81,8 @@ bool is_sched_key(const std::string& key) {
     return key == "--max-num-batched-tokens" || key == "--queue-capacity" ||
            key == "--block-size" || key == "--watermark-ratio" || key == "--chunk-size" ||
            key == "--aging-threshold-ms" || key == "--max-consecutive-preemptions" ||
-           key == "--preempt-trace" || key == "--disable-prefix-cache" || key == "--fairness-aging";
+           key == "--preempt-trace" || key == "--step-trace" || key == "--disable-prefix-cache" ||
+           key == "--fairness-aging";
 }
 
 ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::string& value) {
@@ -100,6 +101,10 @@ ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::st
     }
     if (key == "--preempt-trace") {
         cfg.preempt_trace_path = value;
+        return ErrCode::Ok;
+    }
+    if (key == "--step-trace") {
+        cfg.step_trace_path = value;
         return ErrCode::Ok;
     }
     if (key == "--fairness-aging") {
@@ -189,6 +194,7 @@ void load_preempt_env(ServerConfig& cfg) {
         cfg.max_consecutive_preemptions = number;
     }
     (void)env_string("LLMOPT_PREEMPT_TRACE", cfg.preempt_trace_path);
+    (void)env_string("LLMOPT_STEP_TRACE", cfg.step_trace_path);
     (void)env_bool("LLMOPT_FAIRNESS_AGING", cfg.fairness_aging);
 }
 

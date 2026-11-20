@@ -196,7 +196,6 @@ std::int32_t run(const ServerConfig& cfg) {
     // K-8：采样线程在 load_model 之前起，峰值才包含权重落地的那一段。
     ResourceSampler sampler(metrics);
     sampler.start();
-
     std::string message;
     std::unique_ptr<ModelRunner> runner = make_runner(cfg, message);
     if (!runner) {
@@ -215,7 +214,6 @@ std::int32_t run(const ServerConfig& cfg) {
         // 适配器保留的原始 cause 在这里落地，启动失败不再只有一句"模型加载失败"。
         return report_load_failure(load_code, runner->last_error());
     }
-
     const std::int32_t blocks = std::max<std::int32_t>(kv_tokens / cfg.block_tokens, 1);
     const bool prefix_cache = resolve_prefix_cache(cfg, *runner);
     KVBlockManager kv(
@@ -231,6 +229,7 @@ std::int32_t run(const ServerConfig& cfg) {
             static_cast<std::int64_t>(cfg.aging_threshold_ms) * 1'000'000;
     scheduler_cfg.max_consecutive_preemptions = cfg.max_consecutive_preemptions;
     scheduler_cfg.preempt_trace_path = cfg.preempt_trace_path;
+    scheduler_cfg.step_trace_path = cfg.step_trace_path;
     SchedulerCore core(*runner, kv, metrics, scheduler_cfg);
 
     std::thread core_thread([&core] { core.run(); });

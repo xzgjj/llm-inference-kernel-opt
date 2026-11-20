@@ -66,6 +66,8 @@ python scripts/ci/check_coverage.py --build-dir build-cov --base origin/main   #
 
 本地与 CI 的判定必须一致，唯一允许的差别是 matrix 与 sanitizer。
 
+`check_code.py` 的代码闸门还会调用 `check_deps.py`、`size_dep_check.py`、`scope_scan.py`：依赖清单与实际链接必须一致（直接第三方 ≤5）、自研代码 ≤25,000 行、无分布式/CUDA/训练/PD 形态且测试全部登记。任一失败按 `CI-P4-001…003` 计错误，不靠人工记得单独跑。
+
 
 
 ## 6 例外

@@ -22,6 +22,7 @@ struct ServerConfig {
     std::int32_t aging_threshold_ms = 30000;
     std::int32_t max_consecutive_preemptions = 3;
     std::string preempt_trace_path;
+    std::string step_trace_path; // 步级 JSONL；p99 只离线复算，不在线聚合
     std::int32_t queue_capacity = 32;
     std::int32_t block_tokens = 16;
     double watermark_ratio = 0.05;

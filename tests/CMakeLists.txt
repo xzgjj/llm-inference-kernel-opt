@@ -94,6 +94,33 @@ if(Python3_Interpreter_FOUND)
                          LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_admission PROPERTIES TIMEOUT 180)
 
+    # 4-G1：小矩阵端到端；档间重启与 manifest/CSV 契约。
+    add_test(NAME integration_server_matrix
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_matrix.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_matrix PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_matrix PROPERTIES TIMEOUT 240)
+
+    # 4-G6：长短 1:1 混合，分组入表且长请求不被饿死。
+    add_test(NAME integration_server_mixed
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_mixed.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_mixed PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_mixed PROPERTIES TIMEOUT 240)
+
+    # 4-G0-2：慢读 1 帧/s 与快请求并发，输出 backpressure.csv。
+    add_test(NAME integration_server_slow_client
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_slow_client.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_slow_client PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_slow_client PROPERTIES TIMEOUT 120)
+
     # 真实服务契约：需要外部已运行的真模型服务（LLMOPT_REAL_BASE）；未设置即 SKIP(77)。
     add_test(NAME e2e_real_service_contract
              COMMAND ${Python3_EXECUTABLE}

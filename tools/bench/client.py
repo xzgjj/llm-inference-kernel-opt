@@ -54,9 +54,9 @@ def _get(host: str, port: int, path: str, timeout_s: float) -> tuple[int, bytes]
         conn.close()
 
 
-def health_ok(host: str, port: int, timeout_s: float = 2.0) -> bool:
+def health_ok(host: str, port: int, timeout_s: float = 2.0, path: str = "/health") -> bool:
     try:
-        status, _ = _get(host, port, "/health", timeout_s)
+        status, _ = _get(host, port, path, timeout_s)
         return status < 500
     except (OSError, http.client.HTTPException):
         return False
@@ -83,6 +83,7 @@ def run_stream(
     payload: dict,
     n_prompt: int,
     timeout_s: float = 120.0,
+    path: str = "/completion",
 ) -> RequestResult:
     """发一次流式请求并逐帧计时；断连/超时都落成 error 记录而不是抛出。"""
     stats = sse.StreamStats()
@@ -93,7 +94,7 @@ def run_stream(
         stats.t_enqueue_ms = sse.monotonic_ms()
         conn.request(
             "POST",
-            "/completion",
+            path,
             body=body,
             headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
         )

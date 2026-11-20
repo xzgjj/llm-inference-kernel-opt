@@ -2,6 +2,7 @@
 # 只依赖标准库；由 CTest 以脚本路径启动，sys.path[0] 即本目录。
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
@@ -12,6 +13,14 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+
+
+def sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def make_gguf(path: Path, block_count: int = 2, head_count: int = 4,

@@ -174,6 +174,17 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 `tests/unit/runner_raii_test.cc`（4-G0-7）只在 `LLMOPT_ENABLE_LLAMA=ON` 时登记：反复构造/析构、非法模型两次 load 后 release、以及 `LLMOPT_TEST_MODEL` 提供真模型时的 load→tokenize→release→reload；在 WSL ASan 构建跑 `ctest -R runner_raii`，用于证明 C 句柄无泄漏。
 
+阶段 4 矩阵工具链的用例：
+
+- `tests/tools/test_matrix.py`（7 例）：JSON 配置必填/覆盖、§1.6 十二列、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`。
+- `tests/tools/test_report.py`（4 例）：仅凭 JSONL + manifest 离线重建报告、四张 PNG 签名、`/metrics` 计数漂移检测、偏差 `high` 返回非零。
+- `tests/tools/test_peak_sampler.py`、`tests/tools/test_bench_*`：采样与 SSE 解析口径。
+- `tests/integration/test_server_matrix.py`：真 stub 服务跑 2 并发 × 2 档 × 1 轮；校验 CSV 列、warmup 丢弃、manifest 哈希、RSS 峰值、`.prom` 快照、`step_summary.csv`，并回调 `aggregate.py --check-metrics --check-deviation`。
+- `tests/integration/test_server_mixed.py`（4-G6）：长短 1:1 同轮，CSV 分组行各 3 条、长请求全部完成。
+- `tests/integration/test_server_slow_client.py`（4-G0-2）：慢读客户端 + 快请求并发，`backpressure.csv` 记录快侧 ITL p99 与溢出计数。
+
+CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规模 4,500–25,000 行、范围无分布式/CUDA/训练/PD、测试全登记；`scripts/ci/check_code.py` 每次代码闸门自动调用三者。
+
 准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。

@@ -12,6 +12,7 @@ import hashlib
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from ci_common import REPO_ROOT, CheckResult, Violation, emit, guard_console, read_text, write_report
@@ -162,7 +163,30 @@ def todos(result: CheckResult) -> None:
                 )
 
 
-CHECKS = [format_check, complexity, duplication, todos]
+def phase4_scanners(result: CheckResult) -> None:
+    """rule: CI-P4-001 —— 4-G4/4-G5：依赖、规模、范围三条扫描随代码闸门跑。"""
+    if _no_source(result):
+        return
+    scanners = (
+        ("CI-P4-001", "check_deps.py", "依赖清单与实际链接不一致"),
+        ("CI-P4-002", "size_dep_check.py", "规模/模块/依赖超限"),
+        ("CI-P4-003", "scope_scan.py", "非目标形态或测试未登记"),
+    )
+    for code, script, label in scanners:
+        proc = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts" / "ci" / script)],
+            cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if proc.returncode != 0:
+            detail = (proc.stdout + proc.stderr).strip().splitlines()
+            result.violations.append(
+                Violation(code, f"scripts/ci/{script}", f"{label}: {detail[-1] if detail else 'rc!=0'}")
+            )
+        else:
+            result.notes.append(proc.stdout.strip())
+
+
+CHECKS = [format_check, complexity, duplication, todos, phase4_scanners]
 
 
 def run() -> CheckResult:
