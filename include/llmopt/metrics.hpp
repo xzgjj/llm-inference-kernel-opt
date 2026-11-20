@@ -89,6 +89,7 @@ enum class MetricId : std::uint16_t {
     GateBlocked,
     Degraded,
     DrainTimeoutTotal,
+    RateLimitedTotal,
     Count
 };
 

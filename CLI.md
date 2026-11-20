@@ -60,8 +60,8 @@ llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] 
 | `--n-gpu-layers` | `LLMOPT_N_GPU_LAYERS` | `0` | ≥0 | 0 为纯 CPU |
 | `--backend` | `LLMOPT_BACKEND` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
 | `--log-level` | `LLMOPT_LOG_LEVEL` | `info` | spdlog 级别 | 跑基准建议 `warn` |
-| `--rate-limit-rps` | `LLMOPT_RATE_LIMIT_RPS` | `0` | 0–1e6 | 全局令牌桶速率；0=关（行为在 7-4 接入） |
-| `--rate-limit-burst` | `LLMOPT_RATE_LIMIT_BURST` | `32` | 1–1024 | 桶容量（行为在 7-4 接入） |
+| `--rate-limit-rps` | `LLMOPT_RATE_LIMIT_RPS` | `0` | 0–1e6 | 全局令牌桶速率；0=关，>0 时超额回 429（行为已接入） |
+| `--rate-limit-burst` | `LLMOPT_RATE_LIMIT_BURST` | `32` | 1–1024 | 桶容量；突发额度，回填不超过该值 |
 | `--drain-deadline-seconds` | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | 1–300 | SIGTERM 排空上限（行为在 7-3 接入） |
 | `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值 |
 | `--step-trace-rate` | `LLMOPT_STEP_TRACE_RATE` | `0` | 0–64 | 每步 trace 1/N 采样；0=关（行为在 7-5 接入） |
@@ -170,6 +170,9 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | `ResourceInsufficient` | 507 | `RESOURCE_INSUFFICIENT` | 否 |
 | `UnsupportedField` | 400 | `unsupported_field` | 否 |
 | `Unavailable` | 503 | `SERVICE_UNAVAILABLE` | 是 |
+| `RateLimited` | 429 | `RATE_LIMITED` | 是 |
+
+限流语义（6-G4）：`--rate-limit-rps > 0` 时先过令牌桶再解析；超额回 429 `RATE_LIMITED` + `Retry-After: 1`，不进队列、不占调度预算，并累加 `llmopt_rate_limited_total`。
 
 排空语义（6-G3）：SIGTERM/SIGINT 后状态转 `draining`，`/readyz` 与新请求立即 503；在飞请求在 `--drain-deadline-seconds` 内自然收尾，超时记 `llmopt_drain_timeout_total` 并强制停止，进程退出码仍为 0。`/healthz` 始终 200，body 的 `status` 反映 `starting|ready|draining|stopped`。
 
@@ -226,7 +229,7 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | `LLMOPT_ALLOW_STUB=1` | 允许 stub 后端，供测试与 CI | 未设置即拒绝 |
 | `LLMOPT_LLAMA_ROOT` | CMake 查 llama.cpp 头/库的根 | `/root/llm-src/llama.cpp` |
 
-- 默认只绑 `127.0.0.1`；`--api-key` 只做单 token Bearer 预留（默认关，行为在 7-4 接入），不做多租户/配额。对外暴露仍建议反向代理承担 TLS 与更强认证。
+- 默认只绑 `127.0.0.1`；`--api-key` 只做单 token Bearer 预留（默认关，校验行为待用户确认边界后接入），不做多租户/配额。对外暴露仍建议反向代理承担 TLS 与更强认证。
 - 请求体上限 4 MB；读超时 5 s；写超时 120 s；单请求非流式排空上限 120 s。
 - 队列容量 32，满即 429；等待中的请求只占分词后的 token 数组，不占 KV。
 

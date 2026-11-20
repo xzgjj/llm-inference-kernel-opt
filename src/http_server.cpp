@@ -3,6 +3,7 @@
 #include "httplib.h"
 #include "llmopt/log.hpp"
 #include "llmopt/protocol.hpp"
+#include "llmopt/rate_limit.hpp"
 #include "llmopt/server.hpp"
 #include "llmopt/service.hpp"
 #include "spdlog/spdlog.h"
@@ -28,6 +29,7 @@ struct AppContext {
     SchedulerCore* core = nullptr;
     GateResult gate;
     ServiceController service;
+    std::unique_ptr<RateLimiter> limiter;
     std::atomic<bool> stopping{false};
     std::atomic<bool> drain_requested{false};
     std::atomic<bool> listen_done{false};
@@ -277,6 +279,13 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
     std::vector<std::string> submitted;
     try {
         ctx->metrics->inc(MetricId::HttpRequests);
+        // 限流先于解析：超额请求既不建 sink 也不占调度预算（C-15）。
+        if (ctx->limiter && !ctx->limiter->try_acquire()) {
+            ctx->metrics->inc(MetricId::RateLimitedTotal);
+            logger()->warn("http rate limited path={} rps={}", request.path, ctx->limiter->rps());
+            send_error(response, make_error(ErrCode::RateLimited, "请求超过限流速率，请退避重试"));
+            return;
+        }
         std::string request_id;
         if (request.has_header("X-Request-Id")) {
             request_id = request.get_header_value("X-Request-Id");
@@ -406,6 +415,10 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     ctx->metrics = &metrics;
     ctx->core = &core;
     ctx->gate = gate;
+    if (config.rate_limit_rps > 0.0) {
+        ctx->limiter =
+                std::make_unique<RateLimiter>(config.rate_limit_rps, config.rate_limit_burst);
+    }
 
     httplib::Server server;
     server.set_payload_max_length(std::size_t{4} * 1024 * 1024);

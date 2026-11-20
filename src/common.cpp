@@ -16,6 +16,7 @@ int http_status(ErrCode code) noexcept {
         return 503;
     case ErrCode::KvInsufficient:
     case ErrCode::QueueFull:
+    case ErrCode::RateLimited:
         return 429;
     case ErrCode::Cancelled:
         return 499;
@@ -63,6 +64,8 @@ const char* error_code_name(ErrCode code) noexcept {
         return "unsupported_field";
     case ErrCode::Unavailable:
         return "SERVICE_UNAVAILABLE";
+    case ErrCode::RateLimited:
+        return "RATE_LIMITED";
     }
     return "EXECUTION_FAILED";
 }
@@ -87,7 +90,8 @@ const char* finish_reason_name(FinishReason reason) noexcept {
 
 bool retryable(ErrCode code) noexcept {
     return code == ErrCode::ModelNotLoaded || code == ErrCode::KvInsufficient ||
-           code == ErrCode::QueueFull || code == ErrCode::Timeout || code == ErrCode::Unavailable;
+           code == ErrCode::QueueFull || code == ErrCode::Timeout || code == ErrCode::Unavailable ||
+           code == ErrCode::RateLimited;
 }
 
 } // namespace llmopt

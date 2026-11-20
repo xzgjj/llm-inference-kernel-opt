@@ -201,6 +201,13 @@ CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规
 - `tests/unit/service_test.cc`（`unit_service`，3 例）：`Starting→Ready→Draining→Stopped` 合法迁移表、同态/回退迁移拒绝、`accepting()` 仅 Ready 为真、状态名可打印。
 - `tests/integration/test_drain.py`（登记名 `service_state_test`）：8 路在飞 + `LLMOPT_TEST_STUB_DELAY_MS=40`，SIGTERM 后 100 ms 内 `/readyz` 必须 503，新请求回 503 `SERVICE_UNAVAILABLE`，在飞 SSE 全部以 `[DONE]` 收尾，进程退出码 0，日志含 `draining`。Windows 无 SIGTERM 语义，本机跳过、CI Linux 真跑。
 
+阶段 6 的限流与背压（7-4）：
+
+- `tests/unit/rate_limit_test.cc`（`unit_rate_limit`，3 例）：`rps<=0` 恒放行；burst 耗尽后拒绝、按 1/rps 回填；低速率回填不超过 burst（`steady_clock` 统一换算 ns，避免 MSVC 100 ns period 把速率算慢 10 倍）。
+- `tests/integration/test_rate_limit.py`（登记名 `backpressure_test`）：`--rate-limit-rps 2 --rate-limit-burst 2` 下连续三次请求为 200/200/429，429 带 `Retry-After: 1`、code `RATE_LIMITED`、`retryable=true`，等待 0.6 s 后恢复 200；`llmopt_rate_limited_total` 精确等于 1。
+- 慢客户端隔离沿用 `integration_server_slow_client`（`scripts/bench/slow_client.py`）的 `fast_itl_p99_ms`/溢出列；本机为 stub 读数，真实 1 帧/s 慢读与 ≤10% 退化判定留待 WSL/真后端复测。
+
+
 
 准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
 
