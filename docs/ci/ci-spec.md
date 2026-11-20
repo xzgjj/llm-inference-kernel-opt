@@ -120,6 +120,16 @@ CI 的职责是把**可判定**的部分变成机器红灯，把**不可判定**
 | CI-COD-004 | 重复代码率 | 自动 | >3% 警告，>5% 失败 | `script:check_code.py:duplication` | 无 |
 | CI-COD-005 | 未使用代码 | 自动 | 未引用符号、未使用参数/变量告警为 0 | `workflow:build` | 接口占位需 `[[maybe_unused]]` + 注释 |
 | CI-COD-006 | 悬空 TODO | 自动 | 只允许 `TODO(owner):` 形式，无主 TODO 计入失败 | `script:check_code.py:todos` | 无 |
+| CI-LLM-001 | 真实后端可编译 | 自动 | `runner_llama.cpp` 在固定版本 llama.cpp 头文件下零警告编译通过 | `workflow:llama-compile` | 找不到固定版本时失败并留痕，不静默跳过 |
+
+### 4.4.1 覆盖率
+
+| ID | 规则 | 判定 | 阈值 | 实现 | 豁免 |
+| --- | --- | --- | --- | --- | --- |
+| CI-COV-001 | 总体行覆盖 | 自动 | `src/` 行覆盖率 ≥70%（gcovr 统计，排除 tests/third_party） | `script:check_coverage.py:line` | Windows/MSVC 无 gcov 时 SKIP 并留痕，由 Linux runner 补跑 |
+| CI-COV-002 | 增量行覆盖 | 自动 | 本分支改动行 ≥80% | `script:check_coverage.py:diff` | 基线不可用时 SKIP 并留痕，不允许静默通过 |
+
+覆盖率在 PR 的 `coverage` 作业执行（`run_ci.py --mode nightly` 也带同一步，前提是先有插桩构建）；两者都要求 `-DLLMOPT_COVERAGE=ON` 的独立构建目录（`build-cov` 或带插桩的 `build`）与 gcovr；Windows 本机无 gcov 时该步 SKIP，WSL/Linux runner 必须实跑。SKIP 与“通过”在报告里分开记录，不允许把 SKIP 当绿灯。
 
 ### 4.5 改动范围
 
@@ -208,6 +218,16 @@ docs/testing.md（登记表）
     → 报告写入 build/ci-reports/report.json
     → workflow 汇总到 job summary
 ```
+
+`run_ci.py` 的 mode 与步骤一一对应，不在 workflow 里另写命令：
+
+| mode | 步骤 | 用途 |
+| --- | --- | --- |
+| `fast` | docs → tests → code | 提交前/pre-commit，≤30 s 级 |
+| `pr` | docs → tests → code → diff | PR 闸门 |
+| `nightly` | docs → tests → code → diff → coverage | 夜间全量 + 覆盖率 |
+
+基线规则：未传 `--base` 时取当前分支 upstream，回落 `origin/main`；分支开发必须显式传 `--base origin/<父分支>`，否则 diff 预算会被整条分支持平历史撑爆（CI-DIF-002 误报）。
 
 任何一环出现第二份清单（例如 workflow 里硬编码 `ctest -R xxx`），都视为破坏单一事实来源，按 CI-DOC-006 处理。
 

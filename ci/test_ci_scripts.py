@@ -5,6 +5,7 @@ rule: CI-TST-001
 
 from __future__ import annotations
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -16,6 +17,18 @@ import check_diff  # noqa: E402
 import check_docs  # noqa: E402
 import check_tests  # noqa: E402
 import ci_common  # noqa: E402
+
+
+def _load_coverage_gate():
+    spec = importlib.util.spec_from_file_location(
+        "ci_coverage_gate", REPO / "scripts" / "ci" / "check_coverage.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+coverage_gate = _load_coverage_gate()
 
 
 class WordCountTest(unittest.TestCase):
@@ -67,6 +80,20 @@ class DocsGateTest(unittest.TestCase):
         declared = ci_common.declared_rules(spec)
         self.assertIn("CI-DOC-001", declared)
         self.assertTrue(any(v.startswith("script:") for v in declared.values()))
+
+
+class CoverageGateTest(unittest.TestCase):
+    def test_line_only_counts_src(self) -> None:
+        files = {"src/a.cpp": {1: 0, 2: 3, 3: 1}, "include/x.hpp": {1: 0}}
+        self.assertEqual(coverage_gate.line(files), (2, 3))
+
+    def test_line_with_changed_set(self) -> None:
+        files = {"src/a.cpp": {1: 0, 2: 3}}
+        self.assertEqual(coverage_gate.line(files, only={"src/a.cpp:2"}), (1, 1))
+
+    def test_parse_diff_text_ranges(self) -> None:
+        text = "--- a/src/a.cpp\n+++ b/src/a.cpp\n@@ -10,0 +11,3 @@\n+x\n+y\n+z\n"
+        self.assertEqual(coverage_gate.parse_diff_text(text), {"src/a.cpp": {11, 12, 13}})
 
 
 class WaiverTest(unittest.TestCase):

@@ -17,7 +17,7 @@
 | --- | --- | --- | --- | --- |
 | L0 | pre-commit | 10 s | 文档字数、重复段落、测试注册表、格式 | 本次提交不合规，不推送 |
 | L1 | 每次 push / PR | 3 min | L0 + 规则自洽 + Diff 预算 + 范围白名单 | PR 不可合并 |
-| L2 | PR | 15 min | Debug/Release 构建（警告即错误）+ fast 测试 | 编译失败或行为回归 |
+| L2 | PR | 15 min | Debug/Release 构建（警告即错误）+ fast 测试 + 覆盖率（`src/` 行 ≥70%、改动行 ≥80%） | 编译失败、行为回归或覆盖不足 |
 | L3 | PR（有 CMake 工程） | 30 min | ASan+UBSan、TSan、受保护回归 | 内存/并发缺陷，最高优先级 |
 | L4 | nightly | 2 h | slow 测试、性能基线、GPU 队列 | 阻塞发版，不阻塞个人 PR |
 
@@ -61,6 +61,7 @@ python scripts/ci/run_ci.py --mode pr            # 加 Diff 预算与代码质�
 python scripts/ci/check_docs.py                  # 只跑文档规则
 python scripts/ci/check_tests.py                 # 注册表结构与覆盖
 python scripts/ci/run_registry.py --speed fast   # 按注册表执行测试
+python scripts/ci/check_coverage.py --build-dir build-cov --base origin/main   # 覆盖率闸门
 ```
 
 本地与 CI 的判定必须一致，唯一允许的差别是 matrix 与 sanitizer。

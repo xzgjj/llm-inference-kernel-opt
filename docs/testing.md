@@ -25,8 +25,11 @@
 | `tests/unit` | `unit` | `ctest` | `--test-dir build --output-on-failure -L unit` | `fast`, `hermetic` |
 | `tests/contract` | `contract` | `ctest` | `--test-dir build --output-on-failure -L contract` | `fast`, `hermetic` |
 | `tests/integration` | `integration` | `ctest` | `--test-dir build --output-on-failure -L integration` | `fast`, `hermetic` |
+| `tests/e2e` | `e2e` | `ctest` | `--test-dir build --output-on-failure -L e2e` | `slow`, `needs-gpu` |
 
-C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机约定一致）；本机另建目录时手动执行 `ctest --test-dir <dir>`，不改本表。
+C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机约定一致）；本机另建目录时手动执行 `ctest --test-dir <dir>`，不改本表。CI 的非默认构建目录（sanitizer、覆盖率）用 `run_registry.py --build-dir <dir>` 覆盖表里的路径，表本身仍保持一条可独立执行的命令。
+
+CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前近百条（另有 4 个进程级脚本）。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
 
 目录与命名约定见 [../tests/README.md](../tests/README.md)：`unit/` `contract/` `integration/` `e2e/` `perf/` 按层级分目录，Scope 一律写目录而不是单个文件，目录内新增用例自动被覆盖。
 
@@ -97,6 +100,22 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 
 `run_registry.py` 读同一份注册表执行测试，表里的 Args 就是运行命令。两处不一致即 CI-DOC-006 违规。
 
+覆盖率闸门（`scripts/ci/check_coverage.py`，规则 CI-COV-001/002）：nightly 用 `-DLLMOPT_COVERAGE=ON` 的构建目录跑完注册用例后取证，判 `src/` 行覆盖 ≥70%、本分支改动行 ≥80%。Windows 无 gcov 时该步 SKIP 并留痕，Linux/WSL 必须实跑；SKIP 不等于通过。2026-11-20 实测：`src/` 2,091/2,447 = **85.5%**，96 个用例全绿。
+
+### 5.1 覆盖率闸门（CI-COV-001 / CI-COV-002）
+
+覆盖率不是口号，是两条会红的规则：
+
+| 规则 | 口径 | 阈值 | 实现 |
+| --- | --- | --- | --- |
+| CI-COV-001 | `src/` 总体行覆盖率 | ≥70% | `scripts/ci/check_coverage.py --min-line` |
+| CI-COV-002 | 本次改动新增/修改的可执行行覆盖率 | ≥80% | `scripts/ci/check_coverage.py --min-diff` |
+
+- 插桩：`cmake -DLLMOPT_COVERAGE=ON`（GCC/Clang 的 `--coverage`），只对 `src/` 计分；`include/`、`tests/`、`third_party/` 不计——头文件里的模板会按 TU 摊开，混进总分会虚高。
+- 采集：CI `coverage` 作业装 `gcovr`，跑 `run_registry.py --build-dir build-cov` 后调 `check_coverage.py`；本地同样 `pip install gcovr` 后可用一条命令复核。
+- 增量覆盖率是"最小测试"的执行标准：新功能只写能跑到自己新增分支的用例即可达标，不必为凑总数补无关用例；但改动没有可执行行时按 100% 处理，不奖励空改动。
+- 阈值调整属于规则变更，按 §8 走 `ci-rule-change`。
+
 
 
 ## 6 隔离与 flaky
@@ -111,16 +130,15 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 
 ## 7 待补齐（不属于注册表）
 
-按项目方向列出的预期产品测试，**未实现前不得写成注册表行**。实现后移入 2.1 并删除此处条目。
+按项目方向列出的预期产品测试，**未实现前不得写成注册表行**。实现后移入 2.1 并删除此处条目。已在 2.1 落地的项（批次构成、KV 前缀命中、并发 8 路、进程级冒烟）不再留在清单里——清单只写缺口，不写成绩。
 
-- [ ] unit：连续批处理的批次合并/拆分决策（`tests/unit/scheduler`）
-- [ ] contract：调度器与后端之间的 token 预算与 slot 分配不变量（`tests/contract/scheduler_backend`）
-- [ ] contract：KV cache 的分配/回收在并发请求下不泄漏、不重叠（`tests/contract/kv_cache`）
-- [ ] integration：长短请求混跑时，短请求不被长请求饿死（`tests/integration/batching`）
-- [ ] unit：INT4/FP8 量化路径与参考实现的最大相对误差在阈值内（`tests/unit/quant`）
-- [ ] e2e：单进程起服务，固定请求集，输出与 golden 对齐（`tests/e2e/smoke`，阶段 1 只有进程级冒烟）
-- [ ] perf：固定输入长度下吞吐基线，连续三次中位数（`tests/perf/throughput`、`tests/perf/latency`）
-- [ ] sanitizer：以上 unit/contract 用例在 ASan+UBSan 与 TSan 下重跑（复用用例，不单建目录）
+- [ ] contract：`tests/contract/scheduler_backend` —— 组批时 token 预算与 slot 分配的不变量；现由 `contract_continuous_batch` 间接覆盖，缺独立边界
+- [ ] contract：`tests/contract/kv_cache` —— 真实后端并发下的块表不泄漏、不重叠；纯逻辑侧已有 `unit_kv`
+- [ ] integration：`tests/integration/batching` —— 长短请求混跑的饥饿与公平性；`--fairness-aging` 目前只有单测，没有进程级验证
+- [ ] e2e：`tests/e2e/smoke` —— 固定请求集的 golden 输出逐 token 比对；现有 3 个脚本只校验协议、指标与等价性，不比对文本
+- [ ] perf：`tests/perf/throughput`、`tests/perf/latency` —— 吞吐与首 token 延迟基线，供 nightly 判回退
+- [ ] unit：`tests/unit/quant` —— INT4/FP8 量化误差界；量化路径未实现，先不建用例
+- [ ] unit：`runner_llama` 的批内决策逻辑 —— 真实后端仍只有 `verify_prefix.sh` / `verify_chunk.py` 手工脚本，`llama-compile` 作业只保证能编译
 
 
 
@@ -143,7 +161,9 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 
 `unit_config` 同时覆盖 `--fairness-aging` 无值开关、`--aging-threshold-ms` / `--max-consecutive-preemptions` / `--preempt-trace` 的 CLI/env 覆盖与范围校验。调度不变量“抢占只在组批前、已组批序列不得成为 victim、被抢占组不得反向抢占”由 `preempt_test` / `state_test` / `lifecycle_test` 共同锁定。阶段 3 的完整证据链与三次 review 见 `docs/阶段3-实现记录.md`。
 
-自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。
+阶段 4 的回包队列改造按同一约定固化：`tests/unit/sink_test.cc`（4 例）锁“队列满立即失败并关闭”“关闭后 pop 不阻塞”“溢出只计队列满、关闭后的写入不算”。计时断言一律用 `std::chrono::milliseconds` 比较，不用 `steady_clock::count()` 直接比常量——MSVC 的 period 是 100ns，`50'000'000` 实际是 5 秒，测不出 2 秒阻塞回归。
+
+自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 
 ## 8 维护
 

@@ -57,15 +57,16 @@ tests/
 
 | Scope | Level | Runner | Args | Metadata |
 | --- | --- | --- | --- | --- |
-| `tests/unit/scheduler` | `unit` | `ctest` | `-R unit.scheduler --output-on-failure` | `fast`, `hermetic` |
+| `tests/unit/scheduler` | `unit` | `ctest` | `-L unit --output-on-failure -R unit.` | `fast`, `hermetic` |
 
-Scope 写目录，不写单个文件——目录内新增文件自动被覆盖，漏登记会由 `check_tests.py` 报出具体路径。
+Scope 写目录，不写单个文件——目录内新增文件自动被覆盖，漏登记会由 `check_tests.py` 报出具体路径。`-L` 选层级、`-R <可执行名>.` 再收窄到某个文件的用例；单条用例用完整名 `-R unit_config.端口`。
 
 ## 5 构建与执行
 
-- 每个用例通过 CTest 注册，`ctest` 的 label 与 Metadata 同名（`fast` / `slow` / `needs-gpu` / `protected`），CI 用 label 选择，不再写第二份命令。
-- 首个用例落地时再补 `tests/CMakeLists.txt` 与根 `add_subdirectory(tests)`。现在不写，避免留下没有目标的 CMake 代码。
-- 断言库默认沿用零依赖风格（`assert` + 明确失败信息），引入第三方框架需在规则 PR 里说明理由。
+- 每个 `TEST_CASE` 通过 `doctest_discover_tests` 注册成一条 CTest，名字是 `<可执行名>.<用例名>`；`ctest -N` 的数就是用例数，`-j` 可并行。
+- CTest 的 label 与 Metadata 同名（`fast` / `slow` / `needs-gpu` / `protected`），CI 用 label 选择，不再写第二份命令。
+- 断言库是 doctest（`doctest/doctest.h`），`REQUIRE` 用于后续步骤依赖的前置条件，`CHECK` 用于独立断言；`tests/tools` 里的 Python 用例用 `unittest`。
+- 覆盖率：`cmake -DLLMOPT_COVERAGE=ON` 后跑用例，再由 `scripts/ci/check_coverage.py` 判 `src/` 行覆盖与改动行覆盖；不要给 `assert` 风格的老用例续命，新用例一律走 doctest。
 
 ## 6 数据
 
