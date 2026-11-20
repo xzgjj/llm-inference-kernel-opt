@@ -1,0 +1,91 @@
+# ============================================================
+# llm-inference-kernel-opt / .gitignore
+# ============================================================
+
+# ---------- 文档与本地资料（不上传） ----------
+docs/
+docs/**
+
+# ---------- 本地个人笔记 / 流程文件（按需生成，一律不入库） ----------
+CLAUDE.md
+notes.txt
+implementation_plan.md
+diff.md
+AGENT_EXECUTION_PROTOCOL.md
+implementation-notes.md
+SPEC.md
+
+# ---------- 测试（统一在 test/ 下生成，不入库） ----------
+test/
+tests/
+Testing/
+
+# ---------- 日志 ----------
+*.log
+*.log.*
+logs/
+log/
+
+# ---------- 构建产物 / CMake ----------
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+compile_commands.json
+install_manifest.txt
+*.ninja
+.ninja_deps
+.ninja_log
+
+# ---------- 编译中间件与二进制 ----------
+*.o
+*.obj
+*.lo
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+*.out
+*.pdb
+*.ilk
+*.idb
+*.gcda
+*.gcno
+*.gcov
+*.iobj
+*.ipdb
+*.mod
+*.smod
+*.d
+*.gch
+*.pch
+
+# ---------- 依赖 / 缓存 ----------
+.cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+third_party/_deps/
+.cpm/
+_concurrent_build/
+
+# ---------- IDE / 编辑器 ----------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.vs/
+
+# ---------- 系统文件 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
