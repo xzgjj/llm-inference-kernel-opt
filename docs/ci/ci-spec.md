@@ -122,6 +122,8 @@ CI 的职责是把**可判定**的部分变成机器红灯，把**不可判定**
 | CI-COD-006 | 悬空 TODO | 自动 | 只允许 `TODO(owner):` 形式，无主 TODO 计入失败 | `script:check_code.py:todos` | 无 |
 | CI-LLM-001 | 真实后端可编译 | 自动 | `runner_llama.cpp` 在固定版本 llama.cpp 头文件下零警告编译通过 | `workflow:llama-compile` | 找不到固定版本时失败并留痕，不静默跳过 |
 
+编译器版本与冻结依赖对齐：`build-clang` 固定 clang 18，不跟随 runner 预装的最新 clang。原因不是版本洁癖——spdlog 1.14.1 内嵌的 fmt 10.2 在 clang ≥19 会以 `call to consteval function ... is not a constant expression` 硬报错（实测 clang 21.1.8 全量构建失败），而升级 fmt 属于改 SPEC 冻结表，应由依赖变更单独评审。故此处锁 clang 18 并在 workflow 内注明；clang-tidy 同样用 18，避免 lint 与编译版本错位。
+
 ### 4.4.1 覆盖率
 
 | ID | 规则 | 判定 | 阈值 | 实现 | 豁免 |
