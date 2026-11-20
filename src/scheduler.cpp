@@ -269,7 +269,7 @@ void SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group) {
     if (!seq.block_table.empty()) {
         kv_.free(seq);
     }
-    if (!kv_.acquire(seq, seq.prompt_len).has_value()) {
+    if (!kv_.acquire(seq, seq.prompt_len, 0, true).ok()) {
         finish(group, FinishReason::Error);
         return;
     }

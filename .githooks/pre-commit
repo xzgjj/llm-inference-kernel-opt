@@ -1,9 +1,25 @@
 #!/bin/sh
-# L0 闸门：提交前同步执行 L1 的全部判定，10 秒内出结论。
+# L0 本地闸门：每次提交前自动跑静态规则 + 已有构建的 fast 测试。
 # 启用方式：git config core.hooksPath .githooks
+set -e
+
+# Windows 下 git sh 的 PATH 不含 MSYS2 运行库；补上以便直接执行构建产物。
+for candidate in /c/msys64/ucrt64/bin /d/msys64/ucrt64/bin; do
+    if [ -d "$candidate" ]; then
+        PATH="$candidate:$PATH"
+        export PATH
+    fi
+done
 
 python scripts/ci/run_ci.py --mode fast || {
     echo ""
     echo "提交已拦截。修复后重试，或用 docs/ci/waivers.json 申请例外（需规则负责人批准）。"
     exit 1
 }
+
+if [ -f build/CMakeCache.txt ]; then
+    cmake --build build --parallel
+    ctest --test-dir build -L fast --output-on-failure
+else
+    echo "SKIP(build/test): build/ 尚未配置，先跑阶段 0 的 dev.py build"
+fi
