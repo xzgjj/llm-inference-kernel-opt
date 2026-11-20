@@ -8,6 +8,8 @@
 
 #include "llmopt/config.hpp"
 
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,7 @@ void set_env(const char* key, const char* value) {
 // 清掉上一例留下的变量，避免用例互相污染。
 void clear_env() {
     for (const char* key : {"LLMOPT_MODEL",
+                            "LLMOPT_CONFIG",
                             "LLMOPT_HOST",
                             "LLMOPT_PORT",
                             "LLMOPT_CTX_TOKENS",
@@ -50,19 +53,41 @@ void clear_env() {
                             "LLMOPT_AGING_THRESHOLD_MS",
                             "LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS",
                             "LLMOPT_PREEMPT_TRACE",
-                            "LLMOPT_STEP_TRACE"}) {
+                            "LLMOPT_STEP_TRACE",
+                            "LLMOPT_RATE_LIMIT_RPS",
+                            "LLMOPT_RATE_LIMIT_BURST",
+                            "LLMOPT_DRAIN_DEADLINE_SECONDS",
+                            "LLMOPT_API_KEY",
+                            "LLMOPT_STEP_TRACE_RATE"}) {
         set_env(key, "");
     }
 }
 
 // 把字符串参数转成 argv 形态，调用完即可释放。
-ErrCode load(const std::vector<std::string>& args, ServerConfig& cfg, std::string& message) {
+ErrCode load(const std::vector<std::string>& args, ServerConfig& cfg, std::string& message,
+             std::vector<ConfigSourceEntry>* sources = nullptr) {
     std::vector<char*> argv;
     argv.push_back(const_cast<char*>("llmopt_server"));
     for (const std::string& arg : args) {
         argv.push_back(const_cast<char*>(arg.c_str()));
     }
-    return load_config(static_cast<int>(argv.size()), argv.data(), cfg, message);
+    return load_config(static_cast<int>(argv.size()), argv.data(), cfg, message, sources);
+}
+
+std::string write_config(const std::string& name, const std::string& body) {
+    const auto path = std::filesystem::temp_directory_path() / name;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out << body;
+    return path.string();
+}
+
+const char* source_of(const std::vector<ConfigSourceEntry>& sources, const std::string& key) {
+    for (const ConfigSourceEntry& entry : sources) {
+        if (entry.key == key) {
+            return config_source_name(entry.source);
+        }
+    }
+    return "missing";
 }
 
 } // namespace
@@ -281,4 +306,121 @@ TEST_CASE("后端不支持共享时前缀复用降级为关闭") {
     CHECK_FALSE(effective_prefix_cache(false, true));
     CHECK_FALSE(effective_prefix_cache(false, false));
     CHECK(effective_prefix_cache(true, true));
+}
+
+// 6-G2：四层优先级矩阵 8 例，逐项核对值与来源。文件用 snake_case 键，证明别名等价。
+TEST_CASE("配置四层优先级矩阵与来源") {
+    clear_env();
+    const std::string file =
+            write_config("llmopt_config_matrix.json",
+                         R"({"model":"file.gguf","port":8081,"host":"0.0.0.0","ctx_tokens":512})");
+    ServerConfig cfg;
+    std::string message;
+    std::vector<ConfigSourceEntry> sources;
+
+    // 1) 全默认
+    CHECK(load({"--model", "m.gguf"}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 8080);
+    CHECK(std::string(source_of(sources, "port")) == "default");
+
+    // 2) 仅文件
+    CHECK(load({"--config", file}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 8081);
+    CHECK(cfg.host == "0.0.0.0");
+    CHECK(cfg.ctx_tokens == 512);
+    CHECK(std::string(source_of(sources, "port")) == "file");
+
+    // 3) 仅 env
+    set_env("LLMOPT_PORT", "9000");
+    CHECK(load({"--model", "m.gguf"}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 9000);
+    CHECK(std::string(source_of(sources, "port")) == "env");
+
+    // 4) 仅 CLI
+    CHECK(load({"--model", "m.gguf", "--port", "8082"}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 8082);
+    CHECK(std::string(source_of(sources, "port")) == "cli");
+
+    // 5) 文件 + env → env
+    CHECK(load({"--config", file}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 9000);
+    CHECK(std::string(source_of(sources, "port")) == "env");
+
+    // 6) 文件 + CLI → CLI
+    CHECK(load({"--config", file, "--port", "8082"}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 8082);
+    CHECK(std::string(source_of(sources, "port")) == "cli");
+
+    // 7) env + CLI → CLI
+    CHECK(load({"--model", "m.gguf", "--port", "8082"}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 8082);
+    CHECK(std::string(source_of(sources, "port")) == "cli");
+
+    // 8) 文件 + env + CLI → CLI
+    CHECK(load({"--config", file, "--port", "8082"}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.port == 8082);
+    CHECK(std::string(source_of(sources, "port")) == "cli");
+
+    clear_env();
+    std::filesystem::remove(file);
+}
+
+TEST_CASE("配置文件未知键、越界与坏 JSON 一律拒绝") {
+    clear_env();
+    const std::string unknown = write_config("llmopt_bad_key.json", R"({"nope":1})");
+    const std::string out_of_range = write_config("llmopt_bad_range.json", R"({"port":70000})");
+    const std::string broken = write_config("llmopt_broken.json", "{not json");
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf", "--config", unknown}, cfg, message) == ErrCode::NotSupported);
+    CHECK(message.find("未知键") != std::string::npos);
+    CHECK(load({"--model", "m.gguf", "--config", out_of_range}, cfg, message) ==
+          ErrCode::NotSupported);
+    CHECK(message.find("越界") != std::string::npos);
+    CHECK(load({"--model", "m.gguf", "--config", broken}, cfg, message) == ErrCode::NotSupported);
+    for (const std::string& path : {unknown, out_of_range, broken}) {
+        std::filesystem::remove(path);
+    }
+}
+
+// 6-G2 新增项：限流、排空、trace 采样与 api-key 也走同一优先级。
+TEST_CASE("服务边界参数四层优先级与范围") {
+    clear_env();
+    const std::string file =
+            write_config("llmopt_service_config.json",
+                         R"({"model":"file.gguf","rate_limit_rps":10.0,"rate_limit_burst":16,
+                "drain_deadline_seconds":20,"step_trace_rate":8,"api_key":"file-token"})");
+    ServerConfig cfg;
+    std::string message;
+    std::vector<ConfigSourceEntry> sources;
+    CHECK(load({"--config", file}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.rate_limit_rps == doctest::Approx(10.0));
+    CHECK(cfg.rate_limit_burst == 16);
+    CHECK(cfg.drain_deadline_seconds == 20);
+    CHECK(cfg.step_trace_rate == 8);
+    CHECK(cfg.api_key == "file-token");
+
+    set_env("LLMOPT_RATE_LIMIT_RPS", "20.5");
+    set_env("LLMOPT_DRAIN_DEADLINE_SECONDS", "40");
+    CHECK(load({"--config", file}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK(cfg.rate_limit_rps == doctest::Approx(20.5));
+    CHECK(cfg.drain_deadline_seconds == 40);
+
+    CHECK(load({"--config", file, "--rate-limit-rps", "30", "--drain-deadline-seconds", "5"}, cfg,
+               message, &sources) == ErrCode::Ok);
+    CHECK(cfg.rate_limit_rps == doctest::Approx(30.0));
+    CHECK(cfg.drain_deadline_seconds == 5);
+    CHECK(std::string(source_of(sources, "rate-limit-rps")) == "cli");
+    CHECK(std::string(source_of(sources, "drain-deadline-seconds")) == "cli");
+
+    set_env("LLMOPT_RATE_LIMIT_BURST", "abc");
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::InvalidJson);
+    clear_env();
+    CHECK(load({"--model", "m.gguf", "--drain-deadline-seconds", "0"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--rate-limit-burst", "0"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--step-trace-rate", "65"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    std::filesystem::remove(file);
 }

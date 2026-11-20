@@ -88,6 +88,15 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(integration_server_metrics PROPERTIES LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_metrics PROPERTIES TIMEOUT 120)
 
+    # 6-G2：四层优先级与启动来源打印（CLI > env > file > default）。
+    add_test(NAME integration_server_config_sources
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_config_sources.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_config_sources PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_config_sources PROPERTIES TIMEOUT 120)
+
     add_test(NAME integration_server_admission
              COMMAND ${Python3_EXECUTABLE}
                      ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_admission.py

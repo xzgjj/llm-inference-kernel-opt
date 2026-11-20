@@ -18,6 +18,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -43,7 +44,7 @@ std::int32_t exit_for(ErrCode code) {
     return kExitStartFail;
 }
 
-// 打印生效配置，保证 CLI/env 合并结果可复核（CLI.md §2）。
+// 打印生效配置，保证 CLI/env/file 合并结果可复核（CLI.md §2）。
 void print_config(const ServerConfig& cfg) {
     std::cout << "config: model=" << cfg.model_path << " host=" << cfg.host << " port=" << cfg.port
               << " ctx=" << cfg.ctx_tokens << " max_concurrency=" << cfg.max_concurrency
@@ -54,7 +55,20 @@ void print_config(const ServerConfig& cfg) {
               << " watermark=" << cfg.watermark_ratio
               << " prefix_cache=" << (cfg.enable_prefix_cache ? 1 : 0)
               << " mode=" << gate_mode_name(cfg.mode) << " safety_ratio=" << cfg.safety_ratio
-              << " backend=" << cfg.backend << " log_level=" << cfg.log_level << "\n";
+              << " backend=" << cfg.backend << " log_level=" << cfg.log_level
+              << " rate_rps=" << cfg.rate_limit_rps << " rate_burst=" << cfg.rate_limit_burst
+              << " drain_s=" << cfg.drain_deadline_seconds
+              << " step_trace_rate=" << cfg.step_trace_rate
+              << " api_key=" << (cfg.api_key.empty() ? "unset" : "set") << "\n";
+}
+
+// R-07：逐项打印来源，便于 6-G2 对账；api-key 只打来源，不打印值。
+void print_config_sources(const std::vector<ConfigSourceEntry>& sources) {
+    for (const ConfigSourceEntry& entry : sources) {
+        std::cout << "config source: " << entry.key << "=" << config_source_name(entry.source)
+                  << "\n";
+    }
+    std::cout.flush(); // 子进程被强杀时仍要留下来源证据（6-G2）
 }
 
 // L2 估算分项：模型文件 + KV，超预算时打印每一项便于定位；free 取判定时实际使用的值。
@@ -248,13 +262,15 @@ std::int32_t run(const ServerConfig& cfg) {
 int main(int argc, char** argv) {
     llmopt::ServerConfig cfg;
     std::string message;
-    const llmopt::ErrCode code = llmopt::load_config(argc, argv, cfg, message);
+    std::vector<llmopt::ConfigSourceEntry> sources;
+    const llmopt::ErrCode code = llmopt::load_config(argc, argv, cfg, message, &sources);
     if (code != llmopt::ErrCode::Ok) {
         std::cerr << "配置错误: " << message << "\n";
         return exit_for(code);
     }
     llmopt::init_logging(cfg.log_level);
     print_config(cfg);
+    print_config_sources(sources);
     // 启动边界：线程创建、模型加载、监听阶段的异常在这里统一转退出码，不让它逃逸成 terminate。
     std::int32_t rc = kExitStartFail;
     try {

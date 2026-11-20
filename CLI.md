@@ -20,13 +20,15 @@
 ## 2 启动参数
 
 ```bash
-llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
+llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] \
               [--ctx-tokens 2048] [--max-concurrency 8] \
               [--max-num-batched-tokens 2048] [--queue-capacity 32] \
               [--block-size 16] [--watermark-ratio 0.05] [--disable-prefix-cache] \
               [--chunk-size 128] \
               [--mode off|auto|force_on] [--safety-ratio 0.80] [--allow-force-on] \
               [--threads 0] [--n-gpu-layers 0] [--backend llama|stub] \
+              [--rate-limit-rps 0] [--rate-limit-burst 32] \
+              [--drain-deadline-seconds 30] [--api-key ""] [--step-trace-rate 0] \
               [--log-level info|debug|warn]
 ```
 
@@ -34,6 +36,7 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 
 | 参数 | 环境变量 | 默认 | 取值/校验 | 说明 |
 | --- | --- | --- | --- | --- |
+| `--config` | `LLMOPT_CONFIG` | 空 | 可读 JSON 文件 | 文件层参数；未知键/越界/坏 JSON 启动即退出 2 |
 | `--model` | `LLMOPT_MODEL` | 无（必填） | 存在的 GGUF 文件 | 只读元数据做预算，不在此处加载权重 |
 | `--host` | `LLMOPT_HOST` | `127.0.0.1` | 任意可绑定地址 | 默认只本机 |
 | `--port` | `LLMOPT_PORT` | `8080` | 1–65535 | 占用时退出 3 |
@@ -57,14 +60,20 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 | `--n-gpu-layers` | `LLMOPT_N_GPU_LAYERS` | `0` | ≥0 | 0 为纯 CPU |
 | `--backend` | `LLMOPT_BACKEND` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
 | `--log-level` | `LLMOPT_LOG_LEVEL` | `info` | spdlog 级别 | 跑基准建议 `warn` |
+| `--rate-limit-rps` | `LLMOPT_RATE_LIMIT_RPS` | `0` | 0–1e6 | 全局令牌桶速率；0=关（行为在 7-4 接入） |
+| `--rate-limit-burst` | `LLMOPT_RATE_LIMIT_BURST` | `32` | 1–1024 | 桶容量（行为在 7-4 接入） |
+| `--drain-deadline-seconds` | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | 1–300 | SIGTERM 排空上限（行为在 7-3 接入） |
+| `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值 |
+| `--step-trace-rate` | `LLMOPT_STEP_TRACE_RATE` | `0` | 0–64 | 每步 trace 1/N 采样；0=关（行为在 7-5 接入） |
 
 阶段 3 起支持 chunked prefill，`ctx-tokens` 不再受单步预算限制；`chunk-size` 取四档，其他值启动即拒绝。调度顺序固定为：在跑 decode 保位 → 在跑 prefill 的下一 chunk → 预算内补新请求，合计 token 不超过 `max-num-batched-tokens`。
 
-优先级固定：**CLI > `LLMOPT_*` > 内置默认**。启动第一行打印生效配置，第三行打印预算与门控结论，便于复核。
+优先级固定：**CLI > `LLMOPT_*` > `--config` 文件 > 内置默认**。启动第一行打印生效配置，随后逐行打印 `config source: <键>=cli|env|file|default`，第三行打印预算与门控结论，便于复核。
+
+配置文件键与 CLI 同名，允许 kebab-case 或 snake_case（`ctx-tokens` / `ctx_tokens` 等价）；未知键、类型不符、越界与坏 JSON 一律退出 2，不静默取默认。`api-key` 可来自文件或 env，但启动摘要只打印 `set/unset`。
 
 被拒绝的参数：
 
-- `--config`：阶段 2 才引入，当前按未知参数处理（退出 2）。
 - `--seed` / `--max-tokens`：属于请求级字段，不做全局默认，避免“服务默认值”与“请求默认值”两套事实。
 - 重复参数：后者覆盖前者，不报错。
 
@@ -147,7 +156,7 @@ data: [DONE]
 | --- | --- | --- |
 | 0 | 正常退出 | SIGINT/SIGTERM 后 HTTP 停止、调度排空 |
 | 1 | 启动失败 | 模型文件不可读/元数据缺失、取值非法、后端未编译 |
-| 2 | 用法错误 | 缺 `--model`、未知参数、缺少取值 |
+| 2 | 用法错误 | 缺 `--model`、未知参数、缺少取值、`--config` 未知键/类型不符/越界/坏 JSON |
 | 3 | 资源不足 | `required > free`，或端口被占用 |
 | 4 | 门控拒绝 | `auto` 软超预算、`force_on` 未带开关、快照字段缺失 |
 
@@ -167,11 +176,14 @@ data: [DONE]
 
 ## 6 配置加载机制（Profile）
 
-阶段 1 **不读配置文件**，没有 profile 概念；配置只有 CLI 与环境变量两个来源。阶段 2 引入 `--config` 时的约定：
+阶段 6 起支持 `--config`，没有命名 profile/合并多个文件的概念；一次只读一个平铺 JSON。
 
-- JSON 顶层为平铺键，与参数名同名去 `--` 前缀，例如 `{"port": 8080, "ctx_tokens": 2048}`。
-- 优先级插入在 CLI 与环境变量之间：CLI > profile > env > 默认。
-- 生效来源在启动摘要中逐项标注，禁止静默回退。
+- 优先级固定：**CLI > `LLMOPT_*` > file > 默认**（R-07）。文件层先于 env 应用；CLI 最后覆盖。
+- JSON 顶层为平铺键，与参数名同名去 `--` 前缀，kebab 与 snake 均可：`{"port": 8080, "ctx_tokens": 2048}`。
+- 启动摘要逐项打印来源：`config source: port=cli` 等；未出现的字段为 `default`。
+- 未知键、类型不符、越界、坏 JSON 一律退出 2（R-08）；即使后续 CLI 能覆盖也不静默放行。
+- `--config` 的路径本身可来自 CLI 或 `LLMOPT_CONFIG`；两者同时存在时 CLI 决定读哪个文件。
+- `api-key` 只打印 `set/unset`，不打印值；日志同样不落明文。
 
 
 
@@ -191,7 +203,7 @@ data: [DONE]
 | `LLMOPT_ALLOW_STUB=1` | 允许 stub 后端，供测试与 CI | 未设置即拒绝 |
 | `LLMOPT_LLAMA_ROOT` | CMake 查 llama.cpp 头/库的根 | `/root/llm-src/llama.cpp` |
 
-- 默认只绑 `127.0.0.1`，无鉴权、无 TLS；对外暴露必须由反向代理承担认证。
+- 默认只绑 `127.0.0.1`；`--api-key` 只做单 token Bearer 预留（默认关，行为在 7-4 接入），不做多租户/配额。对外暴露仍建议反向代理承担 TLS 与更强认证。
 - 请求体上限 4 MB；读超时 5 s；写超时 120 s；单请求非流式排空上限 120 s。
 - 队列容量 32，满即 429；等待中的请求只占分词后的 token 数组，不占 KV。
 
