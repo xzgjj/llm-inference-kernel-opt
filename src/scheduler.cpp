@@ -358,6 +358,7 @@ void SchedulerCore::pump() {
     metrics_.set("llmopt_kv_cached_blocks", usage.cached_blocks);
     metrics_.set("llmopt_kv_shared_blocks", usage.shared_blocks);
     metrics_.set("llmopt_kv_free_blocks", usage.free_blocks);
+    metrics_.set("llmopt_kv_watermark_blocks", usage.watermark_blocks);
 }
 
 bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget) {

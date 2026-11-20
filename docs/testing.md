@@ -122,6 +122,16 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 - [ ] perf：固定输入长度下吞吐基线，连续三次中位数（`tests/perf/throughput`、`tests/perf/latency`）
 - [ ] sanitizer：以上 unit/contract 用例在 ASan+UBSan 与 TSan 下重跑（复用用例，不单建目录）
 
+
+
+### 7.1 缺陷回归的存放约定
+
+修复缺陷必须把触发场景固化成用例，跟着修复一起提交，不允许“改完即算”。用例放在对应层级的目录（逻辑判定进 `unit`/`contract`，进程行为进 `integration`），名称或注释要写明修复前的症状与触发条件，便于后来者判断它锁的是什么行为。
+
+已落地的例子：真实 llama 纯 CPU 后端没有统一 KV stream，`llama_memory_seq_cp` 会跨 stream 整段复制并 reset 目标 cells，与批内写入冲突，实测 4 条请求 `ExecutionFailed`。回归用例在 `tests/unit/config_test.cc` 的「后端不支持共享时前缀复用降级为关闭」，锁定 `effective_prefix_cache(true, false) == false`；真实后端用 `scripts/bench/verify_prefix.sh` 配 `NGL=0 EXPECT_SHARE=0` 复核“零命中、零崩溃、零对账差异”。
+
+自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。
+
 ## 8 维护
 
 - 测试删除或改期望值，必须同时更新本表，并在 PR 中写 `BEHAVIOR-CHANGE:` 说明。

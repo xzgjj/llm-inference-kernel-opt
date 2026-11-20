@@ -27,7 +27,7 @@ constexpr std::int32_t kExitStartFail = 1;
 constexpr std::int32_t kExitUsage = 2;
 constexpr std::int32_t kExitResource = 3;
 constexpr std::int32_t kExitGate = 4;
-constexpr std::int32_t kBlockTokens = 16;
+constexpr std::int32_t kDonorSlots = 4; // 前缀缓存最多保留的 donor 序列槽
 
 // MiB 换算只用于启动摘要，避免把字节数直接怼给人看。
 std::int64_t to_mib(std::int64_t bytes) {
@@ -46,6 +46,9 @@ std::int32_t exit_for(ErrCode code) {
 void print_config(const ServerConfig& cfg) {
     std::cout << "config: model=" << cfg.model_path << " host=" << cfg.host << " port=" << cfg.port
               << " ctx=" << cfg.ctx_tokens << " max_concurrency=" << cfg.max_concurrency
+              << " batch_tokens=" << cfg.max_num_batched_tokens << " queue=" << cfg.queue_capacity
+              << " block=" << cfg.block_tokens << " watermark=" << cfg.watermark_ratio
+              << " prefix_cache=" << (cfg.enable_prefix_cache ? 1 : 0)
               << " mode=" << gate_mode_name(cfg.mode) << " safety_ratio=" << cfg.safety_ratio
               << " backend=" << cfg.backend << " log_level=" << cfg.log_level << "\n";
 }
@@ -77,6 +80,30 @@ std::unique_ptr<ModelRunner> make_runner(const ServerConfig& cfg, std::string& m
 #endif
 }
 
+// 组装后端配置：单请求上下文与整机 KV 容量分开，n_seq_max 预留 donor 槽。
+ModelConfig build_model_config(const ServerConfig& cfg, std::int32_t concurrency) {
+    ModelConfig model_cfg;
+    model_cfg.model_path = cfg.model_path;
+    model_cfg.n_ctx = cfg.ctx_tokens;
+    model_cfg.n_ctx_total = cfg.ctx_tokens * concurrency;
+    model_cfg.n_batch = std::max(cfg.max_num_batched_tokens, cfg.ctx_tokens);
+    model_cfg.n_ubatch = 512;
+    model_cfg.n_seq_max = concurrency + kDonorSlots;
+    model_cfg.threads = cfg.threads;
+    model_cfg.n_gpu_layers = cfg.n_gpu_layers;
+    return model_cfg;
+}
+
+// 后端不支持零拷贝共享时把前缀复用降级为关闭，并明确告知，避免静默走不可用路径。
+bool resolve_prefix_cache(const ServerConfig& cfg, const ModelRunner& runner) {
+    const bool enabled =
+            effective_prefix_cache(cfg.enable_prefix_cache, runner.supports_prefix_share());
+    if (cfg.enable_prefix_cache && !enabled) {
+        std::cout << "前缀复用已关闭：当前后端不支持零拷贝 KV 共享\n";
+    }
+    return enabled;
+}
+
 // 组装并运行：Gate 通过后才加载权重；HTTP 与调度线程按 http→core→executor 顺序收尾。
 std::int32_t run(const ServerConfig& cfg) {
     const GgufMeta meta = read_gguf_meta(cfg.model_path);
@@ -84,9 +111,11 @@ std::int32_t run(const ServerConfig& cfg) {
         std::cerr << "读取模型元数据失败: " << meta.error << "\n";
         return kExitStartFail;
     }
+    const std::int32_t requested = std::max<std::int32_t>(cfg.max_concurrency, 1);
+    const std::int32_t ctx_total = cfg.ctx_tokens * requested;
     EstBudget budget;
     budget.model_bytes = meta.file_bytes;
-    budget.kv_bytes = estimate_kv_bytes(meta, cfg.ctx_tokens);
+    budget.kv_bytes = estimate_kv_bytes(meta, ctx_total);
     budget.required_bytes = budget.model_bytes + budget.kv_bytes;
     budget.safety_ratio = cfg.safety_ratio;
     const CapabilitySnapshot snapshot = probe_capabilities();
@@ -102,29 +131,28 @@ std::int32_t run(const ServerConfig& cfg) {
         std::cerr << message << "\n";
         return kExitStartFail;
     }
-    ModelConfig model_cfg;
-    model_cfg.model_path = cfg.model_path;
-    model_cfg.n_ctx = cfg.ctx_tokens;
-    model_cfg.n_batch = cfg.ctx_tokens;
-    model_cfg.n_ubatch = 512;
-    model_cfg.threads = cfg.threads;
-    model_cfg.n_gpu_layers = cfg.n_gpu_layers;
+    std::int32_t concurrency = requested;
+    if (gate.downgrade_concurrency) {
+        concurrency = std::max<std::int32_t>(1, cfg.max_concurrency / 2);
+        std::cout << "FORCE_ON 横幅：max_concurrency 降至 " << concurrency << "\n";
+    }
+    const std::int32_t kv_tokens = cfg.ctx_tokens * concurrency;
+    const ModelConfig model_cfg = build_model_config(cfg, concurrency);
     if (runner->load_model(model_cfg) != ErrCode::Ok) {
         std::cerr << "模型加载失败\n";
         return kExitStartFail;
     }
 
-    std::int32_t concurrency = cfg.max_concurrency;
-    if (gate.downgrade_concurrency) {
-        concurrency = std::max<std::int32_t>(1, cfg.max_concurrency / 2);
-        std::cout << "FORCE_ON 横幅：max_concurrency 降至 " << concurrency << "\n";
-    }
-    const std::int32_t blocks = cfg.ctx_tokens / kBlockTokens + 8;
-    KVBlockManager kv(KVConfig{kBlockTokens, blocks});
+    const std::int32_t blocks = std::max<std::int32_t>(kv_tokens / cfg.block_tokens, 1);
+    const bool prefix_cache = resolve_prefix_cache(cfg, *runner);
+    KVBlockManager kv(
+            KVConfig{cfg.block_tokens, blocks, cfg.watermark_ratio, prefix_cache, kDonorSlots});
     MetricsRegistry metrics;
     SchedulerConfig scheduler_cfg;
-    scheduler_cfg.max_concurrency = 1; // SPEC-1：阶段 1 batch=1
-    scheduler_cfg.queue_capacity = 64;
+    scheduler_cfg.max_concurrency = concurrency;
+    scheduler_cfg.max_num_batched_tokens = cfg.max_num_batched_tokens;
+    scheduler_cfg.queue_capacity = cfg.queue_capacity;
+    scheduler_cfg.enable_prefix_cache = prefix_cache;
     SchedulerCore core(*runner, kv, metrics, scheduler_cfg);
 
     std::thread core_thread([&core] { core.run(); });

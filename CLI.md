@@ -3,6 +3,8 @@
 > 状态：已实现并冻结，对应 SPEC-1（C-01…C-13）。与 SPEC 冲突处已记录在 `implementation-notes.md`。
 > 适用进程：`llmopt_server`。`tools/dev.py` 是开发工具链，参数命名独立，见第 8 节。
 
+
+
 ## 1 入口模式
 
 | 模式 | 命令 | 用途 | 后端要求 |
@@ -13,15 +15,21 @@
 
 本阶段不提供 `serve/bench/replay` 子命令；服务只有一个入口，避免两套参数。
 
+
+
 ## 2 启动参数
 
 ```bash
 llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
               [--ctx-tokens 2048] [--max-concurrency 8] \
+              [--max-num-batched-tokens 2048] [--queue-capacity 32] \
+              [--block-size 16] [--watermark-ratio 0.05] [--disable-prefix-cache] \
               [--mode off|auto|force_on] [--safety-ratio 0.80] [--allow-force-on] \
               [--threads 0] [--n-gpu-layers 0] [--backend llama|stub] \
               [--log-level info|debug|warn]
 ```
+
+
 
 | 参数 | 环境变量 | 默认 | 取值/校验 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -29,7 +37,12 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 | `--host` | `LLMOPT_HOST` | `127.0.0.1` | 任意可绑定地址 | 默认只本机 |
 | `--port` | `LLMOPT_PORT` | `8080` | 1–65535 | 占用时退出 3 |
 | `--ctx-tokens` | `LLMOPT_CTX_TOKENS` | `2048` | 128–131072 | 同时决定 KV 估算与上下文拒绝阈值 |
-| `--max-concurrency` | `LLMOPT_MAX_CONCURRENCY` | `8` | 1–64 | 阶段 1 调度器实际按 1 跑，参数为阶段 2 预留 |
+| `--max-concurrency` | `LLMOPT_MAX_CONCURRENCY` | `8` | 1–64 | 连续批调度的运行序列上限，超出的请求进 waiting 队列 |
+| `--max-num-batched-tokens` | `LLMOPT_MAX_NUM_BATCHED_TOKENS` | `2048` | 1–8192，且 ≥ `max-concurrency`、≥ `ctx-tokens` | 单步调度 token 预算；阶段 2 无 chunked prefill，低于 ctx 会让长 prompt 永不推进，启动即拒绝 |
+| `--queue-capacity` | `LLMOPT_QUEUE_CAPACITY` | `32` | 1–1024 | waiting 队列上限，满即 429 |
+| `--block-size` | `LLMOPT_BLOCK_SIZE` | `16` | 4–128 | KV 逻辑块 token 数，同时决定前缀命中粒度 |
+| `--watermark-ratio` | `LLMOPT_WATERMARK_RATIO` | `0.05` | 0–0.2 | 准入预留的空闲块比例，按块池总量折算 |
+| `--disable-prefix-cache` | `LLMOPT_DISABLE_PREFIX_CACHE` | `false` | 布尔开关，不带值 | 关闭满块哈希与前缀复用；后端不支持零拷贝共享时也会自动关闭 |
 | `--mode` | `LLMOPT_MODE` | `off` | `off`/`auto`/`force_on` | 门控三档，见第 5 节 |
 | `--safety-ratio` | `LLMOPT_SAFETY_RATIO` | `0.80` | 0.80–0.85 | 软预算系数 |
 | `--allow-force-on` | `LLMOPT_ALLOW_FORCE_ON` | `false` | 布尔开关，不带值 | `force_on` 的二次确认 |
@@ -38,6 +51,8 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 | `--backend` | `LLMOPT_BACKEND` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
 | `--log-level` | `LLMOPT_LOG_LEVEL` | `info` | spdlog 级别 | 跑基准建议 `warn` |
 
+阶段 2 单批 prefill 上限 8192，且要求 `max-num-batched-tokens ≥ ctx-tokens`，因此 `ctx-tokens > 8192` 的配置当前无法启动；这是 chunked prefill 落地前的临时边界，阶段 3 放开。
+
 优先级固定：**CLI > `LLMOPT_*` > 内置默认**。启动第一行打印生效配置，第三行打印预算与门控结论，便于复核。
 
 被拒绝的参数：
@@ -45,6 +60,8 @@ llmopt_server --model <gguf> [--host 127.0.0.1] [--port 8080] \
 - `--config`：阶段 2 才引入，当前按未知参数处理（退出 2）。
 - `--seed` / `--max-tokens`：属于请求级字段，不做全局默认，避免“服务默认值”与“请求默认值”两套事实。
 - 重复参数：后者覆盖前者，不报错。
+
+
 
 ## 3 HTTP 契约
 
@@ -100,6 +117,8 @@ data: [DONE]
 
 错误响应统一为 `{"error":{"code":"QUEUE_FULL","message":"...","retryable":true}}`，HTTP 映射见第 4 节。
 
+
+
 ## 4 错误码与退出码
 
 | ErrCode | HTTP | code | 可重试 |
@@ -125,6 +144,8 @@ data: [DONE]
 | 3 | 资源不足 | `required > free`，或端口被占用 |
 | 4 | 门控拒绝 | `auto` 软超预算、`force_on` 未带开关、快照字段缺失 |
 
+
+
 ## 5 门控与预算
 
 1. L1 探测：RAM 总量/可用、GPU 型号与空闲显存、逻辑核数、是否 WSL。
@@ -135,6 +156,8 @@ data: [DONE]
    - `required > free`：`BLOCKED`，任何模式都退出 3。
    - 快照/元数据缺字段：`BLOCKED`，退出 4。
 
+
+
 ## 6 配置加载机制（Profile）
 
 阶段 1 **不读配置文件**，没有 profile 概念；配置只有 CLI 与环境变量两个来源。阶段 2 引入 `--config` 时的约定：
@@ -143,11 +166,15 @@ data: [DONE]
 - 优先级插入在 CLI 与环境变量之间：CLI > profile > env > 默认。
 - 生效来源在启动摘要中逐项标注，禁止静默回退。
 
+
+
 ## 7 插件与依赖
 
 - 推理后端不是运行期插件，而是编译期开关：`-DLLMOPT_ENABLE_LLAMA=ON` 编入真实 llama.cpp，`OFF` 只留 stub。
 - 第三方依赖由 CMake FetchContent 拉到 `third_party/_deps`（不入库），版本见 `cmake/deps.cmake`。
 - 无动态加载、无插件目录扫描；避免运行期 ABI 风险。
+
+
 
 ## 8 环境变量、权限与资源上限
 
@@ -159,7 +186,9 @@ data: [DONE]
 
 - 默认只绑 `127.0.0.1`，无鉴权、无 TLS；对外暴露必须由反向代理承担认证。
 - 请求体上限 4 MB；读超时 5 s；写超时 120 s；单请求非流式排空上限 120 s。
-- 队列容量 64，满即 429，不排队等待。
+- 队列容量 32，满即 429；等待中的请求只占分词后的 token 数组，不占 KV。
+
+
 
 ## 9 可直接执行的示例
 
@@ -226,6 +255,8 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
   --out tools/bench/results/phase1/smoke
 ```
 
+
+
 ## 10 已与用户核对并冻结的契约点
 
 1. 阶段 0+1 共用整数分支 `1`，下一阶段从 `2` 开始。
@@ -234,3 +265,4 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 4. `/completion` 保留，`/v1/chat/completions` 恒 404。
 5. 双档后端：`LLMOPT_ENABLE_LLAMA=ON` 才编真实后端；Windows/CI 用 stub。
 6. 退出码 3/4 语义见第 4 节。
+7. 阶段 2 调度参数默认值：`max-num-batched-tokens=2048`、`queue-capacity=32`、`block-size=16`、`watermark-ratio=0.05`、前缀缓存默认开。`max-num-batched-tokens` 必须 ≥ `ctx-tokens`，等阶段 3 支持 chunked prefill 后再放开。

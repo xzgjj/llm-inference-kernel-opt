@@ -110,7 +110,7 @@ def main() -> int:
         env["LLMOPT_ALLOW_STUB"] = "1"
         cmd = [str(SERVER), "--model", str(model), "--host", "127.0.0.1", "--port", str(port),
                "--backend", "stub", "--mode", "off", "--ctx-tokens", "512",
-               "--max-concurrency", "4", "--max-num-batched-tokens", "64",
+               "--max-concurrency", "4", "--max-num-batched-tokens", "512",
                "--block-size", "8", "--queue-capacity", "8", "--log-level", "warn"]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         try:

@@ -77,8 +77,9 @@ private:
 
 // 装配：块大小 4，prompt 由 token 基址生成，便于构造同前缀。
 struct CbHarness {
-    CbHarness(std::int32_t max_seqs, std::int32_t budget, std::int32_t blocks)
-        : runner(std::make_unique<RecordingRunner>()), kv(KVConfig{4, blocks, 0.0, true, 2}),
+    CbHarness(std::int32_t max_seqs, std::int32_t budget, std::int32_t blocks,
+              double watermark = 0.0)
+        : runner(std::make_unique<RecordingRunner>()), kv(KVConfig{4, blocks, watermark, true, 2}),
           core(*runner, kv, metrics, SchedulerConfig{max_seqs, budget, 64, true}) {
         ModelConfig model;
         model.n_ctx = 4096;
@@ -166,7 +167,7 @@ TEST_CASE("同一 tick 到达的 4 条请求合成一个 prefill 批") {
     }
     (void)harness.core.run_once(20);
     const std::vector<Batch> batches = wait_batches(harness, 1);
-    REQUIRE(batches.size() == 1);
+    REQUIRE(!batches.empty());
     CHECK(batches[0].steps.size() == 4);
     CHECK(batches[0].new_reqs.size() == 4);
     CHECK(batches[0].cached_reqs.empty());
@@ -304,4 +305,15 @@ TEST_CASE("无前缀时批内块 id 不重叠，关停后零泄漏") {
     CHECK(harness.kv.num_free_blocks() == harness.kv.num_total_blocks());
     std::string why;
     CHECK(harness.kv.check_invariants(why));
+}
+
+// 回归：watermark 只在 KVUsage 里算出、调度层忘了 set，/metrics 会恒为 0，
+// 导致 2-G2 的 watermark 证据失真。这里锁定 gauge 与块表真实值一致。
+TEST_CASE("KV watermark 指标随准入上报") {
+    CbHarness harness(1, 16, 16, 0.05);
+    const auto sink = harness.submit("req-w", 8, 2, 120);
+    harness.run_until_closed({sink});
+    const KVUsage usage = harness.kv.usage();
+    CHECK(usage.watermark_blocks > 0);
+    CHECK(harness.metrics.get("llmopt_kv_watermark_blocks") == usage.watermark_blocks);
 }

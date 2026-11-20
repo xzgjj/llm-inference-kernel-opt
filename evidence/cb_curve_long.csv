@@ -1,0 +1,3 @@
+concurrency,requests,tokens,seconds,tokens_per_s,ttft_p50_ms,latency_p50_ms
+8,16,4096,10.17,402.75,89.12,5081.94
+1,16,4096,13.546,302.39,10.03,845.28

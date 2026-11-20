@@ -30,9 +30,12 @@ void set_env(const char* key, const char* value) {
 
 // 清掉上一例留下的变量，避免用例互相污染。
 void clear_env() {
-    for (const char* key : {"LLMOPT_MODEL", "LLMOPT_HOST", "LLMOPT_PORT", "LLMOPT_CTX_TOKENS",
-                            "LLMOPT_MAX_CONCURRENCY", "LLMOPT_MODE", "LLMOPT_BACKEND",
-                            "LLMOPT_SAFETY_RATIO", "LLMOPT_ALLOW_STUB", "LLMOPT_ALLOW_FORCE_ON"}) {
+    for (const char* key :
+         {"LLMOPT_MODEL", "LLMOPT_HOST", "LLMOPT_PORT", "LLMOPT_CTX_TOKENS",
+          "LLMOPT_MAX_CONCURRENCY", "LLMOPT_MODE", "LLMOPT_BACKEND", "LLMOPT_SAFETY_RATIO",
+          "LLMOPT_ALLOW_STUB", "LLMOPT_ALLOW_FORCE_ON", "LLMOPT_MAX_NUM_BATCHED_TOKENS",
+          "LLMOPT_QUEUE_CAPACITY", "LLMOPT_BLOCK_SIZE", "LLMOPT_WATERMARK_RATIO",
+          "LLMOPT_DISABLE_PREFIX_CACHE"}) {
         set_env(key, "");
     }
 }
@@ -112,4 +115,76 @@ TEST_CASE("gate 模式文本解析只接受三档") {
     CHECK(parse_gate_mode("force_on", mode));
     CHECK(mode == GateMode::ForceOn);
     CHECK_FALSE(parse_gate_mode("ON", mode));
+}
+
+TEST_CASE("阶段 2 调度参数默认值与 CLI 覆盖") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.max_num_batched_tokens == 2048);
+    CHECK(cfg.queue_capacity == 32);
+    CHECK(cfg.block_tokens == 16);
+    CHECK(cfg.watermark_ratio == doctest::Approx(0.05));
+    CHECK(cfg.enable_prefix_cache);
+
+    CHECK(load({"--model", "m.gguf", "--ctx-tokens", "1024", "--max-num-batched-tokens", "1024",
+                "--queue-capacity", "8", "--block-size", "32", "--watermark-ratio", "0.10",
+                "--disable-prefix-cache"},
+               cfg, message) == ErrCode::Ok);
+    CHECK(cfg.max_num_batched_tokens == 1024);
+    CHECK(cfg.queue_capacity == 8);
+    CHECK(cfg.block_tokens == 32);
+    CHECK(cfg.watermark_ratio == doctest::Approx(0.10));
+    CHECK_FALSE(cfg.enable_prefix_cache);
+}
+
+TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
+    clear_env();
+    set_env("LLMOPT_CTX_TOKENS", "512");
+    set_env("LLMOPT_MAX_NUM_BATCHED_TOKENS", "512");
+    set_env("LLMOPT_QUEUE_CAPACITY", "4");
+    set_env("LLMOPT_BLOCK_SIZE", "8");
+    set_env("LLMOPT_WATERMARK_RATIO", "0.0");
+    set_env("LLMOPT_DISABLE_PREFIX_CACHE", "1");
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.max_num_batched_tokens == 512);
+    CHECK(cfg.ctx_tokens == 512);
+    CHECK(cfg.queue_capacity == 4);
+    CHECK(cfg.block_tokens == 8);
+    CHECK_FALSE(cfg.enable_prefix_cache);
+    clear_env();
+
+    CHECK(load({"--model", "m.gguf", "--max-num-batched-tokens", "0"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--max-concurrency", "8", "--max-num-batched-tokens", "4"},
+               cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--queue-capacity", "0"}, cfg, message) ==
+          ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--block-size", "2"}, cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--watermark-ratio", "0.3"}, cfg, message) ==
+          ErrCode::InvalidJson);
+}
+
+// 回归：预算小于 ctx 时，长 prompt 在队首反复 break、既不推进也不拒绝，会挂死并
+// 队头阻塞；阶段 2 无 chunked prefill，启动期必须拒绝该组合。
+TEST_CASE("批 token 预算不得小于上下文长度") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf", "--ctx-tokens", "4096", "--max-num-batched-tokens", "2048"},
+               cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--ctx-tokens", "1024", "--max-num-batched-tokens", "2048"},
+               cfg, message) == ErrCode::Ok);
+}
+
+// 回归：llama 纯 CPU 后端没有统一 KV stream，seq_cp 会跨 stream 复制并重置目标
+// cells，实测触发 4 条 ExecutionFailed。后端声明不支持共享时必须强制关闭复用。
+TEST_CASE("后端不支持共享时前缀复用降级为关闭") {
+    CHECK_FALSE(effective_prefix_cache(true, false));
+    CHECK_FALSE(effective_prefix_cache(false, true));
+    CHECK_FALSE(effective_prefix_cache(false, false));
+    CHECK(effective_prefix_cache(true, true));
 }

@@ -11,10 +11,24 @@ MetricsRegistry::MetricsRegistry() {
         values_["llmopt_requests_total{status=\"" + std::string(status) + "\"}"] = 0;
     }
     values_["llmopt_tokens_generated_total"] = 0;
+    values_["llmopt_prefill_tokens_total"] = 0;
     values_["llmopt_forward_steps_total"] = 0;
     values_["llmopt_queue_depth"] = 0;
     values_["llmopt_running_sequences"] = 0;
     values_["llmopt_kv_free_blocks"] = 0;
+    values_["llmopt_kv_used_blocks"] = 0;
+    values_["llmopt_kv_cached_blocks"] = 0;
+    values_["llmopt_kv_shared_blocks"] = 0;
+    values_["llmopt_kv_watermark_blocks"] = 0;
+    values_["llmopt_prefix_hits_total"] = 0;
+    values_["llmopt_prefix_misses_total"] = 0;
+    values_["llmopt_prefix_hit_tokens_total"] = 0;
+    values_["llmopt_prefix_evictions_total"] = 0;
+    values_["llmopt_kv_reconcile_diffs_total"] = 0;
+    for (const char* reason :
+         {"no_free_block", "below_watermark", "context_overflow", "token_budget", "queue"}) {
+        values_["llmopt_admission_rejected_total{reason=\"" + std::string(reason) + "\"}"] = 0;
+    }
 }
 
 void MetricsRegistry::inc(const std::string& name, std::int64_t delta) {

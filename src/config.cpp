@@ -76,7 +76,33 @@ bool parse_double(const std::string& text, double& out) {
     return true;
 }
 
+// 阶段 2 新增的调度参数集中处理，避免主 apply_arg 分支过长。
+bool is_sched_key(const std::string& key) {
+    return key == "--max-num-batched-tokens" || key == "--queue-capacity" ||
+           key == "--block-size" || key == "--watermark-ratio" || key == "--disable-prefix-cache";
+}
+
+ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::string& value) {
+    if (key == "--max-num-batched-tokens") {
+        return parse_int(value, cfg.max_num_batched_tokens) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    if (key == "--queue-capacity") {
+        return parse_int(value, cfg.queue_capacity) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    if (key == "--block-size") {
+        return parse_int(value, cfg.block_tokens) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    if (key == "--watermark-ratio") {
+        return parse_double(value, cfg.watermark_ratio) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    cfg.enable_prefix_cache = false;
+    return ErrCode::Ok;
+}
+
 ErrCode apply_arg(ServerConfig& cfg, const std::string& key, const std::string& value) {
+    if (is_sched_key(key)) {
+        return apply_sched_arg(cfg, key, value);
+    }
     if (key == "--model") {
         cfg.model_path = value;
     } else if (key == "--host") {
@@ -145,6 +171,15 @@ ErrCode load_env(ServerConfig& cfg, std::string& message) {
     if (env_int("LLMOPT_MAX_CONCURRENCY", number)) {
         cfg.max_concurrency = number;
     }
+    if (env_int("LLMOPT_MAX_NUM_BATCHED_TOKENS", number)) {
+        cfg.max_num_batched_tokens = number;
+    }
+    if (env_int("LLMOPT_QUEUE_CAPACITY", number)) {
+        cfg.queue_capacity = number;
+    }
+    if (env_int("LLMOPT_BLOCK_SIZE", number)) {
+        cfg.block_tokens = number;
+    }
     if (env_int("LLMOPT_THREADS", number)) {
         cfg.threads = number;
     }
@@ -154,6 +189,13 @@ ErrCode load_env(ServerConfig& cfg, std::string& message) {
     double ratio = 0.0;
     if (env_double("LLMOPT_SAFETY_RATIO", ratio)) {
         cfg.safety_ratio = ratio;
+    }
+    if (env_double("LLMOPT_WATERMARK_RATIO", ratio)) {
+        cfg.watermark_ratio = ratio;
+    }
+    bool flag = false;
+    if (env_bool("LLMOPT_DISABLE_PREFIX_CACHE", flag)) {
+        cfg.enable_prefix_cache = !flag;
     }
     (void)env_bool("LLMOPT_ALLOW_FORCE_ON", cfg.allow_force_on);
     std::string mode;
@@ -179,6 +221,32 @@ ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.max_concurrency < 1 || cfg.max_concurrency > 64) {
         message = "max-concurrency 必须在 1..64";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.max_num_batched_tokens < 1 || cfg.max_num_batched_tokens > 8192) {
+        message = "max-num-batched-tokens 必须在 1..8192";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.max_num_batched_tokens < cfg.max_concurrency) {
+        message = "max-num-batched-tokens 不能小于 max-concurrency";
+        return ErrCode::InvalidJson;
+    }
+    // 阶段 2 没有 chunked prefill：预算小于上下文时，超长 prompt 会在队首反复 break，
+    // 既不推进也不拒绝，且挡住后面的请求；启动期直接拒绝这种配置。
+    if (cfg.max_num_batched_tokens < cfg.ctx_tokens) {
+        message = "max-num-batched-tokens 不能小于 ctx-tokens（阶段 2 无 chunked prefill）";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.queue_capacity < 1 || cfg.queue_capacity > 1024) {
+        message = "queue-capacity 必须在 1..1024";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.block_tokens < 4 || cfg.block_tokens > 128) {
+        message = "block-size 必须在 4..128";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.watermark_ratio < 0.0 || cfg.watermark_ratio > 0.2) {
+        message = "watermark-ratio 必须在 0.0..0.2";
         return ErrCode::InvalidJson;
     }
     if (cfg.safety_ratio < 0.80 || cfg.safety_ratio > 0.85) {
@@ -230,7 +298,7 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
         for (int index = 1; index < argc; ++index) {
             const std::string key = argv[index];
             std::string value;
-            const bool needs_value = key != "--allow-force-on";
+            const bool needs_value = key != "--allow-force-on" && key != "--disable-prefix-cache";
             if (needs_value) {
                 if (index + 1 >= argc) {
                     message = "参数 " + key + " 缺少取值";
@@ -253,6 +321,11 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
         message = std::string("配置解析异常: ") + exc.what();
         return ErrCode::InvalidJson;
     }
+}
+
+// 前缀复用的有效开关：后端不支持共享时请求开启也降级为关闭，避免不可用路径。
+bool effective_prefix_cache(bool requested, bool backend_supports) noexcept {
+    return requested && backend_supports;
 }
 
 } // namespace llmopt
