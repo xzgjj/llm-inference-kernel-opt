@@ -83,7 +83,8 @@ struct RunnerStepOutput {
     std::vector<RequestId> req_ids;
     std::vector<SampledToken> sampled;
     std::vector<std::int32_t> num_nans;
-    ErrCode err = ErrCode::Ok;
+    // 失败原因随结果一起回投：整批失败时 sampled 为空，error 必为非 Ok。
+    Error error;
 };
 
 struct Completion {
@@ -95,7 +96,8 @@ struct Completion {
     std::vector<SampledToken> sampled;
     // 非末块 chunk 只推进预填、不采样；false 表示 sampled 允许为空。
     bool sampled_expected = true;
-    ErrCode err = ErrCode::Ok;
+    // 后端失败原因；Ok 表示本步成功。回投时整批共用同一份 Error。
+    Error error;
 };
 
 } // namespace llmopt

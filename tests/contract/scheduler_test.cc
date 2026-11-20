@@ -60,7 +60,7 @@ public:
     }
     RunnerStepOutput decode_step(const Batch&) override {
         RunnerStepOutput output;
-        output.err = ErrCode::ExecutionFailed;
+        output.error = make_error(ErrCode::ExecutionFailed, "failing runner");
         return output;
     }
     void release_sequence(const RequestId&, std::int32_t) override {}
@@ -87,8 +87,8 @@ private:
 
 // 装配自定义后端，复用与 Harness 相同的块表与指标。
 struct FaultHarness {
-    explicit FaultHarness(bool fail_add)
-        : runner(std::make_unique<FailingRunner>(fail_add)), kv(KVConfig{8, 8}),
+    explicit FaultHarness(bool fail_add, KVConfig kv_config = KVConfig{8, 8})
+        : runner(std::make_unique<FailingRunner>(fail_add)), kv(kv_config),
           core(*runner, kv, metrics, SchedulerConfig{1, 8}) {}
 
     std::shared_ptr<BoundedSink> submit() {
@@ -250,7 +250,8 @@ TEST_CASE("add_sequence 失败时归还已申请的 KV 块") {
 }
 
 TEST_CASE("decode_step 失败仍回投完成事件并关闭 sink") {
-    FaultHarness harness(false);
+    // 块表给足，确保用例终点是"后端采样失败"而不是准入被 ContextOverflow 拦下。
+    FaultHarness harness(false, KVConfig{32, 8});
     const auto sink = harness.submit();
     for (int index = 0; index < 20 && !sink->is_closed(); ++index) {
         (void)harness.core.run_once(20);
@@ -258,6 +259,15 @@ TEST_CASE("decode_step 失败仍回投完成事件并关闭 sink") {
     REQUIRE(sink->is_closed());
     CHECK(harness.core.running_count() == 0);
     CHECK(harness.kv.num_free_blocks() == harness.kv.num_total_blocks());
+    // 失败必须先落一条错误帧，客户端才能区分"正常结束"与"后端失败"。
+    const std::vector<Delta> frames = drain(sink);
+    bool saw_error = false;
+    for (const Delta& frame : frames) {
+        if (frame.error && frame.error->code == ErrCode::ExecutionFailed) {
+            saw_error = true;
+        }
+    }
+    CHECK(saw_error);
 }
 
 TEST_CASE("mailbox 满时 submit 返回 QueueFull") {

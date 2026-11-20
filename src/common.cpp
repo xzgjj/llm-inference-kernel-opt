@@ -24,6 +24,8 @@ int http_status(ErrCode code) noexcept {
         return 404;
     case ErrCode::ResourceInsufficient:
         return 507;
+    case ErrCode::Timeout:
+        return 504;
     }
     return 500;
 }
@@ -52,6 +54,8 @@ const char* error_code_name(ErrCode code) noexcept {
         return "NOT_SUPPORTED";
     case ErrCode::ResourceInsufficient:
         return "RESOURCE_INSUFFICIENT";
+    case ErrCode::Timeout:
+        return "TIMEOUT";
     }
     return "EXECUTION_FAILED";
 }
@@ -76,7 +80,7 @@ const char* finish_reason_name(FinishReason reason) noexcept {
 
 bool retryable(ErrCode code) noexcept {
     return code == ErrCode::ModelNotLoaded || code == ErrCode::KvInsufficient ||
-           code == ErrCode::QueueFull;
+           code == ErrCode::QueueFull || code == ErrCode::Timeout;
 }
 
 } // namespace llmopt

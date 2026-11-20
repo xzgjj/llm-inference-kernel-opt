@@ -23,7 +23,8 @@ std::string render_done_frame() noexcept;
 std::string render_completion_body(const InferenceRequest& req, const std::string& text,
                                    FinishReason finish, int prompt_tokens, int gen_tokens);
 
-// 错误体：{"error":{"code","message","retryable"}}。
+// 错误体：{"error":{"code","message","retryable"}}；Error 版本是唯一生产路径。
+std::string render_error_body(const Error& error);
 std::string render_error_body(ErrCode code, const std::string& message);
 
 } // namespace llmopt

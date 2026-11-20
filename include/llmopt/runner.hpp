@@ -42,6 +42,11 @@ public:
         (void)req_id;
         return -1;
     }
+    // 最近一次失败的详细信息（message/detail）；适配器在此保留第三方原始 cause。
+    // 只用于日志与启动报错，不参与控制流。
+    virtual Error last_error() const {
+        return Error{};
+    }
     // 是否允许从运行中的序列借前缀；跨 stream 后端只能从已截断的 donor 借。
     virtual bool supports_live_prefix() const noexcept {
         return false;

@@ -46,12 +46,29 @@ TEST_CASE("非法 JSON / 非对象 / 空 prompt / 越界采样全部拒绝") {
     std::string message;
     CHECK(parse_body("not json", req, message) == ErrCode::InvalidJson);
     CHECK(parse_body("[]", req, message) == ErrCode::InvalidJson);
-    CHECK(parse_body(R"({"prompt":""})", req, message) == ErrCode::PromptTooLong);
+    CHECK(parse_body(R"({"prompt":""})", req, message) == ErrCode::InvalidJson);
     CHECK(parse_body(R"({"prompt":1})", req, message) == ErrCode::InvalidJson);
     CHECK(parse_body(body_with(R"(,"max_tokens":0)"), req, message) == ErrCode::InvalidJson);
     CHECK(parse_body(body_with(R"(,"temperature":3,"top_p":1,"min_p":0)"), req, message) ==
           ErrCode::InvalidJson);
     CHECK(parse_body(body_with(R"(,"stream":1)"), req, message) == ErrCode::InvalidJson);
+}
+
+TEST_CASE("错误信息能定位到具体字段与合法区间") {
+    InferenceRequest req;
+    std::string message;
+    CHECK(parse_body(body_with(R"(,"max_tokens":0)"), req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("max_tokens") != std::string::npos);
+    CHECK(message.find("[1, 4096]") != std::string::npos);
+    CHECK(parse_body(body_with(R"(,"top_p":2)"), req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("top_p") != std::string::npos);
+    CHECK(parse_body(body_with(R"(,"repeat_penalty":0.1)"), req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("repeat_penalty") != std::string::npos);
+    CHECK(parse_body(body_with(R"(,"seed":1.5)"), req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("seed") != std::string::npos);
+    // 空 prompt 是语义错误，不是上下文超限：客户端不应据此裁剪 prompt。
+    CHECK(parse_body(R"({"prompt":""})", req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("prompt") != std::string::npos);
 }
 
 TEST_CASE("增量帧是单行 data: 前缀的 JSON 并以空行结束") {
@@ -84,6 +101,34 @@ TEST_CASE("非流式体带 usage 且 total 为两项之和") {
     CHECK(body.find("\"object\":\"text_completion\"") != std::string::npos);
     CHECK(body.find("\"finish_reason\":\"stop\"") != std::string::npos);
     CHECK(body.find("\"total_tokens\":8") != std::string::npos);
+}
+
+TEST_CASE("错误帧携带 code/message/retryable，detail 不外发") {
+    InferenceRequest req;
+    req.req_id = "req-err";
+    Delta delta;
+    delta.error = make_error(ErrCode::ExecutionFailed, "前向失败", "op=process rc=1");
+    const std::string frame = render_frame(req, delta);
+    CHECK(frame.rfind("data: ", 0) == 0);
+    CHECK(frame.find("\"code\":\"EXECUTION_FAILED\"") != std::string::npos);
+    CHECK(frame.find("\"message\":\"前向失败\"") != std::string::npos);
+    CHECK(frame.find("\"retryable\":false") != std::string::npos);
+    CHECK(frame.find("op=process") == std::string::npos);
+}
+
+TEST_CASE("Error 错误体只出 code/message/retryable") {
+    const std::string body =
+            render_error_body(make_error(ErrCode::QueueFull, "等待队列已满", "cap=32"));
+    CHECK(body.find("\"code\":\"QUEUE_FULL\"") != std::string::npos);
+    CHECK(body.find("等待队列已满") != std::string::npos);
+    CHECK(body.find("\"retryable\":true") != std::string::npos);
+    CHECK(body.find("cap=32") == std::string::npos);
+}
+
+TEST_CASE("超时映射 504 且可重试") {
+    CHECK(http_status(ErrCode::Timeout) == 504);
+    CHECK(std::string(error_code_name(ErrCode::Timeout)) == "TIMEOUT");
+    CHECK(retryable(ErrCode::Timeout));
 }
 
 TEST_CASE("错误体映射状态码、名称与可重试性") {

@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <utility>
 
 namespace llmopt {
 namespace {
@@ -57,7 +58,9 @@ public:
         for (const SequenceStep& step : batch.steps) {
             if (step.phase == Phase::Decode) {
                 if (cached_index >= batch.cached_reqs.size()) {
-                    return failed(output);
+                    return failed(output, make_error(ErrCode::ExecutionFailed, "decode 数据缺失",
+                                                     "op=decode_step cached_index=" +
+                                                             std::to_string(cached_index)));
                 }
                 const CachedRequestData& data = batch.cached_reqs[cached_index++];
                 StubState& state = states_[data.req_id];
@@ -66,12 +69,17 @@ public:
                 continue;
             }
             if (new_index >= batch.new_reqs.size()) {
-                return failed(output);
+                return failed(output,
+                              make_error(ErrCode::ExecutionFailed, "prefill 数据缺失",
+                                         "op=decode_step new_index=" + std::to_string(new_index)));
             }
             const NewRequestData& data = batch.new_reqs[new_index++];
             auto donor = states_.find(data.prefix_source);
             if (data.prefix_tokens > 0 && (data.prefix_source.empty() || donor == states_.end())) {
-                return failed(output);
+                return failed(output,
+                              make_error(ErrCode::ExecutionFailed, "前缀 donor 不存在",
+                                         "op=prefix_borrow source=" + data.prefix_source +
+                                                 " tokens=" + std::to_string(data.prefix_tokens)));
             }
             StubState& state = states_[data.req_id];
             state.n_past = step.pos_end;
@@ -80,7 +88,6 @@ public:
                 emit(state, output);
             }
         }
-        output.err = ErrCode::Ok;
         return output;
     }
 
@@ -158,11 +165,11 @@ public:
 
 private:
     // 整批失败：清空已累积结果，避免按步回投时把半批 token 当成成功。
-    static RunnerStepOutput failed(RunnerStepOutput output) {
+    static RunnerStepOutput failed(RunnerStepOutput output, Error error) {
         output.req_ids.clear();
         output.sampled.clear();
         output.num_nans.clear();
-        output.err = ErrCode::ExecutionFailed;
+        output.error = std::move(error);
         return output;
     }
 

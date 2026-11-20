@@ -92,7 +92,7 @@ TEST_CASE("decode 步推进 n_past，释放后状态被清除") {
     seq.sampling.seed = 1;
     REQUIRE(runner->add_sequence(seq) == ErrCode::Ok);
     RunnerStepOutput prefill = runner->decode_step(prefill_batch("req-step", {1, 2, 3}));
-    CHECK(prefill.err == ErrCode::Ok);
+    CHECK(prefill.error.ok());
 
     Batch decode;
     CachedRequestData cached;
@@ -110,7 +110,7 @@ TEST_CASE("decode 步推进 n_past，释放后状态被清除") {
     step.sample_pos = 3;
     decode.steps.push_back(step);
     decode.total_tokens = 1;
-    CHECK(runner->decode_step(decode).err == ErrCode::Ok);
+    CHECK(runner->decode_step(decode).error.ok());
     runner->release_sequence("req-step");
     CHECK(runner->is_eos(0) == false);
 }

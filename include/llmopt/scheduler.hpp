@@ -10,6 +10,7 @@
 #include "llmopt/sink.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -201,10 +202,12 @@ struct Event {
 };
 
 // 有界 MPMC：满即背压；只有入队与出队，不做状态判断。
+// push_critical 走无损通道（Completion/Cancel/Shutdown）：丢一条完成事件 = 调度器永久挂死。
 class SchedulerMailbox {
 public:
     explicit SchedulerMailbox(std::int32_t capacity);
     bool push(Event event);
+    bool push_critical(Event event);
     bool try_push(Event event);
     bool wait_pop(Event& out);
     bool wait_pop_for(Event& out, int timeout_ms);
@@ -212,6 +215,8 @@ public:
     std::int32_t size() const noexcept;
 
 private:
+    bool push_impl(Event event, bool bounded);
+
     std::deque<Event> queue_;
     mutable std::mutex mutex_;
     std::condition_variable cv_;
@@ -246,6 +251,9 @@ public:
 
     ErrCode submit(InferenceRequest req, std::vector<std::int32_t> prompt_ids,
                    std::shared_ptr<ResponseSink> sink);
+    // 入口准入判定：HTTP 线程读镜像值，达到队列容量即回 429，不再先进队后报错。
+    bool accepting() const noexcept;
+    std::int32_t queue_capacity() const noexcept;
     void cancel(const RequestId& req_id) noexcept;
     void shutdown() noexcept;
 
@@ -285,7 +293,10 @@ private:
     void conclude_step(bool batch_done);
     DeliverResult deliver(const std::shared_ptr<SequenceGroup>& group, const SampledToken& token);
     void finish(const std::shared_ptr<SequenceGroup>& group, FinishReason reason,
-                bool final_frame_pushed = false);
+                const Error& error = {}, bool final_frame_pushed = false);
+    void reject_over_capacity(const std::shared_ptr<SequenceGroup>& group);
+    // 线程兜底：异常/关停时把在飞请求全部按同一 Error 收尾，保证客户端拿到终态。
+    void abort_all(const Error& error);
     void apply_preemption(const PreemptDecision& decision, PreemptTrigger trigger,
                           std::int32_t free_before, std::int32_t need_blocks);
     std::vector<SequenceGroup*> running_ptrs() const;
@@ -314,6 +325,9 @@ private:
     bool pumping_ = false;
     bool preempted_this_pump_ = false;
     bool shutting_down_ = false;
+    // 队列深度镜像：只有 Core 线程写，HTTP 线程只读，用于入口准入。
+    std::atomic<std::int32_t> waiting_depth_{0};
+    std::atomic<std::int32_t> running_depth_{0};
     std::vector<std::int64_t> schedule_samples_;
     std::int64_t scheduler_ns_total_ = 0;
     std::int64_t scheduler_steps_total_ = 0;

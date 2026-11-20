@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace llmopt {
@@ -25,7 +26,37 @@ enum class ErrCode : std::uint8_t {
     QueueFull,
     NotSupported,
     ResourceInsufficient,
+    Timeout,
 };
+
+// 错误载体：跨层携带 code + 面向调用方的 message + 面向运维的 detail。
+// 规则见 docs/错误面规范.md：detail 只进日志，不进 HTTP body；成功路径统一用 Error{}。
+struct Error {
+    ErrCode code = ErrCode::Ok;
+    std::string message;
+    std::string detail;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return code == ErrCode::Ok;
+    }
+    explicit operator bool() const noexcept {
+        return ok();
+    }
+};
+
+inline Error make_error(ErrCode code, std::string message, std::string detail = {}) {
+    Error error;
+    error.code = code;
+    error.message = std::move(message);
+    error.detail = std::move(detail);
+    return error;
+}
+
+// 第三方返回值 → 领域 Error：原始码只留在 detail，禁止把裸 int 带出适配器。
+inline Error from_backend_rc(const char* backend, const char* op, long long rc) {
+    return make_error(ErrCode::ExecutionFailed, std::string(backend) + " 执行失败：" + op,
+                      "op=" + std::string(op) + " rc=" + std::to_string(rc));
+}
 
 enum class FinishReason : std::uint8_t {
     None = 0,
@@ -72,6 +103,8 @@ struct Delta {
     std::int32_t token_id = -1;
     std::string text;
     std::optional<FinishReason> finish;
+    // 非空表示本帧是错误帧：流式必须在 [DONE] 之前推给客户端，客户端据此终止。
+    std::optional<Error> error;
 };
 
 int http_status(ErrCode code) noexcept;

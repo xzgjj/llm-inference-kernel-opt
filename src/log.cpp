@@ -1,6 +1,7 @@
 // log.cpp — spdlog 初始化与全局 logger；落盘失败降级 stderr，析构不抛。
 #include "llmopt/log.hpp"
 
+#include "spdlog/async.h"
 #include "spdlog/sinks/rotating_file_sink.h"
 #include "spdlog/sinks/stdout_color_sinks.h"
 #include "spdlog/spdlog.h"
@@ -30,7 +31,7 @@ spdlog::level::level_enum parse_level(const std::string& level) {
 
 } // namespace
 
-// 初始化：控制台 + 20MB×5 轮转文件；目录不可写时只用控制台。
+// 初始化：控制台 + 20MB×5 轮转文件；异步队列 8192（对齐 log-policy §4），目录不可写时只用控制台。
 void init_logging(const std::string& level, const std::string& log_dir) {
     const auto spd_level = parse_level(level);
     try {
@@ -38,9 +39,14 @@ void init_logging(const std::string& level, const std::string& log_dir) {
         auto file_sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
                 log_dir + "/llmopt.log", 20 * 1024 * 1024, 5);
         auto console = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
-        g_logger = std::make_shared<spdlog::logger>("llmopt",
-                                                    spdlog::sinks_init_list{console, file_sink});
+        // 调度/执行线程的错误日志不能阻塞热路径：异步 + 满即覆盖最旧。
+        spdlog::init_thread_pool(8192, 1);
+        g_logger = std::make_shared<spdlog::async_logger>(
+                "llmopt", spdlog::sinks_init_list{console, file_sink}, spdlog::thread_pool(),
+                spdlog::async_overflow_policy::overrun_oldest);
     } catch (const spdlog::spdlog_ex&) {
+        g_logger = spdlog::stdout_color_mt("llmopt");
+    } catch (const std::exception&) {
         g_logger = spdlog::stdout_color_mt("llmopt");
     }
     g_logger->set_level(spd_level);

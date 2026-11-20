@@ -1,11 +1,15 @@
 // scheduler.cpp — 单线程状态机 + 单线程执行；每 tick 合成连续批，状态只由 Core 写。
 #include "llmopt/scheduler.hpp"
 
+#include "llmopt/log.hpp"
 #include "llmopt/text.hpp"
+#include "spdlog/spdlog.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
+#include <exception>
+#include <new>
 
 namespace llmopt {
 namespace {
@@ -109,8 +113,17 @@ SchedulerMailbox::SchedulerMailbox(std::int32_t capacity) : capacity_(capacity) 
 }
 
 bool SchedulerMailbox::push(Event event) {
+    return push_impl(std::move(event), true);
+}
+
+// 完成/取消/关停事件不许丢：满了也入队，容量只对 AddRequest 生效。
+bool SchedulerMailbox::push_critical(Event event) {
+    return push_impl(std::move(event), false);
+}
+
+bool SchedulerMailbox::push_impl(Event event, bool bounded) {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (static_cast<std::int32_t>(queue_.size()) >= capacity_) {
+    if (bounded && static_cast<std::int32_t>(queue_.size()) >= capacity_) {
         return false;
     }
     queue_.push_back(std::move(event));
@@ -205,7 +218,18 @@ void StepExecutor::loop() {
             batch = std::move(queue_.front());
             queue_.pop_front();
         }
-        RunnerStepOutput output = runner_.decode_step(batch);
+        RunnerStepOutput output;
+        try {
+            output = runner_.decode_step(batch);
+        } catch (const std::exception& exc) {
+            output = RunnerStepOutput{};
+            output.error = make_error(ErrCode::ExecutionFailed, "执行线程异常", exc.what());
+            logger()->error("executor exception: {}", exc.what());
+        } catch (...) {
+            output = RunnerStepOutput{};
+            output.error = make_error(ErrCode::ExecutionFailed, "执行线程未知异常");
+            logger()->error("executor unknown exception");
+        }
         metrics_.inc("llmopt_forward_steps_total");
         // 即使 runner 提前失败也要逐条回投，避免 Core 永久等待 pending。
         // sampled 只按“需要采样”的步骤顺序排列，非末块 chunk 不占位。
@@ -217,11 +241,15 @@ void StepExecutor::loop() {
             event.completion.seq_serial = step.kv.seq_id;
             event.completion.computed_tokens = step.pos_end;
             event.completion.sampled_expected = step.needs_sampling;
-            event.completion.err = output.err;
+            event.completion.error = output.error;
             if (step.needs_sampling && sample_index < output.sampled.size()) {
                 event.completion.sampled.push_back(output.sampled[sample_index++]);
             }
-            mailbox_.push(std::move(event));
+            // 关键通道：丢了这条就等于让 Core 永远等不到这一步。
+            if (!mailbox_.push_critical(std::move(event))) {
+                logger()->error("completion 回投失败 req={} serial={}", step.route.req_id,
+                                step.kv.seq_id);
+            }
         }
     }
 }
@@ -240,39 +268,77 @@ SchedulerCore::~SchedulerCore() {
 
 ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> prompt_ids,
                               std::shared_ptr<ResponseSink> sink) {
-    auto group = std::make_shared<SequenceGroup>();
-    group->req_id = req.req_id;
-    group->prompt_ids = std::move(prompt_ids);
-    group->sampling = req.sampling;
-    group->stream = req.stream;
-    group->sink = std::move(sink);
-    group->seq.id = g_seq_id.fetch_add(1, std::memory_order_relaxed);
-    group->seq.group_id = group->req_id;
-    group->seq.prompt_len = static_cast<std::int32_t>(group->prompt_ids.size());
-    group->seq.prompt_token_ids = group->prompt_ids;
-    group->seq.sampling = group->sampling;
-    Event event = make_event(EventKind::AddRequest, group->req_id);
-    event.group = std::move(group);
-    if (!mailbox_.push(std::move(event))) {
-        metrics_.inc("llmopt_requests_total{status=\"queue_full\"}");
-        return ErrCode::QueueFull;
+    try {
+        auto group = std::make_shared<SequenceGroup>();
+        group->req_id = req.req_id;
+        group->prompt_ids = std::move(prompt_ids);
+        group->sampling = req.sampling;
+        group->stream = req.stream;
+        group->sink = std::move(sink);
+        group->seq.id = g_seq_id.fetch_add(1, std::memory_order_relaxed);
+        group->seq.group_id = group->req_id;
+        group->seq.prompt_len = static_cast<std::int32_t>(group->prompt_ids.size());
+        group->seq.prompt_token_ids = group->prompt_ids;
+        group->seq.sampling = group->sampling;
+        Event event = make_event(EventKind::AddRequest, group->req_id);
+        event.group = std::move(group);
+        if (!mailbox_.push(std::move(event))) {
+            metrics_.inc("llmopt_requests_total{status=\"queue_full\"}");
+            return ErrCode::QueueFull;
+        }
+        return ErrCode::Ok;
+    } catch (const std::bad_alloc&) {
+        metrics_.inc("llmopt_requests_total{status=\"error\"}");
+        logger()->error("submit 内存分配失败");
+        return ErrCode::ResourceInsufficient;
+    } catch (const std::exception& exc) {
+        metrics_.inc("llmopt_requests_total{status=\"error\"}");
+        logger()->error("submit 异常: {}", exc.what());
+        return ErrCode::ExecutionFailed;
     }
-    return ErrCode::Ok;
 }
 
 void SchedulerCore::cancel(const RequestId& req_id) noexcept {
     Event event = make_event(EventKind::Cancel, req_id);
-    (void)mailbox_.push(std::move(event));
+    (void)mailbox_.push_critical(std::move(event));
 }
 
 void SchedulerCore::shutdown() noexcept {
     Event event = make_event(EventKind::Shutdown, "");
-    (void)mailbox_.push(std::move(event));
+    (void)mailbox_.push_critical(std::move(event));
+}
+
+bool SchedulerCore::accepting() const noexcept {
+    return waiting_depth_.load(std::memory_order_relaxed) < config_.queue_capacity;
+}
+
+std::int32_t SchedulerCore::queue_capacity() const noexcept {
+    return config_.queue_capacity;
+}
+
+// handle 的兜底拒绝单独成函数，避免单函数超出行数闸门（CI-COD-003）。
+void SchedulerCore::reject_over_capacity(const std::shared_ptr<SequenceGroup>& group) {
+    metrics_.inc("llmopt_admission_rejected_total{reason=\"queue\"}");
+    metrics_.inc("llmopt_requests_total{status=\"queue_full\"}");
+    finish(group, FinishReason::Error,
+           make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
+                      "depth=" + std::to_string(waiting_.size()) +
+                              " cap=" + std::to_string(config_.queue_capacity)));
 }
 
 void SchedulerCore::run() {
     while (true) {
-        (void)run_once(50);
+        try {
+            (void)run_once(50);
+        } catch (const std::exception& exc) {
+            logger()->error("scheduler exception: {}", exc.what());
+            abort_all(make_error(ErrCode::ExecutionFailed, "调度线程异常", exc.what()));
+            break;
+        } catch (...) {
+            logger()->error("scheduler unknown exception");
+            abort_all(make_error(ErrCode::ExecutionFailed, "调度线程未知异常"));
+            break;
+        }
         if (shutting_down_ && !pending_step_ && running_.empty()) {
             break;
         }
@@ -294,6 +360,9 @@ bool SchedulerCore::run_once(int wait_ms) {
         handle(extra);
     }
     pump();
+    // 深度只在 Core 线程写；HTTP 准入读镜像，避免跨线程读 deque。
+    waiting_depth_.store(static_cast<std::int32_t>(waiting_.size()), std::memory_order_relaxed);
+    running_depth_.store(static_cast<std::int32_t>(running_.size()), std::memory_order_relaxed);
     return true;
 }
 
@@ -305,8 +374,8 @@ void SchedulerCore::handle(Event& event) {
         group->enqueued_ns = now_ns();
         group->last_progress_ns = group->enqueued_ns;
         if (static_cast<std::int32_t>(waiting_.size()) >= config_.queue_capacity) {
-            metrics_.inc("llmopt_admission_rejected_total{reason=\"queue\"}");
-            finish(group, FinishReason::Error);
+            // 正常情况下入口已按 accepting() 拒绝；这里是 mailbox 与队列之间的兜底。
+            reject_over_capacity(group);
             break;
         }
         waiting_.push_back(std::move(group));
@@ -581,7 +650,16 @@ bool SchedulerCore::acquire_blocks(const std::shared_ptr<SequenceGroup>& group,
     metrics_.inc(std::string("llmopt_admission_rejected_total{reason=\"") +
                  alloc_reason_name(alloc.reason) + "\"}");
     if (alloc.reason == AllocFailReason::ContextOverflow) {
-        finish(group, FinishReason::Error);
+        finish(group, FinishReason::Error,
+               make_error(ErrCode::ContextOverflow, "prompt+max_tokens 超过 KV 块容量",
+                          "tokens=" + std::to_string(total_tokens) +
+                                  " capacity=" + std::to_string(kv_.block_capacity_tokens())));
+    } else if (running_.empty()) {
+        // 没有可抢占、也没有可等待完成的序列：重试不会成功，按资源不足终态收尾。
+        finish(group, FinishReason::Error,
+               make_error(ErrCode::KvInsufficient, "KV 块不足且无可等待释放的序列",
+                          "free=" + std::to_string(kv_.num_free_blocks()) +
+                                  " need=" + std::to_string(kv_.blocks_for_tokens(total_tokens))));
     }
     return false;
 }
@@ -595,7 +673,9 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
     }
     if (runner_.add_sequence(seq) != ErrCode::Ok) {
         kv_.free(seq);
-        finish(group, FinishReason::Error);
+        finish(group, FinishReason::Error,
+               make_error(ErrCode::ResourceInsufficient, "后端无法登记序列（槽位可能耗尽）",
+                          "req=" + group->req_id));
         return false;
     }
     const ChunkSlice slice =
@@ -604,7 +684,9 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
         metrics_.inc("llmopt_chunk_deferred_total");
         kv_.free(seq);
         runner_.release_sequence(group->req_id, 0);
-        finish(group, FinishReason::Error);
+        finish(group, FinishReason::Error,
+               make_error(ErrCode::ExecutionFailed, "token 预算不足，无法生成首个切片",
+                          "budget_left=" + std::to_string(budget.tokens_remain())));
         return false;
     }
     group->admitted = true;
@@ -669,7 +751,11 @@ void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTri
         if (cap_error) {
             metrics_.inc("llmopt_preempt_cap_errors_total");
             metrics_.set("llmopt_queue_depth", static_cast<std::int64_t>(waiting_.size()));
-            finish(group, FinishReason::Error);
+            finish(group, FinishReason::Error,
+                   make_error(
+                           ErrCode::ExecutionFailed, "连续抢占次数超限，请求终止",
+                           "consecutive=" + std::to_string(group->consecutive_preemptions) +
+                                   " cap=" + std::to_string(config_.max_consecutive_preemptions)));
             continue;
         }
         waiting_.push_front(group);
@@ -897,8 +983,8 @@ void SchedulerCore::apply_completion(const Completion& completion) {
         return;
     }
     Sequence& seq = group->seq;
-    if (completion.err != ErrCode::Ok) {
-        finish(group, FinishReason::Error);
+    if (!completion.error.ok()) {
+        finish(group, FinishReason::Error, completion.error);
         conclude_step(batch_done);
         return;
     }
@@ -908,7 +994,10 @@ void SchedulerCore::apply_completion(const Completion& completion) {
         return;
     }
     if (completion.sampled.empty()) {
-        finish(group, FinishReason::Error);
+        finish(group, FinishReason::Error,
+               make_error(ErrCode::ExecutionFailed, "后端返回空采样结果",
+                          "req=" + group->req_id +
+                                  " pos=" + std::to_string(completion.computed_tokens)));
         conclude_step(batch_done);
         return;
     }
@@ -966,20 +1055,23 @@ SchedulerCore::DeliverResult SchedulerCore::deliver(const std::shared_ptr<Sequen
     if (!group->sink->push_frame(delta)) {
         const std::uint64_t overflow_after = group->sink->overflow_total();
         if (overflow_after > overflow_before) {
-            metrics_.inc("llmopt_sink_overflow_total",
-                         static_cast<std::int64_t>(overflow_after - overflow_before));
+            const std::int64_t dropped =
+                    static_cast<std::int64_t>(overflow_after - overflow_before);
+            metrics_.inc("llmopt_sink_overflow_total", dropped);
+            logger()->warn("sink 溢出 req={} overflow={} frames_dropped={}", group->req_id,
+                           overflow_after, dropped);
         }
         return DeliverResult::Failed;
     }
     if (reason == FinishReason::None) {
         return DeliverResult::Continue;
     }
-    finish(group, reason, true);
+    finish(group, reason, Error{}, true);
     return DeliverResult::Finished;
 }
 
 void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishReason reason,
-                           bool final_frame_pushed) {
+                           const Error& error, bool final_frame_pushed) {
     if (!group) {
         return;
     }
@@ -990,6 +1082,12 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
     seq.finish = reason;
     seq.status = SeqStatus::Finished;
     if (!final_frame_pushed && group->sink) {
+        // 先推错误帧再推终止帧：流式客户端能拿到 code/message，而不是空的正常结束。
+        if (reason == FinishReason::Error && !error.ok()) {
+            Delta error_delta;
+            error_delta.error = error;
+            (void)group->sink->push_frame(error_delta);
+        }
         Delta delta;
         delta.finish = reason;
         (void)group->sink->push_frame(delta);
@@ -1015,6 +1113,9 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
         metrics_.inc("llmopt_requests_total{status=\"cancelled\"}");
     } else if (reason == FinishReason::Error) {
         metrics_.inc("llmopt_requests_total{status=\"error\"}");
+        const ErrCode code = error.ok() ? ErrCode::ExecutionFailed : error.code;
+        logger()->warn("request failed req={} code={} retryable={} msg={} detail={}", group->req_id,
+                       error_code_name(code), retryable(code), error.message, error.detail);
     } else {
         metrics_.inc("llmopt_requests_total{status=\"ok\"}");
     }
@@ -1040,6 +1141,8 @@ void SchedulerCore::reconcile(const Sequence& seq) {
     }
     if (backend_pos != expected) {
         metrics_.inc("llmopt_kv_reconcile_diffs_total");
+        logger()->warn("kv 对账差异 req={} backend_pos={} expected={}", seq.group_id, backend_pos,
+                       expected);
     }
 }
 
@@ -1076,6 +1179,27 @@ std::int32_t SchedulerCore::running_count() const noexcept {
 
 std::int32_t SchedulerCore::waiting_count() const noexcept {
     return static_cast<std::int32_t>(waiting_.size());
+}
+
+// 线程兜底：同一份 Error 分发给所有在飞与排队请求，客户端一定拿到终态。
+void SchedulerCore::abort_all(const Error& error) {
+    shutting_down_ = true;
+    std::vector<std::shared_ptr<SequenceGroup>> running_copy;
+    running_copy.swap(running_);
+    for (const auto& group : running_copy) {
+        finish(group, FinishReason::Error, error);
+    }
+    while (!waiting_.empty()) {
+        auto group = waiting_.front();
+        waiting_.pop_front();
+        finish(group, FinishReason::Error, error);
+    }
+    pending_serials_.clear();
+    pending_remaining_ = 0;
+    pending_step_ = false;
+    waiting_depth_.store(0, std::memory_order_relaxed);
+    running_depth_.store(0, std::memory_order_relaxed);
+    publish_kv_usage();
 }
 
 } // namespace llmopt

@@ -35,9 +35,14 @@ void handle_signal(int) {
 }
 
 // 统一错误回包：状态码与 code 由 C-03 映射，禁止各路由自行编造。
+void send_error(httplib::Response& res, const Error& error) {
+    const Error payload = error.ok() ? make_error(ErrCode::ExecutionFailed, "服务内部错误") : error;
+    res.status = http_status(payload.code);
+    res.set_content(render_error_body(payload), "application/json");
+}
+
 void send_error(httplib::Response& res, ErrCode code, const std::string& message) {
-    res.status = http_status(code);
-    res.set_content(render_error_body(code, message), "application/json");
+    send_error(res, make_error(code, message));
 }
 
 // 把 SSE 帧写到当前连接；写失败即断连，由调用方投递 Cancel。
@@ -47,12 +52,15 @@ bool write_frame(httplib::DataSink& sink, const std::string& frame) {
 
 // 非流式：排空 sink 并拼接文本，最后一次性回 JSON；超时投递 Cancel。
 std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const InferenceRequest& req,
-                       SchedulerCore& core, int& gen_tokens, FinishReason& finish) {
+                       SchedulerCore& core, int& gen_tokens, FinishReason& finish, Error& error) {
     std::string text;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
     while (true) {
         Delta delta;
         if (sink->pop_frame(delta, 100)) {
+            if (delta.error && !delta.error->ok()) {
+                error = *delta.error;
+            }
             text += delta.text;
             if (delta.token_id >= 0) {
                 ++gen_tokens;
@@ -65,6 +73,7 @@ std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const Inferenc
         }
         if (std::chrono::steady_clock::now() > deadline) {
             core.cancel(req.req_id);
+            error = make_error(ErrCode::Timeout, "等待生成结果超时（120s）", "req=" + req.req_id);
             finish = FinishReason::Aborted;
             break;
         }
@@ -98,75 +107,116 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
     return false;
 }
 
-// 解析 → 分词 → 上下文校验 → 入队；返回 Ok 表示响应已接管。
-ErrCode submit_request(AppContext& ctx, const std::string& body, InferenceRequest& req,
-                       std::shared_ptr<ResponseSink>& sink, int& prompt_tokens,
-                       std::string& message) {
+// 解析 → 分词 → 上下文校验 → 入口准入 → 入队；返回 Ok 表示响应已接管。
+// 准入在这里判定：队列满直接 429，不再"先 200 建流、再在调度器里静默失败"。
+Error submit_request(AppContext& ctx, const std::string& body, InferenceRequest& req,
+                     std::shared_ptr<ResponseSink>& sink, int& prompt_tokens) {
+    std::string message;
     ErrCode code = parse_body(body, req, message);
     if (code != ErrCode::Ok) {
-        return code;
+        return make_error(code, message.empty() ? "请求体非法" : message);
     }
     std::vector<std::int32_t> ids;
     code = ctx.runner->tokenize(req.prompt, ids);
     if (code != ErrCode::Ok) {
-        message = "分词失败";
-        return code;
+        return make_error(code, "分词失败",
+                          "op=tokenize backend=" + std::string(ctx.runner->backend_name()));
     }
     if (ids.empty()) {
-        message = "分词结果为空";
-        return ErrCode::PromptTooLong;
+        return make_error(ErrCode::PromptTooLong, "分词结果为空",
+                          "prompt_chars=" + std::to_string(req.prompt.size()));
     }
-    if (static_cast<std::int32_t>(ids.size()) + req.sampling.max_tokens > ctx.runner->n_ctx()) {
-        message = "prompt + max_tokens 超过 ctx-tokens";
-        return ErrCode::ContextOverflow;
+    const std::int32_t need = static_cast<std::int32_t>(ids.size()) + req.sampling.max_tokens;
+    const std::int32_t limit = ctx.runner->n_ctx();
+    if (need > limit) {
+        return make_error(ErrCode::ContextOverflow, "prompt 与 max_tokens 之和超过 ctx-tokens",
+                          "prompt=" + std::to_string(ids.size()) +
+                                  " max_tokens=" + std::to_string(req.sampling.max_tokens) +
+                                  " ctx=" + std::to_string(limit));
+    }
+    if (!ctx.core->accepting()) {
+        ctx.metrics->inc("llmopt_admission_rejected_total{reason=\"queue\"}");
+        ctx.metrics->inc("llmopt_requests_total{status=\"queue_full\"}");
+        return make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
+                          "cap=" + std::to_string(ctx.core->queue_capacity()));
     }
     sink = std::make_shared<BoundedSink>(256);
     prompt_tokens = static_cast<int>(ids.size());
     code = ctx.core->submit(req, std::move(ids), sink);
     if (code != ErrCode::Ok) {
-        message = "队列已满，请退避重试";
+        if (code == ErrCode::QueueFull) {
+            ctx.metrics->inc("llmopt_requests_total{status=\"queue_full\"}");
+            return make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
+                              "cap=" + std::to_string(ctx.core->queue_capacity()));
+        }
+        return make_error(code, code == ErrCode::ResourceInsufficient ? "服务资源不足，请稍后重试"
+                                                                      : "请求无法入队");
     }
-    return code;
+    return Error{};
 }
 
 // 两个补全端点共用：stream 走 SSE，非流式排空后一次性回包。
+// 失败一律按 Error 的真实状态码回包，不再出现 "200 + finish_reason=error"。
 void completions_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Request& request,
                          httplib::Response& response) {
-    ctx->metrics->inc("llmopt_http_requests_total");
-    InferenceRequest req;
-    std::shared_ptr<ResponseSink> sink;
-    std::string message;
-    int prompt_tokens = 0;
-    const ErrCode code = submit_request(*ctx, request.body, req, sink, prompt_tokens, message);
-    if (code != ErrCode::Ok) {
-        send_error(response, code, message);
-        return;
+    bool responded = false;
+    try {
+        ctx->metrics->inc("llmopt_http_requests_total");
+        InferenceRequest req;
+        std::shared_ptr<ResponseSink> sink;
+        int prompt_tokens = 0;
+        const Error submit_error = submit_request(*ctx, request.body, req, sink, prompt_tokens);
+        if (!submit_error.ok()) {
+            send_error(response, submit_error);
+            return;
+        }
+        if (req.stream) {
+            response.set_header("Cache-Control", "no-cache");
+            response.set_header("X-Accel-Buffering", "no");
+            auto done = std::make_shared<bool>(false);
+            response.set_chunked_content_provider(
+                    "text/event-stream",
+                    [ctx, req, sink, done](size_t, httplib::DataSink& data_sink) {
+                        return stream_provider(ctx, req, sink, done, data_sink);
+                    },
+                    [ctx, req](bool success) {
+                        if (!success) {
+                            ctx->core->cancel(req.req_id);
+                        }
+                    });
+            responded = true;
+            return;
+        }
+        int gen_tokens = 0;
+        FinishReason finish = FinishReason::None;
+        Error error;
+        const std::string text = drain_sink(sink, req, *ctx->core, gen_tokens, finish, error);
+        if (finish == FinishReason::Error && error.ok()) {
+            error = make_error(ErrCode::ExecutionFailed, "推理失败（无详细原因）");
+        } else if (finish == FinishReason::Aborted && error.ok()) {
+            error = make_error(ErrCode::Cancelled, "请求已取消");
+        } else if (finish == FinishReason::None && error.ok()) {
+            error = make_error(ErrCode::ExecutionFailed, "推理未产生结束原因");
+        }
+        if (!error.ok()) {
+            send_error(response, error);
+            return;
+        }
+        response.status = 200;
+        response.set_content(render_completion_body(req, text, finish, prompt_tokens, gen_tokens),
+                             "application/json");
+        responded = true;
+    } catch (const std::exception& exc) {
+        logger()->error("completions handler 异常: {}", exc.what());
+        if (!responded) {
+            send_error(response, make_error(ErrCode::ExecutionFailed, "服务内部异常"));
+        }
+    } catch (...) {
+        logger()->error("completions handler 未知异常");
+        if (!responded) {
+            send_error(response, make_error(ErrCode::ExecutionFailed, "服务内部异常"));
+        }
     }
-    if (req.stream) {
-        response.set_header("Cache-Control", "no-cache");
-        response.set_header("X-Accel-Buffering", "no");
-        auto done = std::make_shared<bool>(false);
-        response.set_chunked_content_provider(
-                "text/event-stream",
-                [ctx, req, sink, done](size_t, httplib::DataSink& data_sink) {
-                    return stream_provider(ctx, req, sink, done, data_sink);
-                },
-                [ctx, req](bool success) {
-                    if (!success) {
-                        ctx->core->cancel(req.req_id);
-                    }
-                });
-        return;
-    }
-    int gen_tokens = 0;
-    FinishReason finish = FinishReason::None;
-    const std::string text = drain_sink(sink, req, *ctx->core, gen_tokens, finish);
-    if (finish == FinishReason::None) {
-        finish = FinishReason::Error;
-    }
-    response.status = finish == FinishReason::Aborted ? 499 : 200;
-    response.set_content(render_completion_body(req, text, finish, prompt_tokens, gen_tokens),
-                         "application/json");
 }
 
 } // namespace
@@ -203,7 +253,7 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
         res.set_content(ctx->metrics->render(), "text/plain; version=0.0.4");
     });
     server.Post("/v1/chat/completions", [](const httplib::Request&, httplib::Response& res) {
-        send_error(res, ErrCode::NotSupported, "/v1/chat/completions 在阶段 1 未启用");
+        send_error(res, ErrCode::NotSupported, "/v1/chat/completions 在阶段 4 未开放");
     });
 
     g_server = &server;

@@ -154,6 +154,16 @@ void report_shutdown(KVBlockManager& kv, ModelRunner& runner) {
               << " invariants=" << (invariants_ok ? "ok" : invariant_why) << "\n";
 }
 
+// 加载失败落地：把适配器保留的 message/detail 打到 stderr，并映射退出码。
+std::int32_t report_load_failure(ErrCode code, const Error& error) {
+    std::cerr << "模型加载失败: " << (error.message.empty() ? error_code_name(code) : error.message)
+              << "\n";
+    if (!error.detail.empty()) {
+        std::cerr << "  detail: " << error.detail << "\n";
+    }
+    return code == ErrCode::ResourceInsufficient ? kExitResource : kExitStartFail;
+}
+
 // 组装并运行：Gate 通过后才加载权重；HTTP 与调度线程按 http→core→executor 顺序收尾。
 std::int32_t run(const ServerConfig& cfg) {
     const std::int32_t requested = std::max<std::int32_t>(cfg.max_concurrency, 1);
@@ -177,9 +187,10 @@ std::int32_t run(const ServerConfig& cfg) {
     }
     const std::int32_t kv_tokens = cfg.ctx_tokens * concurrency;
     const ModelConfig model_cfg = build_model_config(cfg, concurrency);
-    if (runner->load_model(model_cfg) != ErrCode::Ok) {
-        std::cerr << "模型加载失败\n";
-        return kExitStartFail;
+    const ErrCode load_code = runner->load_model(model_cfg);
+    if (load_code != ErrCode::Ok) {
+        // 适配器保留的原始 cause 在这里落地，启动失败不再只有一句"模型加载失败"。
+        return report_load_failure(load_code, runner->last_error());
     }
 
     const std::int32_t blocks = std::max<std::int32_t>(kv_tokens / cfg.block_tokens, 1);
@@ -223,7 +234,17 @@ int main(int argc, char** argv) {
     }
     llmopt::init_logging(cfg.log_level);
     print_config(cfg);
-    const std::int32_t rc = run(cfg);
+    // 启动边界：线程创建、模型加载、监听阶段的异常在这里统一转退出码，不让它逃逸成 terminate。
+    std::int32_t rc = kExitStartFail;
+    try {
+        rc = run(cfg);
+    } catch (const std::exception& exc) {
+        std::cerr << "启动失败: " << exc.what() << "\n";
+        rc = kExitStartFail;
+    } catch (...) {
+        std::cerr << "启动失败: 未知异常\n";
+        rc = kExitStartFail;
+    }
     llmopt::shutdown_logging();
     return rc;
 }

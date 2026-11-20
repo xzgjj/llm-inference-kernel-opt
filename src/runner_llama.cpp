@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -63,6 +64,11 @@ public:
         mparams.n_gpu_layers = config.n_gpu_layers;
         model_ = llama_model_load_from_file(config.model_path.c_str(), mparams);
         if (!model_) {
+            // 第三方只回空指针：在这里翻成带阶段的领域错误，原始信息进 detail。
+            last_error_ = make_error(
+                    ErrCode::ModelNotLoaded, "模型加载失败（文件不可读或格式不支持）",
+                    "op=load_model file=" +
+                            std::filesystem::path(config.model_path).filename().string());
             return ErrCode::ModelNotLoaded;
         }
         vocab_ = llama_model_get_vocab(model_);
@@ -82,12 +88,18 @@ public:
         if (!ctx_) {
             llama_model_free(model_);
             model_ = nullptr;
+            last_error_ = make_error(ErrCode::ModelNotLoaded, "上下文创建失败（显存/内存不足）",
+                                     "op=init_context n_ctx=" + std::to_string(cparams.n_ctx) +
+                                             " n_seq_max=" + std::to_string(cparams.n_seq_max));
             return ErrCode::ModelNotLoaded;
         }
         batch_ = llama_batch_ext_init(ctx_);
         if (!batch_) {
             release();
-            return ErrCode::ModelNotLoaded;
+            last_error_ =
+                    make_error(ErrCode::ResourceInsufficient, "批缓冲创建失败",
+                               "op=batch_ext_init n_batch=" + std::to_string(cparams.n_batch));
+            return ErrCode::ResourceInsufficient;
         }
         slots_.clear();
         for (std::int32_t slot = cparams.n_seq_max - 1; slot >= 0; --slot) {
@@ -101,7 +113,9 @@ public:
     ErrCode add_sequence(const Sequence& seq) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (slots_.empty()) {
-            return ErrCode::ExecutionFailed;
+            last_error_ = make_error(ErrCode::ResourceInsufficient, "后端序列槽位耗尽",
+                                     "op=add_sequence active=" + std::to_string(states_.size()));
+            return ErrCode::ResourceInsufficient;
         }
         LlamaSeqState state;
         state.slot = slots_.back();
@@ -122,7 +136,8 @@ public:
         RunnerStepOutput output;
         std::lock_guard<std::mutex> lock(mutex_);
         if (!ctx_ || !batch_) {
-            output.err = ErrCode::ModelNotLoaded;
+            output.error = make_error(ErrCode::ModelNotLoaded, "推理上下文未就绪",
+                                      "op=decode_step ctx_or_batch_null");
             return output;
         }
         llama_batch_ext_clear(batch_);
@@ -136,17 +151,24 @@ public:
                                                     ? add_decode_step(step, batch, cached_index)
                                                     : add_prefill_step(step, batch, new_index);
             if (output_idx < 0) {
-                return failed(output);
+                return failed(
+                        output,
+                        make_error(ErrCode::ExecutionFailed, "批内步骤构建失败",
+                                   "op=add_step req=" + step.route.req_id + " phase=" +
+                                           (step.phase == Phase::Decode ? "decode" : "prefill")));
             }
             ordered.push_back(step.route.req_id);
             output_indexes.push_back(output_idx);
             need_sample.push_back(step.needs_sampling);
         }
         if (batch.total_tokens <= 0 || ordered.empty()) {
-            return failed(output);
+            return failed(output, make_error(ErrCode::ExecutionFailed, "空批次无法执行",
+                                             "op=decode_step tokens=" +
+                                                     std::to_string(batch.total_tokens)));
         }
-        if (llama_process(ctx_, LLAMA_PROCESS_TYPE_DECODE, batch_) != 0) {
-            return failed(output);
+        const int process_rc = llama_process(ctx_, LLAMA_PROCESS_TYPE_DECODE, batch_);
+        if (process_rc != 0) {
+            return failed(output, from_backend_rc("llama.cpp", "process", process_rc));
         }
         for (std::size_t index = 0; index < ordered.size(); ++index) {
             if (!need_sample[index]) {
@@ -154,13 +176,16 @@ public:
             }
             SampledToken token = sample(ordered[index], output_indexes[index]);
             if (token.token_id < 0) {
-                return failed(output);
+                return failed(output,
+                              make_error(ErrCode::ExecutionFailed, "采样失败",
+                                         "op=sample req=" + ordered[index] + " output_index=" +
+                                                 std::to_string(output_indexes[index])));
             }
             output.req_ids.push_back(ordered[index]);
             output.sampled.push_back(token);
             output.num_nans.push_back(0);
         }
-        output.err = ErrCode::Ok;
+        output.error = Error{};
         return output;
     }
 
@@ -284,6 +309,12 @@ public:
         return "llama.cpp";
     }
 
+    // 最近一次失败详情：main 用它给出可诊断的启动/运行报错。
+    Error last_error() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return last_error_;
+    }
+
     // 只有 GPU offload 才走统一 KV stream；纯 CPU 的 seq_cp 是跨 stream 复制，
     // 会 reset 目标 cells 并与本批写入冲突（实测 ExecutionFailed）。
     bool supports_prefix_share() const noexcept override {
@@ -291,12 +322,12 @@ public:
     }
 
 private:
-    // 整批失败：清空已完成采样，交给 Core 统一走 Error 收尾。
-    static RunnerStepOutput failed(RunnerStepOutput output) {
+    // 整批失败：清空已完成采样，交给 Core 统一走 Error 收尾；原始原因随 Error 回投。
+    static RunnerStepOutput failed(RunnerStepOutput output, Error error) {
         output.req_ids.clear();
         output.sampled.clear();
         output.num_nans.clear();
-        output.err = ErrCode::ExecutionFailed;
+        output.error = std::move(error);
         return output;
     }
 
@@ -396,6 +427,7 @@ private:
     std::int32_t n_ctx_ = 2048;
     std::int32_t n_gpu_layers_ = 0;
     bool backend_ready_ = true;
+    Error last_error_;
     mutable std::mutex mutex_;
     std::vector<std::int32_t> slots_;
     std::map<RequestId, LlamaSeqState> states_;
