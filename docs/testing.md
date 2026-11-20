@@ -21,8 +21,12 @@
 
 | Scope | Level | Runner | Args | Metadata |
 | --- | --- | --- | --- | --- |
+| `tests/tools` | `unit` | `python` | `-m unittest discover -s tests/tools -t . -v` | `fast`, `hermetic` |
+| `tests/unit` | `unit` | `ctest` | `--test-dir build --output-on-failure -L unit` | `fast`, `hermetic` |
+| `tests/contract` | `contract` | `ctest` | `--test-dir build --output-on-failure -L contract` | `fast`, `hermetic` |
+| `tests/integration` | `integration` | `ctest` | `--test-dir build --output-on-failure -L integration` | `fast`, `hermetic` |
 
-表空是初始化阶段的正常状态：产品测试尚未开始，预期层级与顺序见第 7 节；实现前不要加行，避免"计划当事实"。
+C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机约定一致）；本机另建目录时手动执行 `ctest --test-dir <dir>`，不改本表。
 
 目录与命名约定见 [../tests/README.md](../tests/README.md)：`unit/` `contract/` `integration/` `e2e/` `perf/` 按层级分目录，Scope 一律写目录而不是单个文件，目录内新增用例自动被覆盖。
 
@@ -110,14 +114,11 @@
 按项目方向列出的预期产品测试，**未实现前不得写成注册表行**。实现后移入 2.1 并删除此处条目。
 
 - [ ] unit：连续批处理的批次合并/拆分决策（`tests/unit/scheduler`）
-- [ ] unit：请求状态机（waiting → running → finished）的合法/非法迁移（`tests/unit/scheduler`）
 - [ ] contract：调度器与后端之间的 token 预算与 slot 分配不变量（`tests/contract/scheduler_backend`）
 - [ ] contract：KV cache 的分配/回收在并发请求下不泄漏、不重叠（`tests/contract/kv_cache`）
-- [ ] unit：采样参数（temperature/top-p/seed）在固定种子下的确定性（`tests/unit/sampler`）
 - [ ] integration：长短请求混跑时，短请求不被长请求饿死（`tests/integration/batching`）
-- [ ] integration：请求取消/超时后资源完全释放（`tests/integration/lifecycle`）
 - [ ] unit：INT4/FP8 量化路径与参考实现的最大相对误差在阈值内（`tests/unit/quant`）
-- [ ] e2e：单进程起服务，固定请求集，输出与 golden 对齐（`tests/e2e/smoke`）
+- [ ] e2e：单进程起服务，固定请求集，输出与 golden 对齐（`tests/e2e/smoke`，阶段 1 只有进程级冒烟）
 - [ ] perf：固定输入长度下吞吐基线，连续三次中位数（`tests/perf/throughput`、`tests/perf/latency`）
 - [ ] sanitizer：以上 unit/contract 用例在 ASan+UBSan 与 TSan 下重跑（复用用例，不单建目录）
 
