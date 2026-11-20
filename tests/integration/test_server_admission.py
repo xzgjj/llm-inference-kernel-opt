@@ -31,7 +31,9 @@ def main() -> int:
                 server, model,
                 ["--ctx-tokens", "512", "--max-concurrency", "1", "--queue-capacity", "2",
                  "--chunk-size", "32", "--max-num-batched-tokens", "32", "--log-level", "warn"],
-                {"LLMOPT_TEST_STUB_DELAY_MS": "25"}) as port:
+                {"LLMOPT_TEST_STUB_DELAY_MS": "100"}) as port:
+            # 每步 100ms、16 token，验收请求占用槽位约 1.6s；给 8 个线程的连接建立留出
+            # 足够窗口，避免并行跑 ctest 时“先到的已完成、后到的被放行”造成假失败。
             start = threading.Barrier(REQUEST_COUNT)
             results: list[tuple[int, bytes, dict]] = []
             lock = threading.Lock()
@@ -78,12 +80,20 @@ def main() -> int:
             check(samples['llmopt_requests_total{status="error"}'] == 0,
                   "429 不得再被记成执行错误")
 
-            # 退避后重试必须成功：429 只表示限流，不改变服务可用性。
-            time.sleep(0.2)
-            status, body, _ = kit.post(port, "/completion",
-                                       {"prompt": "retry-after", "stream": True,
-                                        "max_tokens": 2, "seed": 99})
-            check(status == 200, f"退避后重试应 200，实际 {status}")
+            # 退避后重试必须成功：429 只表示限流，不改变服务可用性。轮询等预算释放，
+            # 不靠固定 sleep 猜时延（并行 CI 下会抖）。
+            deadline = time.time() + 5.0
+            status = 0
+            body = b""
+            while time.time() < deadline:
+                status, body, _ = kit.post(port, "/completion",
+                                           {"prompt": "retry-after", "stream": True,
+                                            "max_tokens": 2, "seed": 99})
+                if status == 200:
+                    break
+                check(status == 429, f"退避重试只应遇到 429，实际 {status}")
+                time.sleep(0.2)
+            check(status == 200, "退避后重试应 200，预算释放 5s 内仍未成功")
             print("OK integration_server_admission")
     return 0
 
