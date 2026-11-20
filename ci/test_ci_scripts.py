@@ -119,6 +119,12 @@ class ScopeWhitelistTest(unittest.TestCase):
     def test_new_top_level_directory_is_rejected(self) -> None:
         self.assertTrue(self._violations({"bench/recompute.py": "A"}))
 
+    def test_git_quoted_chinese_path_is_decoded(self) -> None:
+        # git 默认把非 ASCII 路径转成 "docs/\346\226\207..."，白名单不能把它当新顶层目录。
+        quoted = '"docs/\\346\\226\\207\\346\\241\\243.md"'
+        self.assertEqual(check_diff._decode_git_path(quoted), "docs/文档.md")
+        self.assertEqual(check_diff._decode_git_path("docs/ascii.md"), "docs/ascii.md")
+
 
 if __name__ == "__main__":
     unittest.main()

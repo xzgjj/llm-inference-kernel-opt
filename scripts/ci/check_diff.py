@@ -6,6 +6,7 @@ rule: CI-DIF-001
 from __future__ import annotations
 
 import argparse
+import codecs
 import fnmatch
 import json
 import os
@@ -71,12 +72,22 @@ class Diff:
 
 
 def _git(args: list[str]) -> str:
+    """core.quotepath=false：中文路径不被 git 转义成八进制，否则白名单会误判顶层目录。"""
     proc = subprocess.run(
-        ["git", *args], cwd=REPO_ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace"
+        ["git", "-c", "core.quotepath=false", *args], cwd=REPO_ROOT, capture_output=True, text=True,
+        encoding="utf-8", errors="replace"
     )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"git {' '.join(args)} failed")
     return proc.stdout
+
+
+def _decode_git_path(raw: str) -> str:
+    """兜底解码 git 仍加引号的 C 风格路径（\\ooo 为 UTF-8 字节）。"""
+    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
+        body = raw[1:-1]
+        return codecs.escape_decode(body.encode("utf-8"))[0].decode("utf-8", "replace")
+    return raw
 
 
 def collect_diff(base: str | None) -> Diff:
@@ -106,12 +117,12 @@ def collect_diff(base: str | None) -> Diff:
             if not line.strip():
                 continue
             status, path = line.split("\t", 1)
-            diff.files[path.replace("\\", "/")] = status[0]
+            diff.files[_decode_git_path(path).replace("\\", "/")] = status[0]
         for line in _git(["diff", "--numstat", "--no-renames", diff.range]).splitlines():
             if not line.strip():
                 continue
             added, deleted, path = line.split("\t", 2)
-            diff.lines[path.replace("\\", "/")] = (
+            diff.lines[_decode_git_path(path).replace("\\", "/")] = (
                 int(added) if added.isdigit() else 0,
                 int(deleted) if deleted.isdigit() else 0,
             )
