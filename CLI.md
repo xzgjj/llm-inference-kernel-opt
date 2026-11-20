@@ -1,6 +1,6 @@
-# CLI 与接口契约（阶段 1 冻结版 v1.1 / 阶段 3 chunk-size 补充）
+# CLI 与接口契约（阶段 1 冻结版 v1.1 / 阶段 3 chunk-size / 阶段 5 预研工具）
 
-> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，2026-11-20 经用户确认纳入冻结契约，其余不变。对应 SPEC-1（C-01…C-13）与 SPEC-3 F-04。
+> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，2026-11-20 经用户确认纳入冻结契约，其余不变。阶段 5 只新增只读判据工具，不改服务 CLI。对应 SPEC-1（C-01…C-13）、SPEC-3 F-04、SPEC-5 §1.7。
 > 与 SPEC 冲突处已记录在 `implementation-notes.md`。适用进程：`llmopt_server`。`tools/dev.py` 参数命名独立，见第 8 节。
 
 
@@ -276,3 +276,57 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 7. 阶段 2 调度参数默认值：`max-num-batched-tokens=2048`、`queue-capacity=32`、`block-size=16`、`watermark-ratio=0.05`、前缀缓存默认开。
 8. 阶段 3 新增 `--chunk-size`，默认 128，仅 32/64/128/256；`max-num-batched-tokens` 可小于 `ctx-tokens`（chunked prefill 承接）。
 9. 分支约定：阶段 2 用 `2`，阶段 3 用 `3`；每阶段结束需用户 review 后才允许推送。
+
+
+
+## 11 预研判据工具（阶段 5，非服务 CLI）
+
+`scripts/spec5/recompute_spec5.py` 只读 SPEC-4 产物，不启服务、不写 KV、不执行 PD/投机路径。它没有环境变量、没有 profile、没有插件；权限与普通脚本相同（读输入目录、写 `--out`）。
+
+| 子命令 | 语法 | 作用 |
+| --- | --- | --- |
+| （无子命令） | `python scripts/spec5/recompute_spec5.py --csv <file> [options]` | 复算判据表，输出 `criteria.csv` / `criteria.md`，可选评估报告 |
+
+| 参数 | 默认 | 说明 |
+| --- | --- | --- |
+| `--csv` | 必填 | `matrix_report.csv`，SPEC-4 十二列；缺列即退出 1 |
+| `--traces` | CSV 同目录 | `steps-p<N>.jsonl` 所在目录；缺档记 `trace_missing` |
+| `--chunk-csv` | 无 | 同 P 同档的调参后十二列报告；缺档时 PD 停在候选 |
+| `--spec-csv` | 无 | 草稿模型实测行（`baseline_tok_s`/`draft_tok_s`/`alpha`/`k`/`cost_ratio`/`itl_p99_delta_pct`） |
+| `--out` | `<csv 目录>/spec5` | 输出目录 |
+| `--report` | 仅触发时写 | 评估报告路径；未触发也可显式写一页“不支持翻案” |
+| `--slo-itl-ms` | `50` | D5-1 SLO |
+| `--share-threshold` | `0.50` | prefill 占比阈值 |
+| `--chunk-gain-threshold` | `0.10` | chunk 调参最小改善 |
+| `--spec-gain-threshold` | `0.10` | 投机最小增益 |
+| `--spec-itl-tolerance` | `0.07` | 投机 ITL p99 允许恶化 |
+| `--min-samples` | `30` | 少于此记 `数据不足` |
+| `--kv-kib-per-token` | `12` | B_kv 估算系数 |
+| `--ctx-tokens` | `4096` | 迁移估算上下文 |
+| `--link-gibps` | `0` | 链路实测带宽；0 表示未测，不给 PD 结论 |
+| `--delta-stall-ms` | 无 | 混批−隔离 ITL 差；缺省不给 PD 结论 |
+| `--route-ms` / `--overlap-ms` | `0` | 路由与重叠开销 |
+| `--quiet` | 关 | 不打印摘要 |
+
+退出码：`0` 计算完成（含数据不足/不触发）、`1` 输入不可用（路径/缺列）、`2` 参数用法错误。判定值固定为 `pd_triggered` / `candidate_pending_chunk` / `candidate_pending_migration` / `negative_gain` / `batch_decay` / `not_triggered` / `data_insufficient`。
+
+**典型用法**
+
+```bash
+# 仓库自带的官方 14 行样例（hermetic）
+python scripts/spec5/recompute_spec5.py \
+  --csv tests/data/spec5/matrix_report.csv --traces tests/data/spec5 \
+  --out /tmp/spec5
+
+# 真机矩阵复算，并落一页评估报告
+python scripts/spec5/recompute_spec5.py \
+  --csv docs/evidence/phase4-official/matrix_report.csv \
+  --traces docs/evidence/phase4-official \
+  --out docs/evidence/phase5 --report docs/notes/phase5_预研评估.md
+
+# 有调参后矩阵时，才可能从候选变成触发
+python scripts/spec5/recompute_spec5.py --csv base.csv --chunk-csv tuned.csv \
+  --link-gibps 10 --delta-stall-ms 8 --out out/
+```
+
+脚本化调用只看退出码与 `criteria.csv` 的 `row_verdict` 列，不要解析人读的 `criteria.md`。

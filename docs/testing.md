@@ -185,6 +185,13 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规模 4,500–25,000 行、范围无分布式/CUDA/训练/PD、测试全登记；`scripts/ci/check_code.py` 每次代码闸门自动调用三者。
 
+阶段 5 的判据复算与预留接口各有一组用例，全部 `fast`/`hermetic`、不启服务：
+
+- `tests/tools/test_spec5.py`（28 例）：线性插值分位数、trace 的 share 代理（长间隔含 prefill）、截断/坏字段 JSONL 容错、缺列/样本不足/非 ok 档三态、PD 三条件（SLO/占比/chunk 改善）与候选态、迁移不等式与 `Δstall` 缺失、投机 batch_decay/触发/ITL 容差、`--chunk-csv` 同档校验、CLI 落盘与退出码、官方 14 行 CSV 的黄金判定（0 触发/2 候选）。数据在 `tests/data/spec5/`（<2 MB）。
+- `tests/unit/p5_reserved_test.cc`（3 例，`unit_p5_reserved`）：C-P5-01…03 默认值等价 v0、`BlockRef` 与 v0 同名类型区分、快照/轨迹值语义。`test_spec5.py` 另扫描 `src/` 与其余头文件，锁定不引用 `p5_reserved.hpp`（R-02）。
+
+阶段 5 不改 `src/`，因此 v0 指标对比沿用阶段 4 官方 14 行（同一 CSV + 同一 trace 复算）；真实判据表在 `docs/evidence/phase5/`，结论“本期数据不支持翻案”。
+
 准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
