@@ -77,8 +77,9 @@ exit=3
 
 未验证 / 限制
 ------------
-- Linux（backtrace/backtrace_symbols_fd、dirent 目录扫描、unlink）分支未在本机实跑，
-  仅做了平台条件编译；需 Linux CI/容器复测。
+- Linux 分支：在 ubuntu:24.04 容器内 GCC 13.3.0 `-std=c++20 -Wall -Wextra -Wpedantic -Wshadow -Werror -fsyntax-only`
+  通过（CRASH_GCC_SYNTAX_OK，见 crash_gcc_syntax.log）；但 backtrace()/backtrace_symbols_fd、
+  dirent 目录扫描、unlink 的运行时路径未在 Linux 实跑，仍需 Linux CI/容器注入复测。
 - 独立 fixture 未链 spdlog；日志尾部读取走的是 open/read 裸路径，未经过 logger。
 - shutdown_state 字段当前为 not-tracked-by-crash-handler：handler 未接入主流程的
   关停标志；后续主 Agent 接线时可补原子标志写入。

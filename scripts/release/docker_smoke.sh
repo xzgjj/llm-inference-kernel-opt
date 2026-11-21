@@ -109,16 +109,11 @@ cancelled_now() {
   curl -s "http://127.0.0.1:$PORT/metrics" \
     | grep 'llmopt_requests_total{status="cancelled"}' || echo 'llmopt_requests_total{status="cancelled"} 0'
 }
-# 先探测二进制是否提供 S1 的 --disconnect-poll-ms 开关；未合并则 SKIP（禁止写成 PASS）。
-probe=$(docker run --rm -e LLMOPT_ALLOW_STUB=1 -v "$WORK:/app/models:ro" "$IMAGE" \
-  --model /app/models/smoke.gguf --backend stub --mode off --capacity-only \
-  --disconnect-poll-ms 300 2>&1)
-if [ $? -ne 0 ]; then
-  record disconnect_cancel SKIP "S1 未合并，二进制无断连轮询能力；probe: $(echo "$probe" | tail -1 | cut -c1-160)"
-else
-  baseline=$(cancelled_now | awk '{print $2}')
-  # 裸 socket 发请求后硬断开（RST），3s 内观察 cancelled 计数 +1。
-  python3 - "$PORT" <<'PY'
+# S1 断连轮询为内置行为（http_server.cpp 内 500ms is_connection_closed 轮询）；
+# CLI 未暴露 --disconnect-poll-ms 开关，故不以该 flag 作为能力判据，直接裸 socket 真跑。
+baseline=$(cancelled_now | awk '{print $2}')
+# 裸 socket 发请求后硬断开（RST），3s 内观察 cancelled 计数 +1。
+python3 - "$PORT" <<'PY'
 import socket, sys, time, json
 port = int(sys.argv[1])
 body = json.dumps({"prompt":"disconnect-smoke","max_tokens":600,"temperature":0}).encode()
@@ -130,17 +125,16 @@ time.sleep(0.8)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
 sock.close()
 PY
-  bumped=0
-  for _ in $(seq 1 12); do
-    sleep 0.25
-    current=$(cancelled_now | awk '{print $2}')
-    if [ "${current:-0}" -gt "${baseline:-0}" ]; then bumped=1; break; fi
-  done
-  if [ "$bumped" = "1" ]; then
-    record disconnect_cancel PASS "cancelled ${baseline:-0} -> ${current:-0} within 3s"
-  else
-    record disconnect_cancel FAIL "cancelled 未增长 baseline=${baseline:-0} current=${current:-0}"
-  fi
+bumped=0
+for _ in $(seq 1 12); do
+  sleep 0.25
+  current=$(cancelled_now | awk '{print $2}')
+  if [ "${current:-0}" -gt "${baseline:-0}" ]; then bumped=1; break; fi
+done
+if [ "$bumped" = "1" ]; then
+  record disconnect_cancel PASS "cancelled ${baseline:-0} -> ${current:-0} within 3s"
+else
+  record disconnect_cancel FAIL "cancelled 未增长 baseline=${baseline:-0} current=${current:-0}"
 fi
 
 # ---- drain：SIGTERM 后退出码 0 ----
