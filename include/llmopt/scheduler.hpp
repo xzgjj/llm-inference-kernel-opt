@@ -42,6 +42,8 @@ struct SchedulerConfig {
     std::string preempt_trace_path{};
     // 步级 trace（JSONL）：只给离线 p99 复算用，空串关闭，避免热路径写盘。
     std::string step_trace_path{};
+    // 单步 Completion 回投超时；<=0 关闭。超时只把请求判失败，不强杀执行线程。
+    std::int64_t completion_timeout_ns = 30'000'000'000LL;
 };
 
 // Chunked prefill 切块结果：n_tokens 为本步可算 token 数，is_last 标记末块需采样。
@@ -108,6 +110,8 @@ struct SequenceGroup {
     std::int64_t enqueued_ns = 0;
     // 上一个成立 token 的到达时刻；只用于纯 decode 步的 ITL 样本。
     std::int64_t last_token_ns = 0;
+    // Completion 超时已向客户端推过错误：保持运行态等执行线程回投，避免提前释放 KV。
+    bool completion_timed_out = false;
 };
 
 // 已生成 token 已写入 KV 的长度：prompt 之后只差“最后一个已采样、尚未回填”的 token。
@@ -289,6 +293,8 @@ private:
                               std::int32_t previous, bool first_token);
     void pump();
     void expire_deadlines();
+    // 单步 Completion 丢失兜底：只清 pending 并让请求失败，不触碰执行线程。
+    void expire_completion_timeouts();
     void preempt_for_waiting();
     void admit_waiting(TokenBudget& budget);
     bool submit_scheduled(Batch& batch, std::chrono::steady_clock::time_point started);
@@ -347,6 +353,8 @@ private:
     std::vector<std::int32_t> pending_serials_;
     std::int32_t pending_remaining_ = 0;
     bool pending_step_ = false;
+    // 本批提交时刻；Completion 超时判定只读 Core 线程时钟，避免执行线程写状态。
+    std::int64_t pending_since_ns_ = 0;
     // 本批是否为纯 decode（无 prefill token）；只有这种步的 token 间隔进 K-2。
     bool pending_pure_decode_ = false;
     bool pumping_ = false;

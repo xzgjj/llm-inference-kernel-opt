@@ -29,7 +29,8 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
               [--mode off|auto|force_on] [--safety-ratio 0.80] [--allow-force-on] \
               [--threads 0] [--n-gpu-layers 0] [--backend llama|stub] \
               [--rate-limit-rps 0] [--rate-limit-burst 32] \
-              [--drain-deadline-seconds 30] [--api-key ""] [--step-trace-rate 0] \
+              [--drain-deadline-seconds 30] [--request-deadline-seconds 120] \
+              [--completion-timeout-ms 30000] [--api-key ""] [--step-trace-rate 0] \
               [--control-port 0] [--tls-cert ""] [--tls-key ""] \
               [--log-level info|debug|warn]
 ```
@@ -68,6 +69,7 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 | `--rate-limit-burst` | `LLMOPT_RATE_LIMIT_BURST` | `32` | 1–1024 | 桶容量；突发额度，回填不超过该值 |
 | `--drain-deadline-seconds` | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | 1–300 | SIGTERM 排空上限；超时强制停止 |
 | `--request-deadline-seconds` | `LLMOPT_REQUEST_DEADLINE_SECONDS` | `120` | 1–3600 | 请求级总时限，从入队起算；流式/非流式共享，到期由 Scheduler 以 `TIMEOUT` 收尾 |
+| `--completion-timeout-ms` | `LLMOPT_COMPLETION_TIMEOUT_MS` | `30000` | 0–86400000 | 单步 Completion 回投超时；超时先回 `EXECUTION_FAILED`，迟到回投后再释放 KV；0=关闭 |
 | `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值 |
 | `--step-trace-rate` | `LLMOPT_STEP_TRACE_RATE` | `0` | 0–64 | 每步 trace 1/N 采样；0=关（行为在 7-5 接入） |
 | `--control-port` | `LLMOPT_CONTROL_PORT` | `0` | 0–65535，且不得等于 `--port` | `>0` 时在 `127.0.0.1` 另起独立控制面 listener（独立 4 线程池），只提供 `/healthz`、`/readyz`、`/metrics`；`0` 保持旧行为 |

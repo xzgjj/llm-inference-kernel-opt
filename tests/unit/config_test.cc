@@ -59,6 +59,7 @@ void clear_env() {
                             "LLMOPT_RATE_LIMIT_RPS",
                             "LLMOPT_RATE_LIMIT_BURST",
                             "LLMOPT_DRAIN_DEADLINE_SECONDS",
+                            "LLMOPT_COMPLETION_TIMEOUT_MS",
                             "LLMOPT_API_KEY",
                             "LLMOPT_STEP_TRACE_RATE",
                             "LLMOPT_CONTROL_PORT",
@@ -546,4 +547,28 @@ TEST_CASE("服务边界参数四层优先级与范围") {
     CHECK(load({"--model", "m.gguf", "--step-trace-rate", "65"}, cfg, message) ==
           ErrCode::ConfigInvalid);
     std::filesystem::remove(file);
+}
+
+TEST_CASE("completion-timeout-ms 默认、CLI/env 与边界") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.completion_timeout_ms == 30'000);
+
+    set_env("LLMOPT_COMPLETION_TIMEOUT_MS", "500");
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.completion_timeout_ms == 500);
+    CHECK(load({"--model", "m.gguf", "--completion-timeout-ms", "100"}, cfg, message) ==
+          ErrCode::Ok);
+    CHECK(cfg.completion_timeout_ms == 100);
+    CHECK(load({"--model", "m.gguf", "--completion-timeout-ms", "0"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.completion_timeout_ms == 0);
+    CHECK(load({"--model", "m.gguf", "--completion-timeout-ms", "-1"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--completion-timeout-ms", "86400001"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--completion-timeout-ms", "abc"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    clear_env();
 }

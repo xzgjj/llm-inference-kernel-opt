@@ -29,7 +29,7 @@
 
 C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机约定一致）；本机另建目录时手动执行 `ctest --test-dir <dir>`，不改本表。CI 的非默认构建目录（sanitizer、覆盖率）用 `run_registry.py --build-dir <dir>` 覆盖表里的路径，表本身仍保持一条可独立执行的命令。
 
-CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前共 **175 条**：158 条 doctest 用例 + 17 条进程级脚本。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
+CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前共 **177 条**：160 条 doctest 用例 + 17 条进程级脚本。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
 
 目录与命名约定见 [../tests/README.md](../tests/README.md)：`unit/` `contract/` `integration/` `e2e/` `perf/` 按层级分目录，Scope 一律写目录而不是单个文件，目录内新增用例自动被覆盖。
 
@@ -257,15 +257,17 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `unit_config`：`clear_env` 补 `LLMOPT_MODEL_PROFILE`/`LLMOPT_CAPACITY_ONLY` 并加隔离自检；`unit_gguf` 补浮点/字符串/非正整数负样本。
 - `tests/tools/test_real_contract_base.py`（10 例）：根地址 6 分支 + 非 JSON/非对象错误体容错；`test_watch_matrix.py` 8 例、`test_capacity_check.py` 8 例、`test_matrix.py` 18 例。
 - 真模型 runner 不再混在 `runner_raii_test` 里早退：独立 `runner_real_probe` + `test_runner_real.py`，缺 `LLMOPT_TEST_MODEL` 时 CTest 记 Skip(77)，并输出 `SKIP` 文本。
-- 复跑口径：全量 ctest **175 注册 / 173 通过 / 0 失败 / 2 跳过**（e2e 与真模型探针）；`ctest -L fast` **173/173**；`tests/tools` **97 例**、`ci/` **21 例**；`run_ci.py --mode pr` 四步 PASS；真 8B e2e 在 HTTP 修复后 **PASS 10 项**。
+- 复跑口径：全量 ctest **177 注册 / 175 通过 / 0 失败 / 2 跳过**（e2e 与真模型探针）；`ctest -L fast` **175/175**；`tests/tools` **97 例**、`ci/` **21 例**；`run_ci.py --mode pr` 四步 PASS；真 8B e2e 在 HTTP 修复后 **PASS 10 项**。
 
-阶段 9 的 TLS 与控制面隔离（2026-11-21）：
+阶段 9 的 TLS、控制面隔离与 Completion watchdog（2026-11-21）：
 
-- `unit_config` +1 例：`--control-port` 范围/与数据面端口冲突、`--tls-cert`/`--tls-key` 必须成对；默认 `control=0`、TLS 关。
+- `unit_config` +2 例：`--control-port` 范围/与数据面端口冲突、`--tls-cert`/`--tls-key` 必须成对；`--completion-timeout-ms` 默认/CLI/env/边界。
 - `integration_server_control_isolation`：`max-concurrency=1`、4 条长 SSE 流占满数据面 `1+3` handler 时，`--control-port` 的独立 listener 仍能在 2 s 内返回 `/healthz` 200 与 `/metrics` 200。
 - `integration_server_tls`（仅 `-DLLMOPT_ENABLE_TLS=ON` 构建登记）：自签证书下 HTTPS `/healthz`、`/completion`、`/metrics` 全部 200；同端口明文请求不得 200。缺 `openssl` 命令行时 Skip(77)。
-- 非 TLS 构建仍注册前者；TLS 用例只在 TLS 构建出现，避免默认 Windows/MSVC 无 OpenSSL 时误报。
-- TLS CI 作业：`.github/workflows/ci.yml` 的 `tls` 作业用 `-DLLMOPT_ENABLE_TLS=ON` 编译并只跑上述两条，编译失败即红灯。
+- `integration_server_tls_config_error`：证书缺失或非 TLS 构建配置证书时启动退出 3，错误信息含 TLS 原因。
+- `completion_watchdog_test`：慢回投 runner（1.2 s）注入，请求 1 s 内收到 `EXECUTION_FAILED`；迟到 Completion 后 KV 归零；shutdown <5 s。
+- 非 TLS 构建仍注册控制面/证书失败用例；TLS 握手用例只在 TLS 构建出现，避免默认 Windows/MSVC 无 OpenSSL 时误报。
+- TLS CI 作业：`.github/workflows/ci.yml` 的 `tls` 作业用 `-DLLMOPT_ENABLE_TLS=ON` 编译并跑 TLS/控制面/证书失败三条，编译失败即红灯。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 

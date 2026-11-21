@@ -53,6 +53,8 @@ llmopt_add_doctest(preempt_test "contract;fast;hermetic" SOURCES contract/preemp
 llmopt_add_doctest(state_test "contract;fast;hermetic" SOURCES contract/state_test.cc)
 llmopt_add_doctest(lifecycle_test "contract;fast;hermetic" SOURCES contract/lifecycle_test.cc)
 llmopt_add_doctest(admission_test "contract;fast;hermetic" SOURCES contract/admission_test.cc)
+llmopt_add_doctest(completion_watchdog_test "contract;fast;hermetic"
+                   SOURCES contract/watchdog_test.cc)
 # 阶段 5：C-P5-01…03 预留值对象只证明默认值等价 v0，不接入热路径。
 llmopt_add_doctest(unit_p5_reserved "unit;fast;hermetic" SOURCES unit/p5_reserved_test.cc)
 

@@ -63,6 +63,8 @@ struct ServerConfig {
     std::int32_t drain_deadline_seconds = 30;
     // 请求级总时限：从 submit 入队起算，流式/非流式共用；超时由 Scheduler 收尾。
     std::int32_t request_deadline_seconds = 120;
+    // 单步 Completion 回投超时；0=关闭。默认 30s，只影响“执行线程不回投”的故障路径。
+    std::int32_t completion_timeout_ms = 30'000;
     std::string api_key;              // 空=不鉴权；不写日志、不打印
     std::int32_t step_trace_rate = 0; // 1/N 采样；0=关
     // 控制面隔离：>0 时在 loopback 上另起一个独立线程池的 /healthz /readyz /metrics。

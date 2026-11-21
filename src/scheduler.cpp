@@ -444,6 +444,7 @@ bool SchedulerCore::run_once(int wait_ms) {
         }
     }
     // 即使没有事件也要推进：请求级 deadline 只能在 Core 线程判定，不能等下一个事件。
+    expire_completion_timeouts();
     pump();
     // 深度只在 Core 线程写；HTTP 准入读镜像，避免跨线程读 deque。
     waiting_depth_.store(static_cast<std::int32_t>(waiting_.size()), std::memory_order_relaxed);
@@ -610,6 +611,7 @@ bool SchedulerCore::submit_scheduled(Batch& batch, std::chrono::steady_clock::ti
         return false;
     }
     pending_step_ = true;
+    pending_since_ns_ = now_ns();
     return true;
 }
 
@@ -643,6 +645,45 @@ void SchedulerCore::expire_deadlines() {
                               "req=" + group->req_id + " deadline_s=" +
                                       std::to_string(config_.request_deadline_ns / 1'000'000'000)));
         }
+    }
+}
+
+// Completion 超时：先给客户端错误终态，但不提前 finish——执行线程仍可能持有该序列的
+// KV/后端槽，提前释放会造成 UAF。真正的回收等迟到 Completion 回到 Core 后走正常收尾。
+void SchedulerCore::expire_completion_timeouts() {
+    if (!pending_step_ || config_.completion_timeout_ns <= 0 || pending_since_ns_ == 0) {
+        return;
+    }
+    const std::int64_t now = now_ns();
+    if (now - pending_since_ns_ < config_.completion_timeout_ns) {
+        return;
+    }
+    std::int32_t timed_out = 0;
+    const std::int64_t timeout_ms = config_.completion_timeout_ns / 1'000'000;
+    for (const std::int32_t serial : pending_serials_) {
+        auto group = find_running_by_serial(serial);
+        if (!group || group->completion_timed_out) {
+            continue;
+        }
+        group->completion_timed_out = true;
+        ++timed_out;
+        const Error error =
+                make_error(ErrCode::ExecutionFailed, "后端单步执行超时",
+                           "req=" + group->req_id + " timeout_ms=" + std::to_string(timeout_ms));
+        if (group->sink) {
+            Delta error_delta;
+            error_delta.error = error;
+            (void)group->sink->push_frame(error_delta);
+            Delta finish_delta;
+            finish_delta.finish = FinishReason::Error;
+            (void)group->sink->push_frame(finish_delta);
+            group->sink->close();
+        }
+    }
+    if (timed_out > 0) {
+        metrics_.inc(MetricId::CompletionTimeoutsTotal);
+        logger()->error("completion 超时：serial 量={} timeout_ms={}，等待执行线程回投后回收",
+                        timed_out, timeout_ms);
     }
 }
 

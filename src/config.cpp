@@ -54,6 +54,7 @@ constexpr FieldSpec kFields[] = {
         {"rate-limit-burst", false},
         {"drain-deadline-seconds", false},
         {"request-deadline-seconds", false},
+        {"completion-timeout-ms", false},
         {"api-key", false},
         {"step-trace-rate", false},
         {"control-port", false},
@@ -91,6 +92,7 @@ constexpr const char* kConfigKeys[] = {
         "rate-limit-burst",
         "drain-deadline-seconds",
         "request-deadline-seconds",
+        "completion-timeout-ms",
         "api-key",
         "step-trace-rate",
         "control-port",
@@ -277,6 +279,8 @@ ErrCode apply_service_arg(ServerConfig& cfg, const std::string& key, const std::
         return parse_int(value, cfg.drain_deadline_seconds) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--request-deadline-seconds") {
         return parse_int(value, cfg.request_deadline_seconds) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--completion-timeout-ms") {
+        return parse_int(value, cfg.completion_timeout_ms) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--api-key") {
         cfg.api_key = value;
     } else if (key == "--step-trace-rate") {
@@ -361,6 +365,10 @@ ErrCode validate_service_limits(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.request_deadline_seconds < 1 || cfg.request_deadline_seconds > 3600) {
         message = "request-deadline-seconds 必须在 1..3600";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.completion_timeout_ms < 0 || cfg.completion_timeout_ms > 86'400'000) {
+        message = "completion-timeout-ms 必须在 0..86400000（0=关闭）";
         return ErrCode::InvalidJson;
     }
     if (cfg.step_trace_rate < 0 || cfg.step_trace_rate > 64) {
@@ -529,6 +537,7 @@ ErrCode load_env_ints(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sources
              &cfg.request_deadline_seconds},
             {"LLMOPT_STEP_TRACE_RATE", "step-trace-rate", &cfg.step_trace_rate},
             {"LLMOPT_CONTROL_PORT", "control-port", &cfg.control_port},
+            {"LLMOPT_COMPLETION_TIMEOUT_MS", "completion-timeout-ms", &cfg.completion_timeout_ms},
     };
     for (const IntBinding& binding : ints) {
         const char* raw = std::getenv(binding.env);
@@ -875,6 +884,8 @@ SchedulerConfig make_scheduler_config(const ServerConfig& cfg, std::int32_t conc
     scheduler_cfg.max_consecutive_preemptions = cfg.max_consecutive_preemptions;
     scheduler_cfg.request_deadline_ns =
             static_cast<std::int64_t>(cfg.request_deadline_seconds) * 1'000'000'000;
+    scheduler_cfg.completion_timeout_ns =
+            static_cast<std::int64_t>(cfg.completion_timeout_ms) * 1'000'000;
     scheduler_cfg.preempt_trace_path = cfg.preempt_trace_path;
     scheduler_cfg.step_trace_path = cfg.step_trace_path;
     return scheduler_cfg;

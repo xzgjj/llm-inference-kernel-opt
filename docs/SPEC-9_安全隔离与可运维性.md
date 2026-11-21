@@ -1,6 +1,6 @@
 # SPEC-9：安全隔离与可运维性
 
-- 状态：TLS 与控制面隔离已实现；多租户、断连取消、Completion watchdog、真后端 CI、长稳仍为规划
+- 状态：TLS、控制面隔离与 Completion watchdog 已实现；多租户、断连取消、真后端 CI、长稳仍为规划
 - 分支：`9`（从 `8` @ `9037f61` 切出）
 - 关联调研：`docs/notes/阶段9-安全隔离调研.md`
 - 原则：默认行为不变；能力以开关/配置启用；每项先有可失败测试；不在同一提交混多个结构改造
@@ -116,21 +116,22 @@
 
 验收：客户端发起非流式请求后 0.2 s 断开；服务端在 1 s 内 `llmopt_requests_cancelled_total` +1，KV 块归还，后续请求正常。
 
-### 3.5 Completion watchdog（规划，未实现）
+### 3.5 Completion watchdog（已实现）
 
-现状：`StepExecutor` 某步不回投 Completion，`pending_serials_/pending_remaining_/pending_step_` 无法清零，shutdown 永久等待。
+现状：`StepExecutor` 某步不回投 Completion，`pending_serials_/pending_remaining_/pending_step_` 无法清零，后续调度与 shutdown 永久等待。
 
 契约：
 
 - 新增 `--completion-timeout-ms`（默认 30,000，0=关）。
 - Core 记录 `pending_since_ns`；每 tick 检查超时；超时后：
-  - 将对应 serial 标为失败，`finish(ExecutionFailed)`；
-  - 清 pending 计数；
+  - 向对应请求 push `EXECUTION_FAILED` 错误帧并关闭 sink，HTTP 侧立即回 500；
   - `llmopt_completion_timeouts_total` +1；
-  - 不直接杀执行线程（避免 UB），后续由 runner 重建/退出策略处理。
-- 先做“可配置 + 可失败测试 + 默认不改变现有行为”，再评估是否默认开。
+  - **不提前 `finish`**：执行线程可能仍持有该序列的 KV/后端槽，提前释放会造成 UAF；
+  - 迟到 Completion 回到 Core 后走正常收尾，释放 KV/后端槽；
+  - 不直接杀执行线程（避免 UB）。
+- 局限：若执行线程永久挂死，watchdog 只能让客户端拿到 500，shutdown 仍会等执行线程；彻底解决需要 runner 级进程隔离。
 
-验收：注入一个不回投的 fake runner；请求在 2×timeout 内收到 500 `EXECUTION_FAILED`；shutdown 在 5 s 内完成；无 KV 泄漏。
+验收：注入慢回投 fake runner（1.2 s）；请求在 1 s 内收到 `EXECUTION_FAILED`；迟到回投后 KV 归零；shutdown 在 5 s 内完成。
 
 ### 3.6 真后端 CI（规划，未实现）
 
@@ -162,15 +163,15 @@
 | `integration_server_tls_config_error` | 默认/TLS | integration/fast | 证书不可用时退出 3 + 明确 TLS 错误 |
 | 多租户 key/配额 | 默认 | integration | 401/429/tenant 指标 |
 | 非流式断连 | 默认 | integration | 1 s 内 cancel + KV 归还 |
-| watchdog | 默认 | contract/integration | 500、计数、shutdown 不挂 |
+| `completion_watchdog_test` | 默认 | contract/fast | 1 s 内 `EXECUTION_FAILED`；迟到回投后 KV 归零；shutdown <5 s |
 | real-backend nightly | LLAMA=ON | nightly | 五项运行时 PASS |
 | soak | 默认 | slow | 30 min 无泄漏/漂移 |
 
 ## 5 实施顺序
 
 1. **已完成**：TLS 数据面 + 控制面隔离 + 两条回归。
-2. **下一步（P0）**：Completion watchdog（R1-01）——可靠性最高，改动局限 Core。
-3. **P1**：非流式断连取消（R2-03）——需要确认 httplib 断连探测 API。
+2. **已完成（R1-01）**：Completion watchdog，`completion_watchdog_test` 覆盖 500、迟到回收与 shutdown。
+3. **下一步（P1）**：非流式断连取消（R2-03）——需要 httplib 暴露连接探测；当前 0.18.3 无该 API。
 4. **P1**：真后端 nightly 小模型。
 5. **P2**：多租户静态 key + 配额；先出格式与隔离决策，再改调度器。
 6. **P2**：soak 与 Docker/systemd 真机验证。

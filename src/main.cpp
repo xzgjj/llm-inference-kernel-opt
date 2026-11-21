@@ -58,6 +58,7 @@ void print_config(const ServerConfig& cfg) {
               << " rate_rps=" << cfg.rate_limit_rps << " rate_burst=" << cfg.rate_limit_burst
               << " drain_s=" << cfg.drain_deadline_seconds
               << " request_deadline_s=" << cfg.request_deadline_seconds
+              << " completion_timeout_ms=" << cfg.completion_timeout_ms
               << " step_trace_rate=" << cfg.step_trace_rate << " control_port=" << cfg.control_port
               << " tls=" << (cfg.tls_cert_path.empty() ? "off" : "on")
               << " capacity_only=" << (cfg.capacity_only ? 1 : 0)

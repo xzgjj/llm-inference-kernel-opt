@@ -92,6 +92,7 @@ enum class MetricId : std::uint16_t {
     Degraded,
     DrainTimeoutTotal,
     RateLimitedTotal,
+    CompletionTimeoutsTotal,
     Count
 };
 

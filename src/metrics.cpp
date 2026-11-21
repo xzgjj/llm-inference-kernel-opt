@@ -171,6 +171,9 @@ const std::array<MetricDef, kMetricCount> kMetricDefs = {{
          "排空超过 drain-deadline-seconds 的次数（超时后在飞请求强制中止）"},
         {"llmopt_rate_limited_total", "llmopt_rate_limited_total", MetricKind::CounterInt,
          "令牌桶拒绝的请求数（429，未进入队列）"},
+        {"llmopt_completion_timeouts_total", "llmopt_completion_timeouts_total",
+         MetricKind::CounterInt,
+         "单步 Completion 回投超时的次数（超时后请求按 EXECUTION_FAILED 收尾）"},
 }};
 
 MetricId find_metric(std::string_view series) noexcept {
