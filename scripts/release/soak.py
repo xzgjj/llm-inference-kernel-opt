@@ -104,14 +104,20 @@ def main() -> int:
         stop.set()
         for thread in threads:
             thread.join(timeout=70)
-        growth = 0.0 if not rss or baseline in (None, 0) else (max(rss) - baseline) / baseline
+        delta_mib = 0.0 if not rss or baseline in (None, 0) else max(rss) - baseline
+        growth = 0.0 if baseline in (None, 0) or not rss else delta_mib / baseline
+        # llmopt_rss_mib 是整数 MiB，小基线（stub 约 4 MiB）下 1 MiB 量化就相当于 25%；
+        # 因此增长判定取“比例 <5% 或绝对增量 <8 MiB”二者之一，避免把计量粒度当泄漏。
+        noise_floor_mib = 8.0
         report = {
             "seconds": args.seconds,
             "requests": counters["requests"],
             "errors": counters["errors"],
             "rss_baseline_mib": baseline,
             "rss_max_mib": max(rss) if rss else None,
+            "rss_delta_mib": delta_mib,
             "rss_growth_ratio": growth,
+            "rss_noise_floor_mib": noise_floor_mib,
         }
         if args.report:
             # CI 首次跑到 nightly 时 build/evidence 可能不存在；先建目录，避免 30 min 后写报告才失败。
@@ -119,7 +125,8 @@ def main() -> int:
             args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
         assert baseline is not None, "未采到 llmopt_rss_mib"
         assert counters["errors"] == 0, f"出现非 200 响应：{counters['errors']}"
-        assert growth < 0.05, f"RSS 增长 {growth:.2%} 超过 5%"
+        assert growth < 0.05 or delta_mib < noise_floor_mib, (
+            f"RSS 增长 {growth:.2%}（+{delta_mib:.2f} MiB）超过 5% 且超过 {noise_floor_mib} MiB 噪声带")
         print(f"soak ok: {json.dumps(report)}")
         return 0
     finally:

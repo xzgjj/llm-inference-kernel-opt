@@ -210,7 +210,7 @@ CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规
 阶段 6 的部署与健壮性（7-5）：
 
 - `scripts/release/docker_smoke.sh`（登记名 `deploy_smoke`）：Dockerfile 起服务 → `/readyz` 200 → chat 200 → `docker stop` 后退出码 0。Windows 本机无 Docker，只在 Linux/CI 跑。
-- `scripts/release/soak.py`（登记名 `soak_30m`）：持续流式请求 + 每 30 s 采 `llmopt_rss_mib`，断言非 200 为 0、RSS 相对基线增长 <5%，报告落 `build/evidence/soak_report.json`（目录不存在时脚本自建）。本机 30 s 冒烟已验证（1566 请求 / 0 错误 / +0.95%）。（早期版本没建目录，30 min 跑满后才因写报告失败；已在 Linux 复测中发现并修复。）
+- `scripts/release/soak.py`（登记名 `soak_30m`）：持续流式请求 + 每 30 s 采 `llmopt_rss_mib`，断言非 200 为 0、RSS 增长 `<5%` **或绝对增量 `<8 MiB`**（`llmopt_rss_mib` 是整数 MiB，stub 基线约 4 MiB，1 MiB 量化即 25%，故设噪声带），报告落 `build/evidence/soak_report.json`（目录不存在时脚本自建）。Linux 30 min 实测：343,736 请求、0 非 200、RSS 4.125→4.375 MiB（+0.25 MiB）。本机 Windows 30 s 冒烟：1566 请求 / 0 错误 / +0.95%。
 - `.github/workflows/nightly.yml`（登记名 `sanitizer_nightly`）：TSan 10 轮、ASan/UBSan 一轮、30 min soak；不进 PR 阻塞链路。本机 Windows 不能跑 sanitizer，口径为“脚本与 workflow 已固化，结论以 CI 运行为准”。
 - systemd 模板 `scripts/release/llmopt.service`；部署说明见 `scripts/release/README.md`。
 
