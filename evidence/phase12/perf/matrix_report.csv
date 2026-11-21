@@ -1,0 +1,5 @@
+concurrency_p,prompt_tier,status,n_requests,ttft_p50_ms,ttft_p95_ms,itl_p99_ms,total_tok_s,tok_accounting,kv_internal_frag_ratio,sched_cpu_ratio,vram_peak_mib,vram_peak_scope,vram_device_peak_mib,reason,deviation_flag
+1,short,ok,30,28.46,94.929,23.273,77.129,prompt_metrics,0.2857,0.0002,4384.87,buffers,7090.0,na,ok
+2,short,ok,30,82.559,184.715,67.738,61.962,prompt_metrics,0.4,0.0001,4461.43,buffers,7179.0,na,high
+4,short,ok,30,207.072,272.683,108.076,78.168,prompt_metrics,0.4375,0.0001,4614.18,buffers,7203.0,na,high
+8,short,ok,30,320.582,397.435,171.316,80.706,prompt_metrics,0.5,0.0001,4920.43,buffers,7242.0,na,high

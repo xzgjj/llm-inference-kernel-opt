@@ -1,0 +1,423 @@
+{
+  "run_id": "s3-a-resident",
+  "git_commit": "8ceaf46117aa3a35af98f2b60fc1652235e08c83",
+  "seed": 7,
+  "config_hash": "f0c596736a4dc61018f60fa0df871c5f85d3d534dbe00b5c18ce3bd3a8ec8d8e",
+  "model_path": "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q3_K_M.gguf",
+  "model_sha256": "c2c61b55d39ec6fc43f84b4cbbed4505fde386d4e03ed005087bfd8c69c502c3",
+  "server_path": "/root/build-llmopt/llmopt_server",
+  "server_sha256": "1fa0e0dabe993de40b2d7bc844b65bda861c1cb7727ba15debb31cbd2a1a19b8",
+  "backend": "llama",
+  "rounds": 5,
+  "concurrency": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "tiers": [
+    {
+      "name": "short",
+      "max_prompt_tokens": 64,
+      "n": 30
+    }
+  ],
+  "prompt_set_hash": "c3a3b102e227aa259ac1c2058ee919bbd6f75258254187e62ef68c2c846e851c",
+  "thresholds": {
+    "ttft_itl": 0.1,
+    "throughput": 0.07
+  },
+  "argv": [
+    "/root/build-llmopt/llmopt_server",
+    "--model",
+    "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q3_K_M.gguf",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "0",
+    "--backend",
+    "llama",
+    "--mode",
+    "off",
+    "--ctx-tokens",
+    "1024",
+    "--max-concurrency",
+    "1",
+    "--queue-capacity",
+    "32",
+    "--max-num-batched-tokens",
+    "1024",
+    "--chunk-size",
+    "128",
+    "--n-gpu-layers",
+    "37",
+    "--kv-cache-type",
+    "q8_0",
+    "--donor-slots",
+    "4"
+  ],
+  "resource_peak": {
+    "1": {
+      "rss_peak_bytes": 822263808,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 202
+    },
+    "2": {
+      "rss_peak_bytes": 826396672,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 208
+    },
+    "4": {
+      "rss_peak_bytes": 845021184,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 168
+    },
+    "8": {
+      "rss_peak_bytes": 863588352,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 162
+    }
+  },
+  "vram_buffers": {
+    "1": {
+      "vram_peak_mib": 4384.87,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3672.41,
+      "cuda0_kv_mib": 382.5,
+      "cuda0_compute_mib": 329.96,
+      "host_model_mib": 255.02,
+      "host_kv_mib": 0.0,
+      "host_compute_mib": 33.21
+    },
+    "2": {
+      "vram_peak_mib": 4461.43,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3672.41,
+      "cuda0_kv_mib": 459.0,
+      "cuda0_compute_mib": 330.02,
+      "host_model_mib": 255.02,
+      "host_kv_mib": 0.0,
+      "host_compute_mib": 33.28
+    },
+    "4": {
+      "vram_peak_mib": 4614.18,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3672.41,
+      "cuda0_kv_mib": 612.0,
+      "cuda0_compute_mib": 329.77,
+      "host_model_mib": 255.02,
+      "host_kv_mib": 0.0,
+      "host_compute_mib": 33.02
+    },
+    "8": {
+      "vram_peak_mib": 4920.43,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3672.41,
+      "cuda0_kv_mib": 918.0,
+      "cuda0_compute_mib": 330.02,
+      "host_model_mib": 255.02,
+      "host_kv_mib": 0.0,
+      "host_compute_mib": 33.28
+    }
+  },
+  "cell_metrics": {
+    "p1": {
+      "r1": {
+        "kv": 0.2857,
+        "sched": 0.0002,
+        "device": 7090.0,
+        "kv_used": 7,
+        "kv_used_peak": 7.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 410.0,
+        "prefix_hit_tokens": 96.0
+      },
+      "r2": {
+        "kv": 0.2857,
+        "sched": 0.0002,
+        "device": 7090.0,
+        "kv_used": 7,
+        "kv_used_peak": 7.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r3": {
+        "kv": 0.2857,
+        "sched": 0.0002,
+        "device": 7090.0,
+        "kv_used": 7,
+        "kv_used_peak": 7.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r4": {
+        "kv": 0.2857,
+        "sched": 0.0002,
+        "device": 7090.0,
+        "kv_used": 7,
+        "kv_used_peak": 7.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r5": {
+        "kv": 0.2857,
+        "sched": 0.0002,
+        "device": 7090.0,
+        "kv_used": 7,
+        "kv_used_peak": 7.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      }
+    },
+    "p2": {
+      "r1": {
+        "kv": 0.4444,
+        "sched": 0.0003,
+        "device": 7090.0,
+        "kv_used": 10,
+        "kv_used_peak": 10.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 410.0,
+        "prefix_hit_tokens": 96.0
+      },
+      "r2": {
+        "kv": 0.4,
+        "sched": 0.0001,
+        "device": 7044.0,
+        "kv_used": 10,
+        "kv_used_peak": 10.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r3": {
+        "kv": 0.4,
+        "sched": 0.0001,
+        "device": 7179.0,
+        "kv_used": 10,
+        "kv_used_peak": 10.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r4": {
+        "kv": 0.4,
+        "sched": 0.0001,
+        "device": 7168.0,
+        "kv_used": 10,
+        "kv_used_peak": 10.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r5": {
+        "kv": 0.4,
+        "sched": 0.0001,
+        "device": 7165.0,
+        "kv_used": 10,
+        "kv_used_peak": 10.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      }
+    },
+    "p4": {
+      "r1": {
+        "kv": 0.5333,
+        "sched": 0.0002,
+        "device": 7203.0,
+        "kv_used": 16,
+        "kv_used_peak": 16.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 410.0,
+        "prefix_hit_tokens": 96.0
+      },
+      "r2": {
+        "kv": 0.4375,
+        "sched": 0.0001,
+        "device": 7156.0,
+        "kv_used": 16,
+        "kv_used_peak": 16.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r3": {
+        "kv": 0.4375,
+        "sched": 0.0001,
+        "device": 7193.0,
+        "kv_used": 16,
+        "kv_used_peak": 16.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r4": {
+        "kv": 0.4375,
+        "sched": 0.0001,
+        "device": 7199.0,
+        "kv_used": 16,
+        "kv_used_peak": 16.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r5": {
+        "kv": 0.4375,
+        "sched": 0.0001,
+        "device": 7193.0,
+        "kv_used": 16,
+        "kv_used_peak": 16.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      }
+    },
+    "p8": {
+      "r1": {
+        "kv": 0.5357,
+        "sched": 0.0003,
+        "device": 7242.0,
+        "kv_used": 28,
+        "kv_used_peak": 28.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 410.0,
+        "prefix_hit_tokens": 96.0
+      },
+      "r2": {
+        "kv": 0.5,
+        "sched": 0.0001,
+        "device": 6974.0,
+        "kv_used": 28,
+        "kv_used_peak": 28.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r3": {
+        "kv": 0.5,
+        "sched": 0.0001,
+        "device": 6990.0,
+        "kv_used": 28,
+        "kv_used_peak": 28.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r4": {
+        "kv": 0.5,
+        "sched": 0.0001,
+        "device": 6991.0,
+        "kv_used": 28,
+        "kv_used_peak": 28.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      },
+      "r5": {
+        "kv": 0.5,
+        "sched": 0.0001,
+        "device": 6997.0,
+        "kv_used": 28,
+        "kv_used_peak": 28.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 378.0,
+        "prefix_hit_tokens": 128.0
+      }
+    }
+  },
+  "env": {
+    "platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "cpu_count": 16,
+    "hostname": "DESKTOP-GN8DB6B"
+  }
+}

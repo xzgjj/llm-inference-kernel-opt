@@ -1,0 +1,5 @@
+concurrency_p,prompt_tier,ttft_p50_dev_pct,itl_p50_dev_pct,total_tok_s_dev_pct,verdict
+1,short,3.598,1.174,1.717,ok
+2,short,12.059,0.391,5.528,high
+4,short,12.74,0.262,0.255,high
+8,short,3.017,14.547,11.8,high

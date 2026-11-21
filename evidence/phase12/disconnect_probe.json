@@ -1,0 +1,196 @@
+{
+  "checked_at": "2026-11-21T21:46:00+08:00",
+  "verdict": "可分两层看。(1) 现 vendor 0.18.3：非流式 handler 等待期间不可探测（Handler 只拿 Request&/Response&，无 fd、无关闭标志、无回调；set_content 的 body 在 handler 返回后才写，写失败只置返回值）。同一版本 chunked provider 内 is_writable() 可探测（实测断连 209ms 后翻 false），外部五元组轮询也可探测（Windows 实测匹配率 100%、冲突率 0%）。(2) 上游 >=0.18.5 在 Request 上新增 is_connection_closed；用 v0.18.5 真头文件实测，非流式 handler 阻塞期轮询 200ms 即可在 FIN / RST 断开后 95ms 检出、正常请求 0 误判。结论：优先走应用层（升级依赖 + handler 内轮询），不必走网关，也不需要维护 fork；网关方案降为兜底。",
+  "items": [
+    {
+      "id": "S1-a-1",
+      "question": "httplib::Request 在 handler 内暴露哪些字段？是否暴露 fd / socket 句柄 / 连接关闭状态？",
+      "feasible": false,
+      "method": "source_read",
+      "evidence": [
+        "third_party/_deps/httplib-src/httplib.h:612-664",
+        "third_party/_deps/httplib-src/httplib.h:919",
+        "evidence/phase12/probe/logs/compile_e6.log:1-9"
+      ],
+      "quote": "struct Request { std::string method; std::string path; ... std::string remote_addr; int remote_port = -1; std::string local_addr; int local_port = -1;",
+      "interpretation": "0.18.3 公开字段仅 method/path/params/headers/body/remote_addr/remote_port/local_addr/local_port/version/target/files/ranges/matches/path_params/response_handler/content_receiver/progress（OpenSSL 下另有 const SSL* ssl）；无 fd、无 socket_t、无 is_closed 标志。Handler 签名 (const Request&, Response&) 拿不到 Stream，Stream::socket() 是内部抽象。"
+    },
+    {
+      "id": "S1-a-2",
+      "question": "非流式 handler 等待期间能否拿到 DataSink / is_writable()？",
+      "feasible": false,
+      "method": "source_read",
+      "evidence": [
+        "third_party/_deps/httplib-src/httplib.h:527-537",
+        "third_party/_deps/httplib-src/httplib.h:695-697",
+        "third_party/_deps/httplib-src/httplib.h:4473-4478",
+        "third_party/_deps/httplib-src/httplib.h:6458-6472"
+      ],
+      "quote": "data_sink.is_writable = [&]() -> bool { return strm.is_writable(); }; ... } else if (!content_provider(offset, end_offset - offset, data_sink)) {",
+      "interpretation": "DataSink 是 write_content 内局部对象，只传给 content provider 回调，不经 Request/Response 下发，普通 handler 无法调用 is_writable()。状态行与响应头在 provider 首次回调前已 flush（6458-6464），body 在 6469-6472 才写 —— 这既是 chunked 可探测的原因，也是非流式必然晚知的原因。"
+    },
+    {
+      "id": "S1-a-2b",
+      "question": "非流式（set_content）路径下写失败何时发生、handler 能否得知？",
+      "feasible": false,
+      "method": "source_read",
+      "evidence": [
+        "third_party/_deps/httplib-src/httplib.h:4444-4451",
+        "third_party/_deps/httplib-src/httplib.h:7139",
+        "third_party/_deps/httplib-src/httplib.h:7209-7239"
+      ],
+      "quote": "auto length = strm.write(d + offset, l - offset); if (length < 0) { return false; }",
+      "interpretation": "routing() 在 7139 调用 handler；handler 返回后才由 write_response_with_content 写出 body。write 失败只把 ret 置 false，不抛异常、不回传 handler，连接由 serve 循环事后 shutdown/close。靠 write 失败发现断连在非流式场景必然晚于 handler 结束。"
+    },
+    {
+      "id": "S1-a-3",
+      "question": "无 fd 的前提下，getsockopt(SO_ERROR) / send / select / MSG_PEEK 探针是否可行？",
+      "feasible": false,
+      "method": "source_read",
+      "evidence": [
+        "third_party/_deps/httplib-src/httplib.h:3113",
+        "third_party/_deps/httplib-src/httplib.h:3177",
+        "third_party/_deps/httplib-src/httplib.h:3218-3226",
+        "third_party/_deps/httplib-src/httplib.h:5952"
+      ],
+      "quote": "inline bool is_socket_alive(socket_t sock) { const auto val = detail::select_read(sock, 0, 0); ... return detail::read_socket(sock, &buf[0], sizeof(buf), MSG_PEEK) > 0; }",
+      "interpretation": "所有探针函数形参都是 socket_t，句柄只能由 SocketStream::socket() 取得（5952）。Request 无 fd 入口（见 S1-a-1 编译失败证据），应用层无法自建探针 —— '拿不到 fd' 前置成立。"
+    },
+    {
+      "id": "S1-a-3b",
+      "question": "若用 local/remote 端口反查 TCP 表（五元组）判断断连，匹配率与冲突率如何？多连接是否竞态？",
+      "feasible": true,
+      "method": "runtime_probe",
+      "evidence": [
+        "evidence/phase12/probe/logs/tcp.log",
+        "evidence/phase12/probe/probe_tcp.cpp",
+        "evidence/phase12/probe/logs/netstat_e2.log",
+        "evidence/phase12/probe/logs/netstat_e3.log"
+      ],
+      "quote": "concurrent total=20 unique=20 none=0 multiple=0 match_rate=100% conflict_rate=0%; concurrent enum latency us: min=420.2 avg=479.35 max=1245.7",
+      "interpretation": "Windows GetExtendedTcpTable(TCP_TABLE_OWNER_PID_ALL) 按 (local_addr,local_port,remote_addr,remote_port) 反查：串行 10/10、并发 20/20 唯一命中，匹配率 100%、冲突率 0%，单次枚举 240.5-1245.7us。状态可区分 ESTABLISHED（持有中）、CLOSE_WAIT（客户端 FIN 后服务端未关，50/50 次观测命中且行未消失）、已消失（RST 后 PCB 立即删除，E3 快照双向无记录）。限制：这是 handler 外旁路观测，检出延迟由轮询间隔决定；POSIX /proc/net/tcp 路径未实测（本机 Windows），只做了机制核对。",
+      "measured": {
+        "serial": {"samples": 10, "unique_hits": 10, "none": 0, "multiple": 0, "match_rate": 1.0, "conflict_rate": 0.0},
+        "concurrent": {"samples": 20, "unique_hits": 20, "none": 0, "multiple": 0, "match_rate": 1.0, "conflict_rate": 0.0, "enum_us": {"min": 240.5, "avg": 479.35, "max": 1245.7}},
+        "close_wait_observations": 50,
+        "posix_proc_net_tcp": "not_measured_on_windows_host"
+      }
+    },
+    {
+      "id": "S1-a-4",
+      "question": "Windows 侧，vendor 0.18.3 下 handler 内是否可用 send()/getsockopt(SO_ERROR) 探测？",
+      "feasible": false,
+      "method": "runtime_probe",
+      "evidence": [
+        "evidence/phase12/probe/logs/compile_e6.log",
+        "evidence/phase12/probe/logs/server.err",
+        "evidence/phase12/probe/logs/server.log"
+      ],
+      "quote": "probe_e6.cpp:18:19: error: 'struct httplib::Request' has no member named 'fd'; probe_e6.cpp:20:21: error: 'struct httplib::Request' has no member named 'sock'",
+      "interpretation": "handler 拿不到 fd 的前置在 Windows 同样成立，编译期即证伪。补充实测：FIN 与 RST 在 handler 阻塞期完全不可区分 —— handler 均睡满 3010ms 正常返回，无异常、无信号（Windows 无 SIGPIPE）、stderr 0 字节、set_content 0ms 返回（仅缓冲），后续 ping 200 正常。"
+    },
+    {
+      "id": "S1-a-4b",
+      "question": "0.18.3 chunked 路径的 is_writable() 是否真能在断连后翻 false（对照真值）？",
+      "feasible": true,
+      "method": "runtime_probe",
+      "evidence": [
+        "evidence/phase12/probe/logs/server.log",
+        "evidence/phase12/probe/logs/client_e4.log",
+        "third_party/_deps/httplib-src/httplib.h:4473"
+      ],
+      "quote": "/stream callback #12 offset=0 elapsed=2280ms is_writable=false; /stream writable=false at callback #12 elapsed=2280ms; abort provider",
+      "interpretation": "客户端 2071ms 断开（chunk #11 后中止），服务端第 12 次回调（2280ms）is_writable 翻 false，滞后约 209ms（一个 200ms 轮询周期）。这正是上游 is_connection_closed 采用的同一判据（select + is_socket_alive），故该判据在 Windows 有效已被两个独立路径支持。",
+      "measured": {"detect_latency_ms": 209, "poll_interval_ms": 200, "is_writable_false_at_callback": 12}
+    },
+    {
+      "id": "S1-a-5",
+      "question": "上游是否已有更新的断连 API（只读核对，不落地升级）？",
+      "feasible": true,
+      "method": "web_read",
+      "evidence": [
+        "https://github.com/yhirose/cpp-httplib/tree/v0.18.5",
+        "https://github.com/yhirose/cpp-httplib/issues/2017",
+        "https://github.com/yhirose/cpp-httplib/issues/1724",
+        "https://github.com/yhirose/cpp-httplib/releases"
+      ],
+      "quote": "std::function<bool()> is_connection_closed = []() { return true; };  // Request（httplib.h:631）\nreq.is_connection_closed = [&]() { return !detail::is_socket_alive(strm.socket()); };  // 服务端绑定（httplib.h:7222）",
+      "interpretation": "已取 v0.18.5 真头文件核对（clone tag v0.18.5，提交 37798003220c997c4a6dc30d35e76d478b53a6e2，CPPHTTPLIB_VERSION \"0.18.5\"）：Request 新增 std::function<bool()> is_connection_closed，服务端在路由前绑定到 !is_socket_alive(strm.socket())。0.18.3 无此成员。上游仍未在 Request 上暴露原生 socket 句柄 getter；更早诉求 issue #1724 只补了 DataSink::is_writable()。releases 页 Latest 为 v0.67.0，但中间版本签名未核对。",
+      "measured": {"vendor_version": "0.18.3", "api_introduced_in": "v0.18.5", "verified_by": "upstream_header_clone_and_grep"}
+    },
+    {
+      "id": "S1-a-5b",
+      "question": "v0.18.5 的 is_connection_closed 在 Windows 非流式 handler 阻塞期是否实测可用？",
+      "feasible": true,
+      "method": "runtime_probe",
+      "evidence": [
+        "evidence/phase12/probe/probe_isconnclosed.cpp",
+        "evidence/phase12/probe/logs/e7_server.log",
+        "evidence/phase12/probe/logs/e7_fin.log",
+        "evidence/phase12/probe/logs/e7_rst.log",
+        "evidence/phase12/probe/logs/e7_normal.log",
+        "evidence/phase12/probe/logs/e7_compile.log"
+      ],
+      "quote": "[21:37:40.698] [srv] DETECTED closed at poll #3 elapsed=413ms (epoch=1795268260698)\n[21:37:40.604] [cli] fin closesocket rc=0 close_epoch_ms=1795268260603 (FIN)",
+      "interpretation": "用克隆的上游 v0.18.5 头文件重编译探针（0 warning/0 error）。200ms 轮询下：FIN 断开后 95ms 检出（第 3 次轮询），RST 断开后 95ms 检出，正常请求 15/15 次轮询全 false（0 误判）。检出后 set_content 正常返回、stderr 0 字节、服务存活（ping 200）。FIN/RST 在该 API 内不可区分；延迟由轮询间隔线性支配。",
+      "measured": {"poll_interval_ms": 200, "fin_detect_latency_ms": 95, "rst_detect_latency_ms": 95, "false_positive_polls": 0, "upstream_tag_commit": "37798003220c997c4a6dc30d35e76d478b53a6e2"}
+    }
+  ],
+  "recommended_path": {
+    "code": "app_layer_via_0.18.5_polling",
+    "primary": "路径 A（应用层可探测）：把 vendor httplib 从 0.18.3 升到 0.18.5（最小跳版，不追 v0.67.0 以免 API 漂移），在非流式等待循环里以 <=1s 粒度轮询 req.is_connection_closed()，命中后 core.cancel(req.req_id)，响应按 Cancelled 收尾。实测依据：FIN/RST 均在 200ms 轮询下 95ms 检出，正常请求 0 误判；不改 chunked 语义与状态码契约，也不是 fork。",
+    "minimal_interface": {
+      "form": "沿用上游同名同义成员 Request::is_connection_closed（std::function<bool()>），由连接循环绑定到 !detail::is_socket_alive(strm.socket())；应用侧只增加一个轮询读取点，不新增自造 API。",
+      "contract_impact": "无状态码/响应体契约变化；不提前发送状态行；chunked 帧序不变；取消后按 request deadline 收尾，llmopt_requests_cancelled_total +1。",
+      "polling": "非流式 handler 等待循环内 200ms-1s 一次；检出延迟 = 轮询间隔 + 一次非阻塞 select/peek（实测 95ms @200ms 间隔）。"
+    },
+    "upgrade_notes": {
+      "api_drift_observed": "0.18.3 -> 0.18.5 的 Result/Client 错误读取 API 未变：Result 仍是 operator bool() + Result::error()，没有 has_value()；Client 没有 get_error()。沿用旧写法会复现 'no member named has_value' / 'no member named get_error' 编译错误（本探针已改用 static_cast<bool>(r) 与 r.error()，一次编译通过）。",
+      "footgun_default_value": "上游 is_connection_closed 的默认值是返回 true（视为已断开）。若某条构造路径漏绑定，它会把请求误判为断连并触发取消。实现时必须在连接入口显式绑定，并加一条单测：未绑定的 Request 不应导致取消（建议本项目侧把默认语义定为 false 或直接不暴露默认构造）。"
+    },
+    "zero_dependency_alternative": {
+      "form": "请求进入时登记 (local_port, remote_port) -> req_id，后台线程每 1s 用 GetExtendedTcpTable（Linux 用 /proc/net/tcp）反查，行消失或 CLOSE_WAIT 即 cancel",
+      "evidence": "本文件 S1-a-3b：匹配率 100%、冲突率 0%、单次枚举 <=1.25ms；检出延迟由 1s 轮询决定",
+      "cost": "需要平台双实现 + 连接复用/端口复用映射维护，复杂度高于升级依赖；仅在明确不允许动依赖时选用"
+    },
+    "fallback_gateway": {
+      "config": "scripts/release/nginx-disconnect.conf：proxy_ignore_client_abort off + upstream 取消（SPEC-DEBUG1 路径 B）",
+      "when": "仅在依赖升级被否（例如需要与某些内部镜像/锁定版本共存）时采用",
+      "verify_points": [
+        "1) 客户端断开后 Nginx 是否真的关闭 upstream 连接：抓包或服务端侧观测 CLOSE_WAIT->消失的时间差，目标 <=2s；同时用慢客户端（慢读不慢算）验证不误杀。",
+        "2) 取消后的响应契约：客户端收到的截断响应 / 499 记录是否与 docs/错误面规范.md 一致，服务端是否仍按 request deadline 收尾，不出现 5xx 语义漂移。",
+        "3) 取消点在 prefill 中途时的收尾：llmopt_requests_cancelled_total +1、kv_used 10s 内回落、keep-alive 复用连接上的后续请求不被误取消。"
+      ]
+    },
+    "open_verifications": [
+      "0.18.5 -> 0.67.0 之间该成员是否改名/改语义未核对，故建议停在 0.18.5 而非追最新。",
+      "高并发（P=4 以上）下 is_socket_alive 的 select/peek 单次开销未测；虽然按 200ms-1s 一次轮询摊薄，仍建议在 S1-b 里带一条 8 并发下的 handler 开销取样。",
+      "POSIX /proc/net/tcp 五元组路径在 Linux 上未实测（本机 Windows）；若最终选零依赖方案需补。",
+      "keep-alive 连接复用场景未实测：同一 TCP 连接上连续两个请求，第一个取消后第二个是否被误判为断连（实现时须在请求边界重置绑定）。"
+    ]
+  },
+  "evidence_refs": [
+    {"path": "third_party/_deps/httplib-src/httplib.h", "what": "0.18.3 源码：Request 612-664、DataSink 527-537、set_chunked_content_provider 695-697、write 4444-4478、响应写出 6458-6472、serve 循环 7209-7239、is_socket_alive 3218-3226"},
+    {"path": "evidence/phase12/probe/probe_server.cpp", "what": "探针服务端：/slow 非流式 + /stream chunked 对照（0.18.3）"},
+    {"path": "evidence/phase12/probe/probe_client.cpp", "what": "探针客户端：E1 正常 / E2 FIN / E3 RST / E4 chunked 中止"},
+    {"path": "evidence/phase12/probe/probe_tcp.cpp", "what": "E5 GetExtendedTcpTable 五元组反查与匹配率统计"},
+    {"path": "evidence/phase12/probe/probe_e6.cpp", "what": "E6 字段可见性编译探针（预期失败）"},
+    {"path": "evidence/phase12/probe/probe_isconnclosed.cpp", "what": "E7：用上游 v0.18.5 头文件验证 is_connection_closed（FIN/RST/正常三变体）"},
+    {"path": "evidence/phase12/probe/run_probe.ps1", "what": "编译/运行/取证驱动脚本"},
+    {"path": "evidence/phase12/probe/logs/server.log", "what": "E1-E4 服务端时间戳日志（含 is_writable=false@#12）"},
+    {"path": "evidence/phase12/probe/logs/server.err", "what": "E1-E4 服务端 stderr（0 字节，无异常）"},
+    {"path": "evidence/phase12/probe/logs/client_e1.log", "what": "基线 200/slow-ok/3012ms"},
+    {"path": "evidence/phase12/probe/logs/client_e2.log", "what": "FIN 断连客户端侧证据"},
+    {"path": "evidence/phase12/probe/logs/client_e3.log", "what": "RST 断连（SO_LINGER{1,0}）客户端侧证据"},
+    {"path": "evidence/phase12/probe/logs/client_e4.log", "what": "chunked 中止 2071ms/11 chunks"},
+    {"path": "evidence/phase12/probe/logs/netstat_e2.log", "what": "FIN 后 TIME_WAIT 快照"},
+    {"path": "evidence/phase12/probe/logs/netstat_e3.log", "what": "RST 后 PCB 立即消失快照"},
+    {"path": "evidence/phase12/probe/logs/tcp.log", "what": "E5 串行/并发匹配率、冲突率、枚举耗时、状态分布"},
+    {"path": "evidence/phase12/probe/logs/compile_e6.log", "what": "handler 无 fd/sock 的编译错误原文"},
+    {"path": "evidence/phase12/probe/logs/compile_server.log|compile_client.log|compile_tcp.log", "what": "三份 0 字节编译日志（无 warning/error，退出码 0）"},
+    {"path": "evidence/phase12/probe/logs/e7_server.log", "what": "E7 三变体 handler 内轮询真值（含 DETECTED 与 epoch）"},
+    {"path": "evidence/phase12/probe/logs/e7_fin.log|e7_rst.log|e7_normal.log", "what": "E7 客户端侧 close epoch 与正常对照"},
+    {"path": "evidence/phase12/probe/logs/e7_server.err|e7_compile.log", "what": "E7 stderr 与编译日志（均 0 字节）"},
+    {"path": "docs/SPEC-DEBUG1.md:103-124", "what": "S1-a 五项要求与 S1-b 路径 A/B、验收标准（本文件为其出口）"}
+  ]
+}
