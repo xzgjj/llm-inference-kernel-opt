@@ -48,6 +48,10 @@ struct ServerConfig {
     std::string log_level = "info";
     std::int32_t threads = 0;
     std::int32_t n_gpu_layers = 0;
+    // 前缀 donor 槽条数（每条按 ctx_tokens 预留 KV）；8B 以上建议 0–1，默认 4 沿用旧口径。
+    std::int32_t donor_slots = 4;
+    // KV 缓存类型：f16（默认）/ q8_0（减半，8B 以上档推荐）/ f32。
+    std::string kv_cache_type = "f16";
     std::string backend = "llama"; // llama|stub；stub 需 LLMOPT_ALLOW_STUB=1
     // 阶段 6 服务边界：限流、排空、鉴权与每步 trace 采样。
     double rate_limit_rps = 0.0; // 0=关

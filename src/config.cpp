@@ -224,6 +224,10 @@ ErrCode apply_core_arg(ServerConfig& cfg, const std::string& key, const std::str
         return parse_int(value, cfg.threads) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--n-gpu-layers") {
         return parse_int(value, cfg.n_gpu_layers) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--donor-slots") {
+        return parse_int(value, cfg.donor_slots) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--kv-cache-type") {
+        cfg.kv_cache_type = value;
     } else if (key == "--log-level") {
         cfg.log_level = value;
     } else if (key == "--backend") {
@@ -371,8 +375,20 @@ ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
     if (validate_service_limits(cfg, message) != ErrCode::Ok) {
         return ErrCode::InvalidJson;
     }
-    if (cfg.safety_ratio < 0.80 || cfg.safety_ratio > 0.85) {
-        message = "safety-ratio 必须在 0.80..0.85";
+    if (cfg.safety_ratio < 0.80 || cfg.safety_ratio > 0.95) {
+        message = "safety-ratio 必须在 0.80..0.95";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.donor_slots < 0 || cfg.donor_slots > 8) {
+        message = "donor-slots 必须在 0..8";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.donor_slots == 0 && cfg.enable_prefix_cache && cfg.n_gpu_layers > 0) {
+        message = "donor-slots=0 需同时 --disable-prefix-cache（否则保留序列占满后端槽位）";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.kv_cache_type != "f16" && cfg.kv_cache_type != "q8_0" && cfg.kv_cache_type != "f32") {
+        message = "kv-cache-type 必须是 f16 / q8_0 / f32";
         return ErrCode::InvalidJson;
     }
     if (cfg.backend != "llama" && cfg.backend != "stub") {
@@ -442,6 +458,7 @@ ErrCode load_env_ints(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sources
             {"LLMOPT_BLOCK_SIZE", "block-size", &cfg.block_tokens},
             {"LLMOPT_THREADS", "threads", &cfg.threads},
             {"LLMOPT_N_GPU_LAYERS", "n-gpu-layers", &cfg.n_gpu_layers},
+            {"LLMOPT_DONOR_SLOTS", "donor-slots", &cfg.donor_slots},
             {"LLMOPT_RATE_LIMIT_BURST", "rate-limit-burst", &cfg.rate_limit_burst},
             {"LLMOPT_DRAIN_DEADLINE_SECONDS", "drain-deadline-seconds",
              &cfg.drain_deadline_seconds},
@@ -769,10 +786,8 @@ bool effective_prefix_cache(bool requested, bool backend_supports) noexcept {
 
 namespace {
 
-constexpr std::int32_t kDonorSlots = 4; // 与 main 的 donor 槽一致，只由派生层定义
-
 std::int32_t donor_slots_for(const ServerConfig& cfg) noexcept {
-    return (cfg.enable_prefix_cache && cfg.n_gpu_layers > 0) ? kDonorSlots : 0;
+    return (cfg.enable_prefix_cache && cfg.n_gpu_layers > 0) ? cfg.donor_slots : 0;
 }
 
 } // namespace
@@ -806,6 +821,7 @@ ModelConfig make_model_config(const ServerConfig& cfg, std::int32_t concurrency)
     model_cfg.n_ubatch = 512;
     model_cfg.threads = cfg.threads;
     model_cfg.n_gpu_layers = cfg.n_gpu_layers;
+    model_cfg.kv_cache_type = cfg.kv_cache_type;
     return model_cfg;
 }
 
@@ -816,7 +832,7 @@ KVConfig make_kv_config(const ServerConfig& cfg, std::int32_t concurrency, bool 
     kv_config.num_blocks = std::max<std::int32_t>(tokens / cfg.block_tokens, 1);
     kv_config.watermark_ratio = cfg.watermark_ratio;
     kv_config.enable_prefix_cache = prefix_cache;
-    kv_config.max_donors = prefix_cache ? kDonorSlots : 0;
+    kv_config.max_donors = prefix_cache ? cfg.donor_slots : 0;
     return kv_config;
 }
 

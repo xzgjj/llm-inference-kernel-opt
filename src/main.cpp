@@ -79,6 +79,11 @@ void print_budget(const GateResult& gate) {
               << "MiB required=" << to_mib(budget.required_bytes)
               << "MiB free=" << to_mib(budget.free_bytes) << "MiB safety=" << budget.safety_ratio
               << " decision=" << gate_decision_name(gate.decision) << "\n";
+    if (budget.host_bytes > 0) {
+        std::cout << "estimate-split: model_vram=" << to_mib(budget.model_vram_bytes)
+                  << "MiB kv_vram=" << to_mib(budget.kv_vram_bytes)
+                  << "MiB host=" << to_mib(budget.host_bytes) << "MiB\n";
+    }
     for (const std::string& reason : gate.reasons) {
         std::cout << "gate: " << reason << "\n";
     }
@@ -140,11 +145,35 @@ std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::
     budget.kv_bytes = estimate_kv_bytes(meta, ctx_total);
     budget.required_bytes = budget.model_bytes + budget.kv_bytes;
     budget.safety_ratio = cfg.safety_ratio;
+    // 部分卸载：按 n_gpu_layers 把权重与 KV 拆成显存/内存两池，其余仍走单池口径。
+    const std::int32_t layers = meta.block_count;
+    std::int32_t offloaded = cfg.n_gpu_layers;
+    if (offloaded < 0) {
+        offloaded = 0;
+    }
+    if (layers > 0 && offloaded > layers) {
+        offloaded = layers;
+    }
+    if (layers > 0 && offloaded < layers) {
+        const double ratio = static_cast<double>(offloaded) / static_cast<double>(layers);
+        budget.model_vram_bytes =
+                static_cast<std::int64_t>(static_cast<double>(budget.model_bytes) * ratio);
+        budget.kv_vram_bytes =
+                static_cast<std::int64_t>(static_cast<double>(budget.kv_bytes) * ratio);
+        budget.host_bytes = (budget.model_bytes - budget.model_vram_bytes) +
+                            (budget.kv_bytes - budget.kv_vram_bytes);
+    }
     const CapabilitySnapshot snapshot = probe_capabilities();
     gate = evaluate_gate(snapshot, budget, cfg.mode, cfg.allow_force_on);
     print_budget(gate);
     if (!gate.allow_start) {
-        return gate.budget.required_bytes > gate.budget.free_bytes ? kExitResource : kExitGate;
+        bool over = gate.budget.required_bytes > gate.budget.free_bytes;
+        if (gate.budget.host_bytes > 0) {
+            const std::int64_t vram_used = gate.budget.model_vram_bytes + gate.budget.kv_vram_bytes;
+            over = vram_used > gate.budget.free_bytes ||
+                   gate.budget.host_bytes > snapshot.ram_available_bytes;
+        }
+        return over ? kExitResource : kExitGate;
     }
     return kExitOk;
 }

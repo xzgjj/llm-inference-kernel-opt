@@ -83,3 +83,38 @@ TEST_CASE("有 GPU 时以显存空闲量为判据") {
     CHECK(result.decision == GateDecision::Eligible);
     CHECK(result.budget.free_bytes == 4096 * kMib);
 }
+
+TEST_CASE("部分卸载：显存与内存分池判据，全模型不再压显存") {
+    CapabilitySnapshot snapshot = snapshot_with(2048 * kMib);
+    snapshot.gpu_present = true;
+    snapshot.vram_free_bytes = 1024 * kMib;
+    EstBudget budget;
+    budget.model_bytes = 1000 * kMib;
+    budget.kv_bytes = 200 * kMib;
+    budget.required_bytes = 1200 * kMib;
+    budget.safety_ratio = 0.80;
+    budget.model_vram_bytes = 700 * kMib;
+    budget.kv_vram_bytes = 100 * kMib;
+    budget.host_bytes = 400 * kMib;
+    // 单池口径会判 1200 > 1024 硬拦；分池后 800/1024 与 400/2048 都放得下。
+    const GateResult result = evaluate_gate(snapshot, budget, GateMode::Auto, false);
+    CHECK(result.decision == GateDecision::Eligible);
+    CHECK(result.allow_start);
+}
+
+TEST_CASE("部分卸载：任一池硬超都拒绝") {
+    CapabilitySnapshot snapshot = snapshot_with(2048 * kMib);
+    snapshot.gpu_present = true;
+    snapshot.vram_free_bytes = 1024 * kMib;
+    EstBudget budget;
+    budget.model_bytes = 1000 * kMib;
+    budget.kv_bytes = 200 * kMib;
+    budget.required_bytes = 1200 * kMib;
+    budget.safety_ratio = 0.80;
+    budget.model_vram_bytes = 900 * kMib;
+    budget.kv_vram_bytes = 140 * kMib;
+    budget.host_bytes = 160 * kMib;
+    const GateResult vram_over = evaluate_gate(snapshot, budget, GateMode::Off, true);
+    CHECK(vram_over.decision == GateDecision::Blocked);
+    CHECK_FALSE(vram_over.allow_start);
+}

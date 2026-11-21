@@ -84,6 +84,7 @@ enum class MetricId : std::uint16_t {
     VramMib,
     VramPeakMib,
     VramProbeOk,
+    VramDeviceMib,
     GateEligible,
     GateDegraded,
     GateBlocked,

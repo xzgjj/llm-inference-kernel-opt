@@ -6,15 +6,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-SERVER=${SERVER:-./build-wsl/llmopt_server}
-MODEL=${MODEL:-/root/llm-src/models/qwen2.5-0.5b-q4.gguf}
+SERVER=${SERVER:-/root/llmopt-build/llmopt_server}
+MODEL=${MODEL:-/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf}
 PORT=${PORT:-18080}
 REQUESTS=${REQUESTS:-8}
 MAX_TOKENS=${MAX_TOKENS:-32}
 CONCURRENCY=${CONCURRENCY:-1,2,4}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-4}
 BATCH_TOKENS=${BATCH_TOKENS:-1024}
-NGL=${NGL:-99}
+CTX_TOKENS=${CTX_TOKENS:-2048}
+NGL=${NGL:-30}
+# 部分卸载时 CPU 侧承担 decode 主力：16 逻辑核留 4 个给主线程/GPU 喂数，实测 12 最优。
+THREADS=${THREADS:-12}
+DONOR_SLOTS=${DONOR_SLOTS:-4}
+KV_CACHE_TYPE=${KV_CACHE_TYPE:-f16}
 THREADS=${THREADS:-0}
 OUT=${OUT:-evidence/cb_curve.csv}
 METRICS=${METRICS:-evidence/cb_metrics.txt}
@@ -36,8 +41,9 @@ fi
 
 rm -f "$LOG"
 "$SERVER" --model "$MODEL" --host 127.0.0.1 --port "$PORT" --backend llama \
-    --mode off --ctx-tokens 1024 --max-concurrency "$MAX_CONCURRENCY" --max-num-batched-tokens "$BATCH_TOKENS" \
-    --block-size 16 --n-gpu-layers "$NGL" --threads "$THREADS" --log-level info "${PREFIX_FLAG[@]}" >"$LOG" 2>&1 &
+    --mode off --ctx-tokens "$CTX_TOKENS" --max-concurrency "$MAX_CONCURRENCY" --max-num-batched-tokens "$BATCH_TOKENS" \
+    --block-size 16 --n-gpu-layers "$NGL" --threads "$THREADS" \
+    --donor-slots "$DONOR_SLOTS" --kv-cache-type "$KV_CACHE_TYPE" --log-level info "${PREFIX_FLAG[@]}" >"$LOG" 2>&1 &
 PID=$!
 trap 'kill "$PID" 2>/dev/null || true' EXIT
 

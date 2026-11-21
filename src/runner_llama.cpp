@@ -127,6 +127,17 @@ public:
         cparams.n_ubatch = static_cast<std::uint32_t>(
                 std::min(std::max(config.n_ubatch, 1), static_cast<std::int32_t>(cparams.n_batch)));
         cparams.n_seq_max = static_cast<std::uint32_t>(std::max(config.n_seq_max, 1));
+        // KV 量化：q8_0 把 KV 体积减半，8B 以上档位靠它换上下文与并发空间。
+        if (config.kv_cache_type == "q8_0") {
+            cparams.type_k = GGML_TYPE_Q8_0;
+            cparams.type_v = GGML_TYPE_Q8_0;
+        } else if (config.kv_cache_type == "f32") {
+            cparams.type_k = GGML_TYPE_F32;
+            cparams.type_v = GGML_TYPE_F32;
+        } else {
+            cparams.type_k = GGML_TYPE_F16;
+            cparams.type_v = GGML_TYPE_F16;
+        }
         const std::int32_t threads =
                 config.threads > 0 ? config.threads
                                    : static_cast<std::int32_t>(std::thread::hardware_concurrency());

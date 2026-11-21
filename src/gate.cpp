@@ -116,6 +116,29 @@ CapabilitySnapshot probe_capabilities() {
     return snapshot;
 }
 
+namespace {
+// 软超预算的统一处置：off 只记录、auto 拒绝、force_on 需显式开关并降并发。
+void mark_degraded(GateMode mode, bool allow_force_on, const std::string& reason,
+                   GateResult& result) {
+    result.decision = GateDecision::Degraded;
+    result.reasons.push_back(reason);
+    if (mode == GateMode::Auto) {
+        result.allow_start = false;
+        result.reasons.push_back("mode=auto 在软超预算时拒绝启动");
+    } else if (mode == GateMode::ForceOn) {
+        if (!allow_force_on) {
+            result.allow_start = false;
+            result.reasons.push_back("force_on 需显式 --allow-force-on");
+        } else {
+            result.downgrade_concurrency = true;
+            result.reasons.push_back("FORCE_ON 横幅：已降并发，风险自负");
+        }
+    } else {
+        result.reasons.push_back("mode=off 仅记录，不拦截");
+    }
+}
+} // namespace
+
 // L2+L3：硬超预算恒拒绝；软超预算按 off/auto/force_on 三档处置。
 GateResult evaluate_gate(const CapabilitySnapshot& snapshot, const EstBudget& budget, GateMode mode,
                          bool allow_force_on) {
@@ -128,6 +151,29 @@ GateResult evaluate_gate(const CapabilitySnapshot& snapshot, const EstBudget& bu
         for (const std::string& field : snapshot.missing_fields) {
             result.reasons.push_back("missing:" + field);
         }
+        return result;
+    }
+    // 部分卸载：已卸载层算显存、其余算内存，分别判据；避免把整份权重压在显存上。
+    if (snapshot.gpu_present && budget.host_bytes > 0) {
+        const std::int64_t vram_req = budget.model_vram_bytes + budget.kv_vram_bytes;
+        const std::int64_t vram_free = snapshot.vram_free_bytes;
+        result.budget.free_bytes = vram_free;
+        if (vram_req > vram_free || budget.host_bytes > snapshot.ram_available_bytes) {
+            result.decision = GateDecision::Blocked;
+            result.allow_start = false;
+            result.reasons.push_back(vram_req > vram_free ? "已卸载部分超过可用显存，拒绝启动"
+                                                          : "未卸载部分超过可用内存，拒绝启动");
+            return result;
+        }
+        const double vram_soft = static_cast<double>(vram_free) * budget.safety_ratio;
+        const double host_soft =
+                static_cast<double>(snapshot.ram_available_bytes) * budget.safety_ratio;
+        if (static_cast<double>(vram_req) <= vram_soft &&
+            static_cast<double>(budget.host_bytes) <= host_soft) {
+            result.decision = GateDecision::Eligible;
+            return result;
+        }
+        mark_degraded(mode, allow_force_on, "分池预算超过 free×safety_ratio", result);
         return result;
     }
     const std::int64_t free_bytes = (snapshot.gpu_present && snapshot.vram_free_bytes > 0)
@@ -145,22 +191,7 @@ GateResult evaluate_gate(const CapabilitySnapshot& snapshot, const EstBudget& bu
         result.decision = GateDecision::Eligible;
         return result;
     }
-    result.decision = GateDecision::Degraded;
-    result.reasons.push_back("required_bytes 超过 free×safety_ratio");
-    if (mode == GateMode::Auto) {
-        result.allow_start = false;
-        result.reasons.push_back("mode=auto 在软超预算时拒绝启动");
-    } else if (mode == GateMode::ForceOn) {
-        if (!allow_force_on) {
-            result.allow_start = false;
-            result.reasons.push_back("force_on 需显式 --allow-force-on");
-        } else {
-            result.downgrade_concurrency = true;
-            result.reasons.push_back("FORCE_ON 横幅：已降并发，风险自负");
-        }
-    } else {
-        result.reasons.push_back("mode=off 仅记录，不拦截");
-    }
+    mark_degraded(mode, allow_force_on, "required_bytes 超过 free×safety_ratio", result);
     return result;
 }
 

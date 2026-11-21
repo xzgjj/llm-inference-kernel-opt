@@ -135,7 +135,7 @@ TEST_CASE("端口、上下文、并发与安全比例做范围校验") {
           ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--max-concurrency", "65"}, cfg, message) ==
           ErrCode::ConfigInvalid);
-    CHECK(load({"--model", "m.gguf", "--safety-ratio", "0.9"}, cfg, message) ==
+    CHECK(load({"--model", "m.gguf", "--safety-ratio", "0.96"}, cfg, message) ==
           ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--mode", "nope"}, cfg, message) == ErrCode::ConfigInvalid);
 }

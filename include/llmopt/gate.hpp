@@ -27,6 +27,11 @@ struct EstBudget {
     std::int64_t required_bytes = 0;
     std::int64_t free_bytes = 0;
     double safety_ratio = 0.80;
+    // 部分卸载（n_gpu_layers < 层数）时的分池预算：显存侧与内存侧分开判据。
+    // 全量卸载时保持为 0，走原有单池路径，行为不变。
+    std::int64_t model_vram_bytes = 0;
+    std::int64_t kv_vram_bytes = 0;
+    std::int64_t host_bytes = 0;
 };
 
 enum class GateDecision : std::uint8_t { Eligible, Degraded, Blocked };

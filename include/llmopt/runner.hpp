@@ -19,6 +19,7 @@ struct ModelConfig {
     std::int32_t n_seq_max = 1;
     std::int32_t threads = 0;
     std::int32_t n_gpu_layers = 0;
+    std::string kv_cache_type = "f16"; // f16 / q8_0 / f32；q8_0 可把 8B 以上的 KV 占用减半
 };
 
 class ModelRunner {

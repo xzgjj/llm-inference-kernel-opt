@@ -1,0 +1,27 @@
+{
+  "seed": 7,
+  "server": "/root/llmopt-build/llmopt_server",
+  "model": "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+  "backend": "llama",
+  "host": "127.0.0.1",
+  "concurrency": [1, 2, 4],
+  "repeats": 2,
+  "warmup_requests": 5,
+  "max_tokens": 32,
+  "ctx_tokens": 1024,
+  "max_num_batched_tokens": 1024,
+  "queue_capacity": 64,
+  "tier_timeout_ms": 600000,
+  "request_timeout_s": 120,
+  "idle_between_cells_s": 2,
+  "tiers": [
+    {"name": "short", "max_prompt_tokens": 128, "n": 30}
+  ],
+  "sampling": {
+    "temperature": 0.0,
+    "top_k": 1,
+    "top_p": 1.0,
+    "min_p": 0.0,
+    "repeat_penalty": 1.0
+  }
+}

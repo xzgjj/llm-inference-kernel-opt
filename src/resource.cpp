@@ -124,6 +124,31 @@ bool probe_vram_impl(double& out_mib) {
     return parse_compute_apps(text, current_pid(), out_mib);
 }
 
+bool probe_vram_device_impl(double& out_mib) {
+#ifdef _WIN32
+    const char* command = "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>NUL";
+#else
+    const char* command =
+            "nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null";
+#endif
+    FILE* pipe = open_pipe(command);
+    if (pipe == nullptr) {
+        return false;
+    }
+    char buffer[64] = {0};
+    const bool got = std::fgets(buffer, sizeof(buffer), pipe) != nullptr;
+    const int status = close_pipe(pipe);
+    if (!got || status != 0) {
+        return false;
+    }
+    const double value = std::atof(buffer);
+    if (value <= 0.0) {
+        return false;
+    }
+    out_mib = value;
+    return true;
+}
+
 } // namespace
 
 ResourceSampler::ResourceSampler(MetricsRegistry& metrics, std::chrono::milliseconds interval)
@@ -202,6 +227,16 @@ void ResourceSampler::publish(const ResourceReading& reading) {
         metrics_.set_float(MetricId::VramMib, nan);
         metrics_.set_float(MetricId::VramPeakMib, vram_peak_mib_ > 0.0 ? vram_peak_mib_ : nan);
         metrics_.set(MetricId::VramProbeOk, 0);
+        // 进程级采不到时（WSL 的 pid 命名空间），补一条整卡设备级序列，明确不等价于本进程。
+        static std::int32_t device_tick = 0;
+        if (++device_tick % 4 == 1) {
+            double device_mib = 0.0;
+            if (probe_vram_device_impl(device_mib)) {
+                metrics_.set_float(MetricId::VramDeviceMib, device_mib);
+            } else {
+                metrics_.set_float(MetricId::VramDeviceMib, nan);
+            }
+        }
     }
 }
 
