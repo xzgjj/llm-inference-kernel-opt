@@ -114,6 +114,8 @@ def main() -> int:
             "rss_growth_ratio": growth,
         }
         if args.report:
+            # CI 首次跑到 nightly 时 build/evidence 可能不存在；先建目录，避免 30 min 后写报告才失败。
+            args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(json.dumps(report, indent=2), encoding="utf-8")
         assert baseline is not None, "未采到 llmopt_rss_mib"
         assert counters["errors"] == 0, f"出现非 200 响应：{counters['errors']}"
