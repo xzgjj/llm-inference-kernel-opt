@@ -90,6 +90,10 @@ if(LLMOPT_ENABLE_LLAMA)
     endif()
 endif()
 
+# 阶段 12 S5：崩溃注入 fixture，由 Python 用例断言 dump 内容与退出语义。
+add_executable(crash_fixture tools/crash_fixture.cc)
+target_link_libraries(crash_fixture PRIVATE llmopt_core llmopt_warnings)
+
 if(Python3_Interpreter_FOUND)
     add_test(NAME integration_server_smoke
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_smoke.py
@@ -144,6 +148,33 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(tenant_keys_test PROPERTIES
                          LABELS "integration;fast;hermetic")
     set_tests_properties(tenant_keys_test PROPERTIES TIMEOUT 120)
+
+    # 阶段 12 S5：SIGSEGV → logs/crash dump（含 signal/pid/version）→ 非零退出，只留 2 份。
+    add_test(NAME crash_dump_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_crash_dump.py
+                     $<TARGET_FILE:crash_fixture>)
+    set_tests_properties(crash_dump_test PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(crash_dump_test PROPERTIES TIMEOUT 120)
+
+    # 阶段 12 S4：同 id 多摘要轮换 + Windows 轮询热加载（Linux 走 SIGHUP）。
+    add_test(NAME keys_reload_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_keys_reload.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(keys_reload_test PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(keys_reload_test PROPERTIES TIMEOUT 180)
+
+    # 阶段 12 S1：非流式断连 → ≤2s 取消 → KV 归零。
+    add_test(NAME disconnect_cancel_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_disconnect_cancel.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(disconnect_cancel_test PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(disconnect_cancel_test PROPERTIES TIMEOUT 120)
 
     # 6-G4：令牌桶超额 429 + Retry-After，回填后恢复。
     add_test(NAME backpressure_test

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(llmopt LANGUAGES CXX)
+project(llmopt VERSION 0.12.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,7 +24,7 @@ add_library(llmopt_warnings INTERFACE)
 target_compile_options(llmopt_warnings INTERFACE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Werror -Wpedantic -Wshadow>
     $<$<CXX_COMPILER_ID:MSVC>:/W4 /WX>)
-target_compile_definitions(llmopt_warnings INTERFACE LLMOPT_VERSION="0.1.0")
+target_compile_definitions(llmopt_warnings INTERFACE LLMOPT_VERSION="${PROJECT_VERSION}")
 
 # 覆盖率统一挂在这个接口库上：构建与链接两侧都要 --coverage，否则只出 .gcno 不出 .gcda。
 add_library(llmopt_coverage INTERFACE)
@@ -52,13 +52,14 @@ add_library(llmopt_core STATIC
     src/gate.cpp
     src/gguf.cpp
     src/runner_stub.cpp
-    src/log.cpp)
+    src/log.cpp
+    src/crash.cpp)
 target_include_directories(llmopt_core PUBLIC include)
 target_link_libraries(llmopt_core PUBLIC nlohmann_json::nlohmann_json llmopt_coverage PRIVATE llmopt_warnings)
 target_link_libraries(llmopt_core PRIVATE spdlog::spdlog)
 if(WIN32)
-    # K-8：GetProcessMemoryInfo 需要 psapi；Linux 读 /proc/self/statm，无额外库。
-    target_link_libraries(llmopt_core PUBLIC psapi)
+    # K-8：GetProcessMemoryInfo 需要 psapi；S5 崩溃回溯的调用栈符号化需要 dbghelp。
+    target_link_libraries(llmopt_core PUBLIC psapi dbghelp)
 endif()
 
 if(LLMOPT_ENABLE_LLAMA)

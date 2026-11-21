@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -65,6 +66,7 @@ constexpr FieldSpec kFields[] = {
         {"completion-timeout-ms", false},
         {"api-key", false},
         {"api-keys-file", false},
+        {"api-keys-reload-seconds", false},
         {"step-trace-rate", false},
         {"control-port", false},
         {"tls-cert", false},
@@ -106,6 +108,7 @@ constexpr const char* kConfigKeys[] = {
         "completion-timeout-ms",
         "api-key",
         "api-keys-file",
+        "api-keys-reload-seconds",
         "step-trace-rate",
         "control-port",
         "tls-cert",
@@ -297,6 +300,8 @@ ErrCode apply_service_arg(ServerConfig& cfg, const std::string& key, const std::
         cfg.api_key = value;
     } else if (key == "--api-keys-file") {
         cfg.api_keys_file = value;
+    } else if (key == "--api-keys-reload-seconds") {
+        return parse_int(value, cfg.api_keys_reload_seconds) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--step-trace-rate") {
         return parse_int(value, cfg.step_trace_rate) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--control-port") {
@@ -391,6 +396,10 @@ ErrCode validate_service_limits(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.api_key.size() > 512) {
         message = "api-key 长度不能超过 512";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.api_keys_reload_seconds < 0 || cfg.api_keys_reload_seconds > 3600) {
+        message = "api-keys-reload-seconds 必须在 0..3600（0=关闭）";
         return ErrCode::InvalidJson;
     }
     if (cfg.control_port < 0 || cfg.control_port > 65535) {
@@ -609,10 +618,16 @@ ErrCode parse_api_key_entry(const json& item, const ServerConfig& cfg, ApiKeyEnt
                               entry.quota, message);
 }
 
-} // namespace
+// 同 id 多把 key 共用一份租户配额：逐字段比对，任一字段不同即配置错误。
+bool quota_equal(const TenantQuota& a, const TenantQuota& b) noexcept {
+    return a.max_concurrency == b.max_concurrency && a.queue_capacity == b.queue_capacity &&
+           a.rate_limit_rps == b.rate_limit_rps && a.rate_limit_burst == b.rate_limit_burst &&
+           a.kv_blocks == b.kv_blocks;
+}
 
-// 静态 key 文件：只接受 version/keys；key 只以 sha256 落盘，不解析明文。
-ErrCode load_api_keys_file(const std::string& path, ServerConfig& cfg, std::string& message) {
+// 解析并校验 key 文件，输出条目；不触碰 ServerConfig 的快照，启动加载与热重载共用。
+ErrCode parse_api_keys_file(const std::string& path, const ServerConfig& cfg,
+                            std::vector<ApiKeyEntry>& entries, std::string& message) {
 #ifndef _WIN32
     struct stat st{};
     if (::stat(path.c_str(), &st) != 0) {
@@ -629,6 +644,18 @@ ErrCode load_api_keys_file(const std::string& path, ServerConfig& cfg, std::stri
         message = "无法读取 api-keys 文件 " + path;
         return ErrCode::ConfigInvalid;
     }
+    in.seekg(0, std::ios::end);
+    const std::streamoff file_size = in.tellg();
+    if (!in || file_size < 0) {
+        message = "无法读取 api-keys 文件 " + path;
+        return ErrCode::ConfigInvalid;
+    }
+    constexpr std::streamoff kMaxApiKeysBytes = 1LL * 1024 * 1024;
+    if (file_size > kMaxApiKeysBytes) {
+        message = "api-keys 文件超过 1 MiB 上限：" + path;
+        return ErrCode::ConfigInvalid;
+    }
+    in.seekg(0, std::ios::beg);
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     const json parsed = json::parse(text, nullptr, false);
     if (parsed.is_discarded() || !parsed.is_object() ||
@@ -645,23 +672,66 @@ ErrCode load_api_keys_file(const std::string& path, ServerConfig& cfg, std::stri
         message = "api-keys 文件 keys 必须是非空数组";
         return ErrCode::ConfigInvalid;
     }
-    std::set<std::string> ids;
     std::set<std::string> digests;
-    std::vector<ApiKeyEntry> entries;
+    std::map<std::string, TenantQuota> quota_by_id;
+    entries.clear();
     for (const json& item : parsed["keys"]) {
         ApiKeyEntry entry;
         const ErrCode code = parse_api_key_entry(item, cfg, entry, message);
         if (code != ErrCode::Ok) {
             return code;
         }
-        if (!ids.insert(entry.id).second || !digests.insert(entry.sha256).second) {
-            message = "api-keys id/sha256 不能重复";
+        if (!digests.insert(entry.sha256).second) {
+            message = "api-keys sha256 不能重复（含同 id 重复摘要）";
+            return ErrCode::ConfigInvalid;
+        }
+        const auto it = quota_by_id.find(entry.id);
+        if (it == quota_by_id.end()) {
+            quota_by_id.emplace(entry.id, entry.quota);
+        } else if (!quota_equal(it->second, entry.quota)) {
+            message = "api-keys 同一 id 的配额必须完全一致: " + entry.id;
             return ErrCode::ConfigInvalid;
         }
         entries.push_back(std::move(entry));
     }
-    cfg.api_keys = std::move(entries);
     return ErrCode::Ok;
+}
+
+} // namespace
+
+// 静态 key 文件：只接受 version/keys；key 只以 sha256 落盘，不解析明文。
+ErrCode load_api_keys_file(const std::string& path, ServerConfig& cfg, std::string& message) {
+    std::vector<ApiKeyEntry> entries;
+    const ErrCode code = parse_api_keys_file(path, cfg, entries, message);
+    if (code != ErrCode::Ok) {
+        return code;
+    }
+    auto snapshot = std::make_shared<KeySnapshot>();
+    snapshot->keys = std::move(entries);
+    snapshot->generation = 1;
+    cfg.api_keys.store(std::move(snapshot));
+    return ErrCode::Ok;
+}
+
+// 阶段 12 S4：热重载重读 key 文件。成功才返回新快照（generation 在旧快照上 +1）；
+// 任何解析/权限/格式失败都返回 nullptr，调用方保留旧快照并累加失败指标。
+std::shared_ptr<const KeySnapshot> reload_api_keys(const ServerConfig& cfg,
+                                                   std::string& message) noexcept {
+    try {
+        std::vector<ApiKeyEntry> entries;
+        const ErrCode code = parse_api_keys_file(cfg.api_keys_file, cfg, entries, message);
+        if (code != ErrCode::Ok) {
+            return nullptr;
+        }
+        auto snapshot = std::make_shared<KeySnapshot>();
+        snapshot->keys = std::move(entries);
+        const auto current = cfg.api_keys.load();
+        snapshot->generation = current ? current->generation + 1 : 1;
+        return snapshot;
+    } catch (const std::exception& exc) {
+        message = std::string("api-keys 重载异常: ") + exc.what();
+        return nullptr;
+    }
 }
 
 namespace {
@@ -752,6 +822,8 @@ ErrCode load_env_ints(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sources
             {"LLMOPT_STEP_TRACE_RATE", "step-trace-rate", &cfg.step_trace_rate},
             {"LLMOPT_CONTROL_PORT", "control-port", &cfg.control_port},
             {"LLMOPT_COMPLETION_TIMEOUT_MS", "completion-timeout-ms", &cfg.completion_timeout_ms},
+            {"LLMOPT_API_KEYS_RELOAD_SECONDS", "api-keys-reload-seconds",
+             &cfg.api_keys_reload_seconds},
     };
     for (const IntBinding& binding : ints) {
         const char* raw = std::getenv(binding.env);
@@ -1090,7 +1162,9 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
             legacy.id = "default";
             legacy.sha256 = sha256_hex(out.api_key);
             legacy.quota = make_default_tenant_quota(out);
-            out.api_keys.push_back(std::move(legacy));
+            auto snapshot = std::make_shared<KeySnapshot>();
+            snapshot->keys.push_back(std::move(legacy));
+            out.api_keys.store(std::move(snapshot));
         }
         const ErrCode validated = validate_config(out, message);
         return validated == ErrCode::Ok ? ErrCode::Ok : ErrCode::ConfigInvalid;

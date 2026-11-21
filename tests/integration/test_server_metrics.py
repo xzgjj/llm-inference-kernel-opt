@@ -47,10 +47,19 @@ def main() -> int:
             check(not duplicate_help, f"同一 family 出现多组 HELP：{duplicate_help}")
             check(len(types) == len(helps), "每个 family 必须同时有 TYPE 与 HELP")
             for name, value in samples.items():
+                if name.startswith("llmopt_build_info"):
+                    # 静态构建信息不带 TYPE/HELP，值固定为 1；标签里必须有 version。
+                    check(value == 1, "build_info 值必须为 1")
+                    continue
                 family = name.split("{", 1)[0]
                 check(family in types, f"指标 {name} 缺少 TYPE")
                 check(family in helps, f"指标 {name} 缺少 HELP")
                 check(value >= 0 or str(value) == "nan", f"指标 {name} 为负值 {value}")
+
+            build_info = [name for name in samples if name.startswith("llmopt_build_info")]
+            check(len(build_info) == 1, "应恰好有一条 llmopt_build_info")
+            check('version="' in build_info[0], "build_info 必须带 version 标签")
+            check('llama_revision="' in build_info[0], "build_info 必须带 llama_revision 标签")
 
             # K-3 / 请求计数：3 条成功，共 9 个 token；accepted 与 ok 一一对应。
             check(samples['llmopt_requests_total{status="accepted"}'] == 3,

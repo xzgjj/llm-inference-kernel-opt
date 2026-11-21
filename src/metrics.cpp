@@ -2,12 +2,37 @@
 // 热路径只碰原子数组；字符串解析、分片归并与格式化全部落在冷路径（/metrics 抓取时）。
 #include "llmopt/metrics.hpp"
 
+#include "llmopt/version.hpp"
+
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string_view>
 
 namespace llmopt {
 namespace {
+
+// Prometheus 标签值转义：反斜杠、双引号与换行必须转义，避免破坏文本格式。
+std::string prom_escape_label(std::string_view value) {
+    std::string out;
+    out.reserve(value.size());
+    for (const char ch : value) {
+        switch (ch) {
+        case '\\':
+            out += "\\\\";
+            break;
+        case '"':
+            out += "\\\"";
+            break;
+        case '\n':
+            out += "\\n";
+            break;
+        default:
+            out += ch;
+        }
+    }
+    return out;
+}
 
 constexpr const char* kRequestsHelp = "请求总数，status 取 accepted/ok/error/cancelled/queue_full";
 constexpr const char* kAdmissionHelp = "准入拒绝总数，reason 取 no_free_block/below_watermark/"
@@ -174,6 +199,8 @@ const std::array<MetricDef, kMetricCount> kMetricDefs = {{
         {"llmopt_completion_timeouts_total", "llmopt_completion_timeouts_total",
          MetricKind::CounterInt,
          "单步 Completion 回投超时的次数（超时后请求按 EXECUTION_FAILED 收尾）"},
+        {"llmopt_api_keys_reload_failed_total", "llmopt_api_keys_reload_failed_total",
+         MetricKind::CounterInt, "api-keys 热加载失败次数（失败后保留旧快照，不切换表）"},
 }};
 
 MetricId find_metric(std::string_view series) noexcept {
@@ -441,7 +468,14 @@ std::string MetricsRegistry::expose_text() const {
 }
 
 std::string MetricsRegistry::render() const {
-    return expose_text();
+    std::string out = expose_text();
+    // S6：静态构建信息常量行；version/revision 取自 version.hpp 唯一事实来源。
+    out += "llmopt_build_info{version=\"";
+    out += prom_escape_label(kVersion);
+    out += "\",llama_revision=\"";
+    out += prom_escape_label(kLlamaRevision);
+    out += "\"} 1\n";
+    return out;
 }
 
 TenantMetrics::TenantMetrics(const std::vector<std::string>& tenants) {

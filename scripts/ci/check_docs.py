@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 from ci_common import (
@@ -230,6 +232,19 @@ def rule_implementation_map(result: CheckResult) -> None:
             )
 
 
+def test_counts(result: CheckResult) -> None:
+    """rule: CI-DOC-008 —— 文档计数块必须与 CTest 注册表一致，禁止手写数字。"""
+    script = REPO_ROOT / "scripts/ci/gen_test_counts.py"
+    proc = subprocess.run([sys.executable, str(script), "--check"],
+                          capture_output=True, text=True, cwd=REPO_ROOT)
+    if proc.returncode != 0:
+        detail = (proc.stdout or proc.stderr).strip().replace("\n", " ")
+        result.violations.append(
+            Violation("CI-DOC-008", "README.md", f"测试计数漂移：{detail}"))
+    else:
+        result.notes.append((proc.stdout or "").strip().splitlines()[-1])
+
+
 CHECKS = [
     doc_budget,
     spec_size,
@@ -237,6 +252,7 @@ CHECKS = [
     required_sections,
     link_integrity,
     rule_implementation_map,
+    test_counts,
 ]
 
 

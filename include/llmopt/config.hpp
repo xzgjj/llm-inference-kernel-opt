@@ -67,9 +67,11 @@ struct ServerConfig {
     // 单步 Completion 回投超时；0=关闭。默认 30s，只影响“执行线程不回投”的故障路径。
     std::int32_t completion_timeout_ms = 30'000;
     std::string api_key; // 空=不鉴权；不写日志、不打印
-    // 阶段 11：静态 key 文件（只存 sha256）；与 api_key 互斥，加载后统一走 api_keys。
+    // 阶段 11：静态 key 文件（只存 sha256）；与 api_key 互斥，加载后统一走 api_keys 快照。
     std::string api_keys_file;
-    std::vector<ApiKeyEntry> api_keys;
+    KeyTable api_keys;
+    // 阶段 12 S4：key 文件热加载轮询周期（秒）；0=关闭。POSIX 另可由 SIGHUP 触发重读。
+    std::int32_t api_keys_reload_seconds = 0;
     std::int32_t step_trace_rate = 0; // 1/N 采样；0=关
     // 控制面隔离：>0 时在 loopback 上另起一个独立线程池的 /healthz /readyz /metrics。
     // 0 保持旧行为（控制端点仍挂在数据面端口，兼容现有客户端）。
@@ -83,6 +85,9 @@ struct ServerConfig {
 // sources 非空时填满每个字段的来源；配置错误止于第一个非法项。
 ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& message,
                     std::vector<ConfigSourceEntry>* sources = nullptr) noexcept;
+// 阶段 12 S4：重读 api-keys 文件；成功返回 generation 递增的新快照，失败返回 nullptr 并填 message。
+[[nodiscard]] std::shared_ptr<const KeySnapshot> reload_api_keys(const ServerConfig& cfg,
+                                                                 std::string& message) noexcept;
 bool parse_gate_mode(const std::string& text, GateMode& out) noexcept;
 // chunk 宽度只允许 32/64/128/256；CLI、env 与调度配置共用同一判定。
 bool is_valid_chunk_size(std::int32_t value) noexcept;

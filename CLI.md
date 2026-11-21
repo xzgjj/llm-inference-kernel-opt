@@ -387,8 +387,8 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 
 1. 阶段 0+1 共用整数分支 `1`，下一阶段从 `2` 开始。
 2. 采样链顺序见第 3 节。
-3. 阶段 1 只做 CLI，`--config` 推迟到阶段 2。
-4. `/completion` 保留，`/v1/chat/completions` 恒 404。
+3. **历史冻结（阶段 1 语境，已作废）**：当时只做 CLI、`--config` 推迟到阶段 2；阶段 2 起 `--config` 已生效（见第 6 节），本条的"推迟"结论不再适用。
+4. **历史冻结（阶段 1 语境，已作废）**：当时 `/v1/chat/completions` 恒 404；阶段 6 起已实现纯文本 system/user/assistant 消息，`/completion` 保留，两条路径均在服务中。
 5. 双档后端：`LLMOPT_ENABLE_LLAMA=ON` 才编真实后端；Windows/CI 用 stub。
 6. 退出码 3/4 语义见第 4 节。
 7. 阶段 2 调度参数默认值：`max-num-batched-tokens=2048`、`queue-capacity=32`、`block-size=16`、`watermark-ratio=0.05`、前缀缓存默认开。
@@ -397,6 +397,8 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 10. **待用户确认（阶段 8 新增）**：`--model-profile <json>` 允许权重不在本机时只声明模型元数据；仅在 `--capacity-only` 下可替代 `--model`；默认关闭。env 同名键 `LLMOPT_MODEL_PROFILE` / `LLMOPT_CAPACITY_ONLY` 等价。
 11. **待用户确认（阶段 8 根地址口径）**：e2e `LLMOPT_REAL_BASE` 只接受 `scheme://host:port`，禁止带路径；探活固定 `/healthz` + `/readyz`（`status=ready`），`/metrics` 仅作证据抓取。
 12. **已冻结（阶段 8 证据口径）**：`matrix_report.csv` 新增 `tok_accounting`，`total_tok_s` 的 prompt 部分必须用 `llmopt_prefill_tokens_total + llmopt_prefix_hit_tokens_total`，不得用字符数估算。
+13. **已冻结（阶段 12 S0）**：`--threads` 允许 0（=自动）到 256；`--n-gpu-layers` 必须 ≥0，负数报用法错误（退出码 2），"全层卸载"要显式填层数；`--config` 文件上限 16 MiB；`donor-slots`、`kv-cache-type` 两个 JSON 键生效。
+14. **阶段 12 S4 约定**：key 文件同一 `id` 允许多条 `sha256`（轮换期并存），配额必须一致，重复摘要拒绝加载；POSIX 下 SIGHUP 触发原子热加载，失败保留旧表并累加 `llmopt_api_keys_reload_failed_total`；Windows 无 SIGHUP，用 `--api-keys-reload-seconds <n>` 轮询（0=关闭）。token 日配额本阶段不做。
 
 
 

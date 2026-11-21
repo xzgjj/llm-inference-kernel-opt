@@ -29,7 +29,13 @@
 
 C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机约定一致）；本机另建目录时手动执行 `ctest --test-dir <dir>`，不改本表。CI 的非默认构建目录（sanitizer、覆盖率）用 `run_registry.py --build-dir <dir>` 覆盖表里的路径，表本身仍保持一条可独立执行的命令。
 
-CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前共 **204 条**：187 条 doctest 用例 + 17 条进程级脚本。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
+CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`）。
+
+<!-- test-counts:start -->
+测试基线（脚本生成，勿手改）：`ctest -N` **214** 注册；`-L fast` **213**（144 unit / 50 contract / 19 integration）；`-L e2e` 1。
+<!-- test-counts:end -->
+
+因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
 
 目录与命名约定见 [../tests/README.md](../tests/README.md)：`unit/` `contract/` `integration/` `e2e/` `perf/` 按层级分目录，Scope 一律写目录而不是单个文件，目录内新增用例自动被覆盖。
 
@@ -214,10 +220,12 @@ CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规
 
 阶段 6 的部署与健壮性（7-5）：
 
-- `scripts/release/docker_smoke.sh`（登记名 `deploy_smoke`）：Dockerfile 起服务 → `/readyz` 200 → chat 200 → `docker stop` 后退出码 0。Windows 本机无 Docker，只在 Linux/CI 跑。
-- `scripts/release/soak.py`（登记名 `soak_30m`）：持续流式请求 + 每 30 s 采 `llmopt_rss_mib`，断言非 200 为 0、RSS 增长 `<5%` **或绝对增量 `<8 MiB`**（`llmopt_rss_mib` 是整数 MiB，stub 基线约 4 MiB，1 MiB 量化即 25%，故设噪声带），报告落 `build/evidence/soak_report.json`（目录不存在时脚本自建）。Linux 30 min 实测：343,736 请求、0 非 200、RSS 4.125→4.375 MiB（+0.25 MiB）。本机 Windows 30 s 冒烟：1566 请求 / 0 错误 / +0.95%。
+- `scripts/release/docker_smoke.sh`（登记名 `deploy_smoke`）：镜像起服务 → `/readyz` 200 → 非流式 completions 200 → SSE ≥2 帧 → 硬断连触发 cancelled +1 → `docker stop` 退出码 0，六项写 `evidence/phase12/packaging/docker_smoke.json`。阶段 12 S5 已在 Windows Docker Desktop + WSL 客户端实跑：6/6 PASS，镜像 83 MB。
+- `scripts/release/soak.py`（阶段 12 S2 扩展，30 min 档不进 PR）：持续流式请求（P=4、ctx 1024、32 token）+ 每 10 s 采 `/metrics`，同时落 `rss.csv`、`kv_used.csv`、`itl_samples.jsonl`（ITL 按 1/50 请求抽样，避免 GB 级文件）；判据 RSS 末/首 10 min 均值差 ≤30 MiB、ITL p99 末/首 ≤1.3×、drain 后 `used=cached=0`、`kv_reconcile_diffs_total=0`、无非 200、服务进程存活；报告 `soak_report.json` 含 `verdict` 分项。旧的 5%/8 MiB 口径作废（只适用于 30 s 冒烟）。
 - `.github/workflows/nightly.yml`（登记名 `sanitizer_nightly`）：TSan 10 轮、ASan/UBSan 一轮、30 min soak；不进 PR 阻塞链路。本机 Windows 不能跑 sanitizer，口径为“脚本与 workflow 已固化，结论以 CI 运行为准”。
-- systemd 模板 `scripts/release/llmopt.service`；部署说明见 `scripts/release/README.md`。
+- systemd 模板 `scripts/release/llmopt.service`：`systemd-analyze verify` 在 systemd 容器内通过；Docker Desktop 下无法以 PID1 起 systemd，优雅停止改由 `docker_smoke.sh` 的 `docker stop exit=0` 证明。部署说明见 `scripts/release/README.md`。
+- `tests/integration/test_crash_dump.py`（登记名 `crash_dump_test`，`tests/tools/crash_fixture` 注入 SIGSEGV）：断言非零退出、dump 含 `signal=/pid=/version=`、连续崩溃后只保留 2 份；handler 内仅 safe syscall。Windows 上 `raise(SIGSEGV)` 退出码为 CRT 默认 3，Linux 为信号码。
+- logrotate：`evidence/phase12/packaging/logrotate_test.sh` 在 ubuntu:24.04 容器内装 logrotate、`-d` 校验、21 MB 假日志 `-f` 切割，断言 `.1` 存在且原文件截断到 0（`logrotate_test.log`）。
 
 D6-2 的可选 Bearer（用户确认实现，默认关）：
 
@@ -234,7 +242,7 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `build-tsan`（`-fsanitize=thread`）：**GCC 11 的 `libtsan` 未拦截 `pthread_cond_clockwait`**，而 libstdc++ 的 `condition_variable::wait_for/wait_until(steady_clock)` 走该函数，导致 TSan 把“同一把锁保护的队列”误报成 data race + double lock。用 30 行纯 std 程序（两线程 + deque + mutex + timed wait）可稳定复现；把定时等待换成不带超时的 `cv.wait` 后报告归零，确认是拦截缺失而非项目缺陷。
 - 本地绕过：`scripts/ci/tsan_clockwait_shim.c` 把 `CLOCK_MONOTONIC` 绝对期限折算成 `CLOCK_REALTIME` 后转调 `pthread_cond_timedwait`，`LD_PRELOAD` 后最小复现与项目套件的 TSan 报告均为 0。该 shim 只用于 GCC 11 本地验证，CI（ubuntu-latest，GCC 13+）不需要。
 - TSan 10 轮（shim + `halt_on_error=1`）：每轮 `ThreadSanitizer` 报告 0 条。稳定残留 2 个与竞争无关的用例失败，均为插桩降速引起的时序假设失效：`service_state_test`（排空结束时对已被拒绝请求的 503 响应读取出 `IncompleteRead`）、`integration_server_matrix`（`--smoke` 档在 2 核插桩环境下 step trace 汇总为空，`step_ns_p99_ms` 解析失败）。这两条在无插桩 Linux 构建与 ASan 构建下均稳定通过。
-- 未能执行：`deploy_smoke`（复测机无 docker）、`soak_30m`（按 30 min 另跑）、慢客户端真后端 ITL 判定（无 `/root/llm-src/llama.cpp` 与 GGUF 模型）。
+- 阶段 6 复测时未能执行、阶段 12 S5 已补做：`deploy_smoke`（Docker Desktop 实跑 6/6 PASS）；`soak_30m` 已按 30 min 实跑（297,441 请求 / 五项判据全 PASS）；慢客户端真后端 ITL 判定仍待真后端长稳排期（S3 已给出全驻留 ITL 基线）。
 - `llama_chat_apply_template` API 兼容（6-G1 遗留）：对 llama.cpp 当前 master（`374d90a`）头文件做 `g++ -fsyntax-only -DLLMOPT_ENABLE_LLAMA=1 src/runner_llama.cpp` 通过，签名与调用方式一致。
 
 阶段质量整改 A（P0/P1，2026-11-21）：
@@ -279,7 +287,7 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `unit_kv` +13 例：租户标记随 acquire/release 清理、`used_blocks_for` 含留置缓存、`evict_cached_for` 只回收本租户、跨租户同前缀零命中。
 - `contract_tenant`（3 例）：单租户 live 超限立即 `QUOTA_EXCEEDED` 且不拖累其他租户；running 满的租户让位；单请求 KV 超配额终态拒绝且块数归零；`tenant_stats()` 的 live/running/queued 快照。
 - `tenant_keys_test`（integration）：三租户 key 文件 401/200/429、A 限流、C KV 配额、`llmopt_tenant_*` 标签白名单；`/v1/models` 无 key 401、合法 key 200（DEBUG-11）。
-- Windows 本机复跑：`ctest -L fast` **203/203**（137 unit / 50 contract / 16 integration），全量 **204 注册**。
+- Windows 本机复跑基线见 §2.1 的脚本生成计数块（阶段 11 当时为 203/204，阶段 12 已增至 212 fast / 213 注册）。
 
 阶段 12（S0 缺陷面修复，对应 [SPEC-DEBUG1](SPEC-DEBUG1.md)）：
 
@@ -288,6 +296,12 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `unit_config` +4 例：`n-gpu-layers` 负值三入口拒绝、`threads` 0..256、配置文件 16 MiB 上限、JSON 侧 `donor-slots`/`kv-cache-type` 生效（DEBUG-03/06/07/09）。
 - `unit_gguf` +2 例：profile 字段超 int32 拒绝、KV 估算饱和不返回负值（DEBUG-08）。
 - `unit_stub_runner` +1 例：未登记 `backend_id` 返回 `ExecutionFailed`（DEBUG-10）。
+- `tests/integration/test_keys_reload.py`（阶段 12 S4，登记名 `keys_reload_test`）：初始 key A（id=t1）200、key B 401；改写同 id 新摘要 B 触发重载（POSIX `SIGHUP`；Windows `--api-keys-reload-seconds 1` 轮询 mtime）后旧 A 401、新 B 200，`/metrics` 含 `llmopt_api_keys_reload_failed_total`；再写缺 `version` 的坏文件仍保持新表（B 200 / A 401）且失败指标 +1。等待改为"轮询直到生效或 5s 超时"，不靠固定 sleep。Windows 本机真跑轮询分支；POSIX SIGHUP 路径未在本机验证，留 Linux CI 复测。
+- `tests/integration/test_disconnect_cancel.py`（阶段 12 S1，登记名 `disconnect_cancel_test`）：非流式请求 `max_tokens=600` + stub 每步 50 ms，客户端 0.8 s 后 RST 断开，断言 ≤2 s 内 `llmopt_requests_total{status="cancelled"}` +1、10 s 内 `kv_used=0` 且 `requests_running=0`、后续正常请求仍 200。
+- `tests/integration/test_server_metrics.py`（阶段 12 S6，既有用例扩展）：`llmopt_build_info{version="...",llama_revision="..."} 1` 必须恰好一条且带两个标签，不参与 TYPE/HELP 全覆蓋断言。
+- `tests/unit/metrics_test.cc`（阶段 12 S6，既有用例扩展）：文本样本行数 = `kMetricCount` + 1（静态 build_info），且含 `llmopt_build_info{version="`。
+- S3 性能对照不是 CTest：产物 `evidence/phase12/perf/{matrix_report.csv,deviation.csv,step_summary.csv,repro_manifest.json,plots/,README.md}`，配置 `scripts/bench/matrix/phase12_s3.json`。
+- S2 soak 不是 CTest（`-L slow` 未登记，30 min 不进 PR）：`scripts/release/soak.py --seconds 1800 --workers 4 --ctx-tokens 1024 --max-tokens 32`，产物 `evidence/phase12/soak/{soak_report.json,rss.csv,kv_used.csv,itl_samples.jsonl}`；判据 RSS 末-首 10 min ≤30 MiB、ITL p99 末/首 ≤1.3×、drain 后 used/cached=0、reconcile diffs=0、无非 200、服务存活。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 

@@ -117,11 +117,16 @@ bool write_frame(httplib::DataSink& sink, const std::string& frame) {
 }
 
 // 非流式：排空 sink 并拼接文本；stop 命中即取消，避免继续消耗算力。
+// 客户端断连：httplib 0.18.5 起 Request 提供 is_connection_closed()，按 ≤500 ms 轮询；
+// 命中即 core.cancel()，响应不在 handler 内写回（连接已断），由框架自行收尾。
 std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const InferenceRequest& req,
                        SchedulerCore& core, StopFilter& filter, int& gen_tokens,
-                       FinishReason& finish, Error& error, std::int32_t deadline_seconds) {
+                       FinishReason& finish, Error& error, std::int32_t deadline_seconds,
+                       const httplib::Request* request) {
+    constexpr auto kDisconnectPoll = std::chrono::milliseconds(500);
     std::string text;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(deadline_seconds);
+    auto next_disconnect_poll = std::chrono::steady_clock::now() + kDisconnectPoll;
     while (true) {
         Delta delta;
         if (sink->pop_frame(delta, 100)) {
@@ -145,7 +150,17 @@ std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const Inferenc
         } else if (sink->is_closed()) {
             break;
         }
-        if (std::chrono::steady_clock::now() > deadline) {
+        const auto now = std::chrono::steady_clock::now();
+        if (request != nullptr && now >= next_disconnect_poll) {
+            next_disconnect_poll = now + kDisconnectPoll;
+            if (request->is_connection_closed()) {
+                core.cancel(req.req_id);
+                error = make_error(ErrCode::Cancelled, "客户端已断开", "req=" + req.req_id);
+                finish = FinishReason::Aborted;
+                break;
+            }
+        }
+        if (now > deadline) {
             core.cancel(req.req_id);
             error = make_error(ErrCode::Timeout,
                                "等待生成结果超时（" + std::to_string(deadline_seconds) + "s）",
@@ -346,8 +361,9 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
     try {
         ctx->metrics->inc(MetricId::HttpRequests);
         // D6-2/阶段 11：按静态 key 解析 tenant；未知 key 不进入限流与队列。
+        // 阶段 12 S4：一次 atomic_load 拿本地快照，整次请求只在快照上匹配。
         const AuthDecision auth = resolve_bearer(request.get_header_value("Authorization"),
-                                                 ctx->config->api_keys, ctx->default_quota);
+                                                 ctx->config->api_keys.load(), ctx->default_quota);
         if (!auth.ok) {
             logger()->warn("http unauthorized path={}", request.path);
             response.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");
@@ -450,7 +466,7 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
             StopFilter filter(reqs[index].stop);
             const std::string text =
                     drain_sink(sinks[index], reqs[index], *ctx->core, filter, generated, finish,
-                               error, ctx->config->request_deadline_seconds);
+                               error, ctx->config->request_deadline_seconds, &request);
             if (finish == FinishReason::Error && error.ok()) {
                 error = make_error(ErrCode::ExecutionFailed, "推理失败（无详细原因）");
             } else if (finish == FinishReason::Aborted && error.ok()) {
@@ -571,15 +587,18 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     ctx->core = &core;
     ctx->gate = gate;
     ctx->default_quota = make_default_tenant_quota(config);
+    // 启动期一次性读快照（无并发）；阶段 12 S4 后鉴权热路径不再触碰这张表。
+    const auto keys = config.api_keys.load();
+    const std::vector<ApiKeyEntry>& entries = keys ? keys->keys : config.api_keys.initial_entries();
     std::vector<std::string> tenant_ids;
-    for (const ApiKeyEntry& entry : config.api_keys) {
+    for (const ApiKeyEntry& entry : entries) {
         tenant_ids.push_back(entry.id);
     }
     if (tenant_ids.empty()) {
         tenant_ids.push_back("default");
     }
     ctx->tenant_metrics = std::make_unique<TenantMetrics>(tenant_ids);
-    for (const ApiKeyEntry& entry : config.api_keys) {
+    for (const ApiKeyEntry& entry : entries) {
         if (entry.quota.rate_limit_rps > 0.0) {
             ctx->tenant_limiters.emplace(
                     entry.id, std::make_unique<RateLimiter>(entry.quota.rate_limit_rps,
@@ -624,7 +643,7 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     server->Get("/v1/models", [ctx](const httplib::Request& req, httplib::Response& res) {
         // DEBUG-11：与推理端点共用同一鉴权解析；只配 key 文件时也必须带合法 key。
         const AuthDecision auth = resolve_bearer(req.get_header_value("Authorization"),
-                                                 ctx->config->api_keys, ctx->default_quota);
+                                                 ctx->config->api_keys.load(), ctx->default_quota);
         if (!auth.ok) {
             logger()->warn("http unauthorized path={}", req.path);
             res.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");

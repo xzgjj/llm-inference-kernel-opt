@@ -91,6 +91,7 @@ CI 的职责是把**可判定**的部分变成机器红灯，把**不可判定**
 | CI-DOC-005 | 相对链接可解析 | 自动 | 链接目标必须存在 | `script:check_docs.py:link_integrity` | 无 |
 | CI-DOC-006 | 规则与实现双向一致 | 自动 | 文档声明的脚本规则 ↔ 代码 `rule:` 标记完全相等 | `script:check_docs.py:rule_implementation_map` | 无 |
 | CI-DOC-007 | 架构文档模块归属 | 人工 | 新增模块必须在文档中标注用途与边界 | `manual:pr-review` | 无 |
+| CI-DOC-008 | 测试计数单一事实来源 | 自动 | README/`docs/testing.md` 的计数块必须等于 `ctest -N` 实测 | `script:check_docs.py:test_counts` | 无 |
 
 字数口径：中文字符逐字计 1，ASCII 单词（连续字母数字/路径）计 1，Markdown 结构符号不计。记录与分析类文档（`docs/testing.md`、报告、ADR）不设上限，但仍受 CI-DOC-003 约束。
 

@@ -19,7 +19,7 @@
 
 仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 CUDA kernel；本项目不做自定义算子，也不做分布式与训练。规模限定在单机、单进程、0.5B–27B 量化模型，本机实测档为 Qwen3-8B Q4_K_M。
 
-当前阶段 0–11 已落地（阶段 10 为真后端 nightly 可靠性收口，阶段 11 为静态 key + 租户配额 + KV 域隔离），阶段 12 进行中（[SPEC-DEBUG1](docs/SPEC-DEBUG1.md)：缺陷面修复与算力入口封堵）：`ctest -L fast` 203 条全绿，全量 204 注册；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
+当前阶段 0–11 已落地（阶段 10 为真后端 nightly 可靠性收口，阶段 11 为静态 key + 租户配额 + KV 域隔离），阶段 12 进行中（本地文档 `docs/SPEC-DEBUG1.md`：缺陷面修复与算力入口封堵）：`ctest -L fast` 全绿，注册数见下方统计块；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
 
 
 
@@ -44,7 +44,7 @@
 | 语言标准 | C++20：`std::span` / `std::optional` / `std::atomic` / RAII / `enum class`；热路径不用 modules、协程、ranges |
 | 构建 | CMake ≥ 3.20 + FetchContent（依赖只拉到 `third_party/_deps`，不入库）；可选 Ninja |
 | 推理后端 | ggml + llama.cpp（commit `b94959a`），编译期开关 `LLMOPT_ENABLE_LLAMA`；默认 stub 后端供 CI 与路由自检 |
-| HTTP / SSE | cpp-httplib 0.18.3（单头，关闭 OpenSSL / zlib / brotli） |
+| HTTP / SSE | cpp-httplib 0.18.5（单头，关闭 OpenSSL / zlib / brotli；0.18.5 起提供 `is_connection_closed`） |
 | JSON | nlohmann/json 3.11.3 |
 | 日志 | spdlog 1.17.0（header-only，内嵌 fmt） |
 | 调度并发模型 | HTTP 线程池 → 有界 `SchedulerMailbox`（`deque` + `mutex` + `condition_variable`）→ `SchedulerCore` 单线程零锁改状态 → 执行线程串行写 KV |
@@ -174,13 +174,13 @@ llm-inference-kernel-opt/
 ├─ tests/                # unit / contract / integration / e2e / perf + Python 服务夹具
 ├─ tools/                # dev.py 单入口；bench 采集、聚合、绘图、矩阵编排
 ├─ scripts/              # ci 闸门、bench 复现脚本、release（Dockerfile / systemd / soak）
-├─ docs/                 # 规划、SPEC-0…6、CLI 契约、测试注册表、论文调研、性能证据
+├─ docs/                 # 规划、SPEC-0…9 + SPEC-DEBUG1、CLI 契约、测试注册表、调研与性能证据
 ├─ cmake/                # FetchContent 依赖版本与 llama.cpp 接入
 ├─ ci/                   # 闸门脚本自测（不计入产品覆盖率）
-└─ .github/workflows/    # ci.yml（L0–L4 闸门）/ nightly.yml（TSan 10 轮、ASan/UBSan、30 min soak）
+└─ .github/workflows/    # ci.yml（L0–L4 闸门 + 定时 real-backend）/ nightly.yml（TSan、ASan/UBSan、30 min soak）
 ```
 
-目录约束：顶层只保留源码、测试、脚本、文档与根级配置；深度 ≤ 3，不建 `application/domain/infrastructure` 之类抽象层。源码目标固定为 `http protocol tokenizer gate runner sampler sched seq kv metrics main`。
+目录约束：顶层只保留源码、测试、脚本、文档与根级配置；深度 ≤ 3，不建 `application/domain/infrastructure` 之类抽象层。CMake 目标为 `llmopt_core`（common、protocol、sha256、config、kv、preempt、scheduler、sink、metrics、resource、text、gate、gguf、runner_stub、log）与 `llmopt_server`（http_server、main，真后端开启时追加 runner_llama）。
 
 
 
@@ -249,29 +249,34 @@ python scripts/spec5/recompute_spec5.py \
 
 ## 当前水平与局限
 
-已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额、阶段 12 缺陷面修复（S0，3 项 P1 + 9 项 P2）；阶段 5 只做预研判据，不落实现。Windows 本机 `ctest -L fast` 203 条全绿（137 unit / 50 contract / 16 integration），全量 204 注册；真服务 e2e 10 项另行通过。
+已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额、阶段 12 缺陷面修复（S0，3 项 P1 + 9 项 P2）；阶段 5 只做预研判据，不落实现。真服务 e2e 10 项另行通过。
 
-官方 8B 矩阵（WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q4_K_M，每档 30 请求 × 32 token × 2 轮，`ngl 24 / threads 0`，真实 token 口径）：
+<!-- test-counts:start -->
+测试基线由脚本从 CTest 注册表生成，见 [docs/testing.md](docs/testing.md) §2.1（勿手改）。
+<!-- test-counts:end -->
 
-| 并发 P | TTFT p50 (ms) | ITL p99 (ms) | 总 token 吞吐 (tok/s) | 单路 decode p50 (tok/s) | 两轮偏差 |
+官方 8B 矩阵（阶段 12 S3 重基线，WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q3_K_M，`ngl 37` 全驻留 + `q8_0 KV`，每档 30 请求 × 32 token × **5 轮**，真实 token 口径）：
+
+| 并发 P | TTFT p50 (ms) | ITL p99 (ms) | 总 token 吞吐 (tok/s) | 相对 P1 | 调度 CPU 占比 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 208.4 | 131.9 | 26.27 | 12.83 | ok（2.0%） |
-| 2 | 445.8 | 324.7 | 29.66 | 6.61 | high（8.9%） |
-| 4 | 913.8 | 657.2 | 25.66 | 3.10 | high（11.5%） |
+| 1 | 28.5 | 23.3 | 77.1 | 1.00× | 0.0002 |
+| 2 | 82.6 | 67.7 | 62.0 | 0.80× | 0.0001 |
+| 4 | 207.1 | 108.1 | 78.2 | 1.01× | 0.0001 |
+| 8 | 320.6 | 171.3 | 80.7 | 1.05× | 0.0001 |
 
-**旧表（40.96/50.28/65.94 tok/s、P=4 1.61×）已作废**：prompt 侧用非空白字符数估算，中文 BPE 下高估约 2.6 倍。真实口径下 P=4 没有吞吐增益，单路 decode 从 12.8 线性降到 3.1，根因是 13/37 层留在 CPU、decode 被内存带宽卡住。要 50 tok/s 单路必须全量上卡：Q3_K_M + `ngl 37` + `q8_0 KV` 实测 decode p50 **52.14 tok/s**，代价是 4bit 量化质量损失。长 prompt（关闭前缀缓存、522 token/请求）TTFT p50 1045 ms、decode 13.6 tok/s；KV 压力档（P=16/ctx512）打到 461/512 块、10 次准入抢占，TTFT 13.5 s——这三组都不能与短档吞吐混引。证据与命令见 `docs/8B-重测记录.md` §5。
+**结论：全驻留档下 continuous batching 的吞吐收益被证伪**（P8/P1 仅 1.05×，判据要求 ≥1.3×），代价是 ITL p99 放大 7.4×。归因是"单执行线程串行 + 显存带宽封顶"：调度步 p50 仅 4–8 µs、`sched_cpu_ratio` 0.01–0.02%，控制面不是瓶颈；77–81 tok/s 已接近该卡有效带宽上限。吞吐在 P=4 到平台，再往上只增加排队与尾延迟。旧表（`ngl 24`、13/37 层留 CPU 时的 1.61× 与 12.8 tok/s 单路）是 CPU-offload 天花板下的相对改善，**已作废**，只作历史对照。证据、分档显存分项与复现命令见 `evidence/phase12/perf/README.md`。
 
 局限，直说：
 
 - 单机单进程，实测覆盖 0.5B–8B 量化模型；27B 档只做容量与抢占验证，不出吞吐结论。
-- 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主，本机没有 Docker 与 SIGTERM 语义。
+- 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主。阶段 12 S5 的容器镜像（83 MB、非 root）与六项冒烟已在 Docker Desktop 实跑，镜像内为 stub 后端。
 - llama.cpp 的 `llama_batch` 没有 slot 字段，cell 由内部 `find_slot` 选择且无公开 getter，块表与 cell 的对账依赖内部头文件，属于**源码耦合点**，升级 llama.cpp 必须复核。
-- 兼容面是最小集：阶段 11 已支持静态 key 文件 → 租户 + 并发/队列/限流/KV 配额；token 日配额、热加载与管理 API 仍未做。鉴权仍是进程内静态文件，公网多租户应前置网关。
+- 兼容面是最小集：阶段 11 支持静态 key 文件 → 租户 + 并发/队列/限流/KV 配额；阶段 12 S4 补同 id 多摘要轮换与 SIGHUP/轮询热加载（POSIX SIGHUP 已在 WSL 实测）。token 日配额仍未做，鉴权仍是进程内静态文件，公网多租户应前置网关。
 - 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
 - 阶段 9 增加 Completion watchdog（`--completion-timeout-ms`，默认 30 s）：执行线程不回投时先回 500，迟到回投后再释放 KV；永久挂死仍需 runner 级进程隔离。
-- nightly 增加 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。
-- `/metrics` 不含直方图，p99 需离线复算；慢读退化与真后端容器冒烟仍缺真机复测。
-- 基准噪声偏大：同一档两轮的 TTFT / 吞吐漂移经常越过 10%，暂不适合做精细调参依据。
+- `ci.yml` 的 `schedule` 触发器跑 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。
+- `/metrics` 不含直方图，p99 需离线复算；慢读退化已在真实后端记录，容器冒烟覆盖 stub 后端（真后端镜像需 `-DLLMOPT_ENABLE_LLAMA=ON` 并自带 llama.cpp 运行库，未在本期构建）。
+- 基准噪声偏大：5 轮下 P4/P8 的 TTFT / ITL 轮间偏差仍 12–15%，结论只做同环境相对比较；吞吐平台值稳定。
 
 
 
@@ -283,7 +288,7 @@ python scripts/spec5/recompute_spec5.py \
 2. **chunk 调参验证**：SPEC-5 判据把当前数据判为 `candidate_pending_chunk`，需要在同一硬件上补调参后矩阵，才可能从候选转为触发。
 3. **基线稳定性**：重测阶段 0 基线，缩小轮间漂移；GPU 路径目前只透传 `n-gpu-layers`，未做显存水位下的调度策略。
 4. **预研立项门槛**：PD 分离与投机解码官方 14 行复算结果为 0 触发 / 12 候选 / 2 不可判，结论是“本期数据不支持翻案”；要立项必须先有新矩阵与链路实测。
-5. **部署面补齐**：`docker_smoke.sh`、真后端慢读退化、systemd 排空需在具备 Docker 与 GGUF 模型的机器上复测，不接受“环境跑不了”当通过。
+5. **部署面补齐**：S5 已完成容器镜像、六项冒烟、logrotate 与 systemd 单元校验；真后端镜像（llama.cpp 运行库）与慢读退化复测仍待排期。
 
 ## 部署说明
 
@@ -292,18 +297,18 @@ python scripts/spec5/recompute_spec5.py \
 ### 容器
 
 ```bash
-docker build -f scripts/release/Dockerfile -t llmopt:dev .
+docker build -f scripts/release/Dockerfile -t llmopt:s5 .
 docker run --rm -p 8080:8080 -e LLMOPT_ALLOW_STUB=1 \
-  -v "$PWD/models:/app/models:ro" llmopt:dev \
-  --model /app/models/qwen2.5-0.5b-q4.gguf --host 0.0.0.0 --port 8080 \
-  --backend stub --mode off
+  -v "$PWD/models:/app/models:ro" llmopt:s5 \
+  --model /app/models/qwen3-8b.gguf --host 0.0.0.0 --port 8080 \
+  --control-port 8081 --backend stub --mode off
 ```
 
-镜像默认 `LLMOPT_ENABLE_LLAMA=OFF`（只带 stub）；真后端需构建时打开开关并准备 llama.cpp。模型不进镜像，运行时挂载。
+镜像默认 `LLMOPT_ENABLE_LLAMA=OFF`（只带 stub）；真后端需构建时打开开关并准备 llama.cpp。模型不进镜像，运行时挂载。多阶段构建、runtime 非 root（uid 10001）、实测 83 MB；`bash scripts/release/docker_smoke.sh` 六项全 PASS（healthz / readyz / 非流式 / SSE / 断连取消 / `docker stop` 退出码 0），证据在 `evidence/phase12/packaging/`。
 
 ### systemd
 
-`scripts/release/llmopt.service` 是模板：`ExecStart` 读 `/etc/llmopt/config.json`，`KillSignal=SIGTERM`，`TimeoutStopSec=45`，比默认 30 s drain 多留余量；日志按 20 MB × 5 轮转。
+`scripts/release/llmopt.service` 是模板：`ExecStart` 读 `/etc/llmopt/config.json`，`WorkingDirectory=/var/lib/llmopt` 固定崩溃 dump 与相对日志锚点，`KillSignal=SIGTERM`，`TimeoutStopSec=45`，比默认 30 s drain 多留余量；日志按 20 MB × 5 轮转，部署层再用 `scripts/release/logrotate/llmopt` 兜底。`systemd-analyze verify` 已通过。
 
 ### 健康检查与排空
 

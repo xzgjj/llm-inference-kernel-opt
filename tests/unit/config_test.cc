@@ -9,6 +9,7 @@
 #endif
 
 #include "llmopt/config.hpp"
+#include "llmopt/metrics.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -65,6 +66,7 @@ void clear_env() {
                             "LLMOPT_COMPLETION_TIMEOUT_MS",
                             "LLMOPT_API_KEY",
                             "LLMOPT_API_KEYS_FILE",
+                            "LLMOPT_API_KEYS_RELOAD_SECONDS",
                             "LLMOPT_STEP_TRACE_RATE",
                             "LLMOPT_CONTROL_PORT",
                             "LLMOPT_THREADS",
@@ -595,6 +597,16 @@ std::vector<std::string> key_args(const std::string& path) {
     return {"--model", "m.gguf", "--backend", "stub", "--api-keys-file", path};
 }
 
+constexpr const char* kTestKeyA = "lk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+constexpr const char* kTestKeyB = "lk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+// 单条目 key 文件体；quota 由调用方以 JSON 片段给出（null 表示继承默认配额）。
+std::string one_key_body(const std::string& id, const std::string& sha,
+                         const std::string& quota) {
+    return R"({"version":1,"keys":[{"id":")" + id + R"(","sha256":")" + sha +
+           R"(","quota":)" + quota + R"(}]})";
+}
+
 } // namespace
 
 TEST_CASE("api-keys 文件：sha256、配额与默认继承") {
@@ -611,17 +623,18 @@ TEST_CASE("api-keys 文件：sha256、配额与默认继承") {
     std::string message;
     REQUIRE(load(key_args(path), cfg, message) == ErrCode::Ok);
     REQUIRE(cfg.api_keys.size() == 2);
-    CHECK_EQ(cfg.api_keys[0].id, "tenant-a");
-    CHECK_EQ(cfg.api_keys[0].quota.max_concurrency, 2);
-    CHECK_EQ(cfg.api_keys[0].quota.queue_capacity, 3);
-    CHECK_EQ(cfg.api_keys[0].quota.kv_blocks, 8);
-    CHECK_EQ(cfg.api_keys[1].id, "tenant-b");
-    CHECK_EQ(cfg.api_keys[1].quota.max_concurrency, cfg.max_concurrency);
+    const auto snapshot = cfg.api_keys.load();
+    CHECK_EQ(snapshot->keys[0].id, "tenant-a");
+    CHECK_EQ(snapshot->keys[0].quota.max_concurrency, 2);
+    CHECK_EQ(snapshot->keys[0].quota.queue_capacity, 3);
+    CHECK_EQ(snapshot->keys[0].quota.kv_blocks, 8);
+    CHECK_EQ(snapshot->keys[1].id, "tenant-b");
+    CHECK_EQ(snapshot->keys[1].quota.max_concurrency, cfg.max_concurrency);
     std::filesystem::remove(path);
     clear_env();
 }
 
-TEST_CASE("api-keys 文件：坏 JSON、重复 id 与与单 key 互斥") {
+TEST_CASE("api-keys 文件：坏 JSON、重复摘要与单 key 互斥") {
     clear_env();
     set_env("LLMOPT_ALLOW_STUB", "1");
     ServerConfig cfg;
@@ -630,20 +643,24 @@ TEST_CASE("api-keys 文件：坏 JSON、重复 id 与与单 key 互斥") {
     const std::string bad = write_config("llmopt_api_keys_bad.json", "{not-json");
     chmod_0600(bad);
     CHECK(load(key_args(bad), cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(message.find("JSON") != std::string::npos);
 
-    const std::string dup = write_config(
-            "llmopt_api_keys_dup.json",
+    // 跨条目重复 sha256（含同 id 重复摘要）一律拒绝。
+    const std::string dup_sha = write_config(
+            "llmopt_api_keys_dup_sha.json",
             R"({"version":1,"keys":[
                 {"id":"tenant-a","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-                {"id":"tenant-a","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]})");
-    chmod_0600(dup);
-    CHECK(load(key_args(dup), cfg, message) == ErrCode::ConfigInvalid);
+                {"id":"tenant-b","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]})");
+    chmod_0600(dup_sha);
+    CHECK(load(key_args(dup_sha), cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(message.find("sha256 不能重复") != std::string::npos);
 
     CHECK(load({"--model", "m.gguf", "--backend", "stub", "--api-key", "legacy",
-                "--api-keys-file", dup},
+                "--api-keys-file", dup_sha},
                cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(message.find("不能同时设置") != std::string::npos);
     std::filesystem::remove(bad);
-    std::filesystem::remove(dup);
+    std::filesystem::remove(dup_sha);
     clear_env();
 }
 
@@ -668,7 +685,7 @@ TEST_CASE("api-keys 文件中的 sha256 可直接解析为租户") {
     REQUIRE(load(key_args(path), cfg, message) == ErrCode::Ok);
     TenantQuota fallback;
     const std::string key = "lk_" + std::string(32, 'a');
-    const AuthDecision decision = resolve_bearer("Bearer " + key, cfg.api_keys, fallback);
+    const AuthDecision decision = resolve_bearer("Bearer " + key, cfg.api_keys.load(), fallback);
     CHECK(decision.ok);
     CHECK_EQ(decision.tenant, "tenant-a");
     CHECK_EQ(decision.quota.max_concurrency, 1);
@@ -683,8 +700,9 @@ TEST_CASE("单 api-key 仍可用，落库前转成 default 租户的 sha256") {
     REQUIRE(load({"--model", "m.gguf", "--api-key", "legacy-secret"}, cfg, message) ==
             ErrCode::Ok);
     REQUIRE(cfg.api_keys.size() == 1);
-    CHECK_EQ(cfg.api_keys[0].id, "default");
-    CHECK_EQ(cfg.api_keys[0].sha256.size(), 64U);
+    const auto legacy_snapshot = cfg.api_keys.load();
+    CHECK_EQ(legacy_snapshot->keys[0].id, "default");
+    CHECK_EQ(legacy_snapshot->keys[0].sha256.size(), 64U);
     CHECK_EQ(cfg.api_key, "legacy-secret");
     clear_env();
 }
@@ -766,4 +784,188 @@ TEST_CASE("配置文件可设置 donor-slots 与 kv-cache-type 且来源记为 F
     CHECK_EQ(std::string(source_of(sources, "kv-cache-type")), "file");
     std::filesystem::remove(path);
     clear_env();
+}
+
+// 阶段 12 S4：同 id 允许多条 sha256（轮换期并存），配额逐字段一致即通过，两把 key 同租户。
+TEST_CASE("阶段 12 S4：同 id 两条摘要配额一致时通过，两把 key 解析到同一租户") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    const std::string sha_a = sha256_hex(kTestKeyA);
+    const std::string sha_b = sha256_hex(kTestKeyB);
+    const std::string quota = R"({"max_concurrency":2,"queue_capacity":3})";
+    const std::string body =
+            R"({"version":1,"keys":[
+            {"id":"tenant-a","sha256":")" + sha_a + R"(","quota":)" + quota + R"(},
+            {"id":"tenant-a","sha256":")" + sha_b + R"(","quota":)" + quota + R"(}]})";
+    const std::string path = write_config("llmopt_api_keys_multi.json", body);
+    chmod_0600(path);
+    ServerConfig cfg;
+    std::string message;
+    REQUIRE(load(key_args(path), cfg, message) == ErrCode::Ok);
+    REQUIRE(cfg.api_keys.size() == 2);
+    TenantQuota fallback;
+    const AuthDecision hit_a =
+            resolve_bearer("Bearer " + std::string(kTestKeyA), cfg.api_keys.load(), fallback);
+    CHECK(hit_a.ok);
+    CHECK_EQ(hit_a.tenant, "tenant-a");
+    CHECK_EQ(hit_a.quota.max_concurrency, 2);
+    const AuthDecision hit_b =
+            resolve_bearer("Bearer " + std::string(kTestKeyB), cfg.api_keys.load(), fallback);
+    CHECK(hit_b.ok);
+    CHECK_EQ(hit_b.tenant, "tenant-a");
+    CHECK_EQ(hit_b.quota.max_concurrency, 2);
+    std::filesystem::remove(path);
+    clear_env();
+}
+
+// 阶段 12 S4：同 id 各条配额任一字段不同即配置错误。
+TEST_CASE("阶段 12 S4：同 id 配额不一致拒绝") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    const std::string sha_a = sha256_hex(kTestKeyA);
+    const std::string sha_b = sha256_hex(kTestKeyB);
+    const std::string body =
+            R"({"version":1,"keys":[
+            {"id":"tenant-a","sha256":")" + sha_a +
+            R"(","quota":{"max_concurrency":2,"queue_capacity":3}},
+            {"id":"tenant-a","sha256":")" + sha_b +
+            R"(","quota":{"max_concurrency":1,"queue_capacity":3}}]})";
+    const std::string path = write_config("llmopt_api_keys_quota_mismatch.json", body);
+    chmod_0600(path);
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load(key_args(path), cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(message.find("配额必须完全一致") != std::string::npos);
+    CHECK(cfg.api_keys.empty());
+    std::filesystem::remove(path);
+    clear_env();
+}
+
+// 阶段 12 S4：坏文件重载必须保留旧快照，generation 不变，旧 key 仍可命中。
+TEST_CASE("阶段 12 S4：坏文件重载保留旧表且 generation 不变") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    const std::string sha_a = sha256_hex(kTestKeyA);
+    const std::string good = write_config(
+            "llmopt_reload_good.json",
+            one_key_body("tenant-a", sha_a, R"({"max_concurrency":1,"queue_capacity":1})"));
+    chmod_0600(good);
+    ServerConfig cfg;
+    std::string message;
+    REQUIRE(load(key_args(good), cfg, message) == ErrCode::Ok);
+    const auto before = cfg.api_keys.load();
+    REQUIRE(before->generation == 1);
+
+    // 缺 version（version=2）：解析失败，重载不得替换旧快照。
+    const std::string bad = write_config("llmopt_reload_bad.json", R"({"version":2,"keys":[]})");
+    chmod_0600(bad);
+    cfg.api_keys_file = bad;
+    const auto next = reload_api_keys(cfg, message);
+    CHECK(next == nullptr);
+    CHECK(message.find("version") != std::string::npos);
+    const auto after = cfg.api_keys.load();
+    CHECK(after == before);
+    CHECK(after->generation == 1);
+    TenantQuota fallback;
+    CHECK(resolve_bearer("Bearer " + std::string(kTestKeyA), after, fallback).ok);
+    std::filesystem::remove(good);
+    std::filesystem::remove(bad);
+    clear_env();
+}
+
+// 阶段 12 S4：好文件重载后旧 sha 失效、新 sha 命中，generation 在旧快照上 +1。
+TEST_CASE("阶段 12 S4：好文件重载后旧 sha 失效、新 sha 命中且 generation 递增") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    const std::string sha_a = sha256_hex(kTestKeyA);
+    const std::string sha_b = sha256_hex(kTestKeyB);
+    const std::string good = write_config(
+            "llmopt_reload_rotate.json",
+            one_key_body("tenant-a", sha_a, R"({"max_concurrency":1,"queue_capacity":1})"));
+    chmod_0600(good);
+    ServerConfig cfg;
+    std::string message;
+    REQUIRE(load(key_args(good), cfg, message) == ErrCode::Ok);
+
+    // 原地改写为同 id 的新摘要；重载成功后替换快照。
+    std::ofstream out(good, std::ios::binary | std::ios::trunc);
+    out << one_key_body("tenant-a", sha_b, R"({"max_concurrency":1,"queue_capacity":1})");
+    out.close();
+    const auto next = reload_api_keys(cfg, message);
+    REQUIRE(next != nullptr);
+    CHECK(next->generation == 2);
+    cfg.api_keys.store(next);
+
+    TenantQuota fallback;
+    CHECK_FALSE(
+            resolve_bearer("Bearer " + std::string(kTestKeyA), cfg.api_keys.load(), fallback).ok);
+    const AuthDecision hit =
+            resolve_bearer("Bearer " + std::string(kTestKeyB), cfg.api_keys.load(), fallback);
+    CHECK(hit.ok);
+    CHECK_EQ(hit.tenant, "tenant-a");
+    std::filesystem::remove(good);
+    clear_env();
+}
+
+// 阶段 12 S4：--api-keys-reload-seconds 三入口（CLI/env/JSON）一致，越界与非法值拒绝。
+TEST_CASE("阶段 12 S4：reload-seconds 三入口一致且越界拒绝") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+
+    CHECK(load({"--model", "m.gguf", "--api-keys-reload-seconds", "3"}, cfg, message) ==
+          ErrCode::Ok);
+    CHECK_EQ(cfg.api_keys_reload_seconds, 3);
+
+    set_env("LLMOPT_API_KEYS_RELOAD_SECONDS", "7");
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK_EQ(cfg.api_keys_reload_seconds, 7);
+
+    // 优先级 CLI > env > file：清掉 env 后 JSON 入口才生效。
+    clear_env();
+    const std::string file = write_config(
+            "llmopt_reload_cfg.json", R"({"model":"m.gguf","api-keys-reload-seconds":11})");
+    CHECK(load({"--config", file}, cfg, message) == ErrCode::Ok);
+    CHECK_EQ(cfg.api_keys_reload_seconds, 11);
+
+    CHECK(load({"--model", "m.gguf", "--api-keys-reload-seconds", "-1"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(message.find("api-keys-reload-seconds") != std::string::npos);
+    CHECK(load({"--model", "m.gguf", "--api-keys-reload-seconds", "3601"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--api-keys-reload-seconds", "abc"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    std::filesystem::remove(file);
+    clear_env();
+}
+
+// 阶段 12 S4：POSIX 下文件权限非 0600 拒绝；Windows 无权限位，perm 分支语义为 skipped。
+TEST_CASE("阶段 12 S4：key 文件权限校验（POSIX 0600；Windows perm 分支跳过）") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    const std::string sha_a = sha256_hex(kTestKeyA);
+    const std::string path = write_config(
+            "llmopt_api_keys_perm.json",
+            one_key_body("tenant-a", sha_a, R"({"max_concurrency":1,"queue_capacity":1})"));
+    ServerConfig cfg;
+    std::string message;
+#ifndef _WIN32
+    (void)::chmod(path.c_str(), 0644);
+    CHECK(load(key_args(path), cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(message.find("0600") != std::string::npos);
+    CHECK(cfg.api_keys.empty());
+    (void)::chmod(path.c_str(), 0600);
+    CHECK(load(key_args(path), cfg, message) == ErrCode::Ok);
+#else
+    // Windows 无 POSIX 权限位：perm_check=skipped，文件可直接加载成功。
+    CHECK(load(key_args(path), cfg, message) == ErrCode::Ok);
+    CHECK_FALSE(cfg.api_keys.empty());
+#endif
+    std::filesystem::remove(path);
+    clear_env();
+}
+
+// 阶段 12 S4：reload 失败指标已登记到 MetricId 表（find_metric 可解析）。
+TEST_CASE("阶段 12 S4：reload 失败指标已登记") {
+    CHECK(find_metric("llmopt_api_keys_reload_failed_total") != MetricId::Count);
 }

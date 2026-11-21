@@ -154,7 +154,9 @@ TEST_CASE("expose_text 每个 family 恰好一组 TYPE/HELP") {
             CHECK(std::strtod(value.c_str(), nullptr) >= 0.0);
         }
     }
-    CHECK(sample_lines == llmopt::kMetricCount);
+    // 固定指标表之外还有一条静态构建信息（llmopt_build_info），它不属于 MetricId 表。
+    CHECK(sample_lines == llmopt::kMetricCount + 1);
+    CHECK(text.find("llmopt_build_info{version=\"") != std::string::npos);
     CHECK(text.find("llmopt_vram_peak_mib NaN") != std::string::npos);
 }
 
