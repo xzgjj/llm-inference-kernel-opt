@@ -1,13 +1,11 @@
 // runner_raii_test.cc — 4-G0-7：C 句柄由 unique_ptr 持有，异常/早退/重复 release 都不泄漏。
-// 只在 LLMOPT_ENABLE_LLAMA=ON 的构建里登记；有真模型时走完整 load→release→reload。
+// 只在 LLMOPT_ENABLE_LLAMA=ON 的构建里登记；真模型路径见 integration/runner_real_probe.cc。
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 #include "llmopt/runner.hpp"
 
-#include <cstdlib>
 #include <memory>
 #include <string>
-#include <vector>
 
 using namespace llmopt;
 
@@ -44,27 +42,5 @@ TEST_CASE("加载失败后 release 再加载：早退路径不持有半初始化
     runner->release();
     CHECK(runner->load_model(bad) == ErrCode::ModelNotLoaded);
     runner->release();
-    runner->release();
-}
-
-TEST_CASE("真模型 load->tokenize->release->reload") {
-    const char* model = std::getenv("LLMOPT_TEST_MODEL");
-    if (model == nullptr || model[0] == '\0') {
-        return; // 未提供模型时只验证句柄生命周期。
-    }
-    auto runner = make_llama_runner();
-    REQUIRE(runner != nullptr);
-    const ModelConfig config = config_for(model);
-    const ErrCode loaded = runner->load_model(config);
-    REQUIRE(loaded == ErrCode::Ok);
-    std::vector<std::int32_t> ids;
-    CHECK(runner->tokenize("hello", ids) == ErrCode::Ok);
-    CHECK_FALSE(ids.empty());
-    runner->release();
-    std::vector<std::int32_t> after_release;
-    CHECK(runner->tokenize("hello", after_release) == ErrCode::ModelNotLoaded);
-    CHECK(runner->detokenize(1).empty());
-    CHECK_FALSE(runner->is_eos(1));
-    REQUIRE(runner->load_model(config) == ErrCode::Ok);
     runner->release();
 }

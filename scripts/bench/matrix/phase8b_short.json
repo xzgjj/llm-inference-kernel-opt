@@ -33,5 +33,6 @@
     "repeat_penalty": 1.0
   },
   "n_gpu_layers": 24,
-  "threads": 0
+  "threads": 0,
+  "kv_cache_type": "f16"
 }

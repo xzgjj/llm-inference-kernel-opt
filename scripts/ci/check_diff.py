@@ -35,7 +35,7 @@ CODEOWNERS = ".github/CODEOWNERS"
 
 ALLOWED_TOP = {
     "src", "include", "tests", "ci", "docs", "scripts", "cmake", ".github", ".githooks",
-    "third_party", "benchmarks", "examples", "tools",
+    "third_party", "benchmarks", "examples", "tools", "bench", "evidence",
 }
 ALLOWED_ROOT_FILES = {
     "README.md", "CLI.md", "CMakeLists.txt", "CMakePresets.json", ".gitignore", ".gitattributes",

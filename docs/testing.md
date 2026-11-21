@@ -176,7 +176,7 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 阶段 4 矩阵工具链的用例：
 
-- `tests/tools/test_matrix.py`（17 例）：JSON 配置必填/覆盖、§1.6 证据列（含显存三列与 `tok_accounting`）、真实 prompt token 口径（prefill + prefix hit，覆盖字符估算）、默认 donor=4 必须显式进 argv、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`、压测窗口 K-4/K-5/显存/KV 水位峰值采样、比率列保留 6 位小数（防 K-4 被舍成 0）、CUDA0/Host 缓冲区解析与 `unknown/buffers_partial` 语义、GPU/KV 参数必须进 argv。
+- `tests/tools/test_matrix.py`（18 例）：JSON 配置必填/覆盖、§1.6 证据列（含显存三列与 `tok_accounting`）、真实 prompt token 口径（prefill + prefix hit，覆盖字符估算）、默认 donor=4 必须显式进 argv、短/长档必须显式声明 `kv_cache_type=f16`（防 manifest 只记默认值）、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`、压测窗口 K-4/K-5/显存/KV 水位峰值采样、比率列保留 6 位小数（防 K-4 被舍成 0）、CUDA0/Host 缓冲区解析与 `unknown/buffers_partial` 语义、GPU/KV 参数必须进 argv。
 - `tests/tools/test_capacity_check.py`（8 例）：只解析服务 `estimate/capacity-only` 行不补算、缺行留空、`--capacity-only/--model-profile/--n-gpu-layers` 必须进 argv、CSV 行数与 ngl 对齐、子进程超时保留 partial 行、`OSError` 启动失败占位、半行/垃圾行解析、失败行不丢早期行。
 - `tests/tools/test_watch_matrix.py`（8 例）：`watch_matrix.snapshot` 统计行/成功/失败/`(P,tier,round)` 分格，坏 JSON 行跳过不崩；目录不存在时 `rows=0`、`last_event_age_s=None`，渲染不抛异常；只有 CSV 没有 `repro_manifest.json` 时不判完成（回归：矩阵先写 CSV 再写 manifest）；脏字段不崩；`decide` 在超阈值/未超/年龄未知时不误报、只有 report 才退出。
 - `tests/unit/gguf_test.cc` 增 3 例：`q8_0` 按 1.0625 B/值、`f32` 按 4 B/值；容量档位只读声明字段并推出 262144 B/token；缺字段/坏 JSON 必须失败。
@@ -255,8 +255,9 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `contract_scheduler`：KV 峰值随占用取大、排空后保留不清零；`test_server_metrics.py` 补 peak 序列、`peak ≥ used`、排空后 `peak ≥ 1` 与 `llmopt_vram_device_mib` 非负断言。
 - `test_server_smoke.py`：413/404/405 统一错误体与 `Allow` 头、`charset=utf-8`、capacity-only/model-profile 进程级起停与端口不监听；`test_server_admission.py` 补 QueueFull message 容量数值。
 - `unit_config`：`clear_env` 补 `LLMOPT_MODEL_PROFILE`/`LLMOPT_CAPACITY_ONLY` 并加隔离自检；`unit_gguf` 补浮点/字符串/非正整数负样本。
-- `tests/tools/test_real_contract_base.py`（10 例）：根地址 6 分支 + 非 JSON/非对象错误体容错；`test_watch_matrix.py` 8 例、`test_capacity_check.py` 8 例、`test_matrix.py` 17 例。
-- 复跑口径：全量 ctest **172 注册 / 171 通过 / 0 失败 / 1 跳过**；`tests/tools` **96 例**、`ci/` **21 例**；`run_ci.py --mode pr` 四步 PASS；真 8B e2e 在 HTTP 修复后 **PASS 10 项**。
+- `tests/tools/test_real_contract_base.py`（10 例）：根地址 6 分支 + 非 JSON/非对象错误体容错；`test_watch_matrix.py` 8 例、`test_capacity_check.py` 8 例、`test_matrix.py` 18 例。
+- 真模型 runner 不再混在 `runner_raii_test` 里早退：独立 `runner_real_probe` + `test_runner_real.py`，缺 `LLMOPT_TEST_MODEL` 时 CTest 记 Skip(77)，并输出 `SKIP` 文本。
+- 复跑口径：全量 ctest **172 注册 / 170 通过 / 0 失败 / 2 跳过**（e2e 与真模型探针）；`ctest -L fast` **170/170**；`tests/tools` **97 例**、`ci/` **21 例**；`run_ci.py --mode pr` 四步 PASS；真 8B e2e 在 HTTP 修复后 **PASS 10 项**。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 

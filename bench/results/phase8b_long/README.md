@@ -44,6 +44,8 @@
 
 donor 口径：该轮配置省略 `donor_slots`，服务端按默认 donor=4 解析；但前缀缓存已关，`donor_slots_for` 返回 0，`n_seq_max=1`（`server-p1.log` 实测），donor 槽位没有参与。矩阵代码已改为始终显式写 `--donor-slots`，避免 manifest 与实跑口径漂移。
 
+KV 类型：该轮配置未写 `kv_cache_type`，实际按服务默认 `f16` 运行；配置已显式补 `f16`，旧 manifest 早于该键。
+
 ## 复现
 
 ```bash

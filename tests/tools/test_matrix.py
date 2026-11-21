@@ -87,6 +87,13 @@ class MatrixConfigTest(unittest.TestCase):
         argv = matrix.server_argv(cfg, 1, 18080)
         self.assertEqual(argv[argv.index("--donor-slots") + 1], "4")
 
+    def test_phase8b_configs_declare_kv_type(self) -> None:
+        """回归：短/长档曾省略 KV 类型，manifest 只记默认值，复现口径不清。"""
+        root = Path(__file__).resolve().parents[2]
+        for name in ("phase8b_short.json", "phase8b_long.json"):
+            cfg = matrix.load_config(root / "scripts" / "bench" / "matrix" / name)
+            self.assertEqual(cfg.kv_cache_type, "f16", name)
+
     def test_missing_key_is_fatal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "m.json"

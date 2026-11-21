@@ -61,6 +61,22 @@ if(LLMOPT_ENABLE_LLAMA)
     llmopt_add_doctest(runner_raii_test "unit;fast;asan"
                        SOURCES unit/runner_raii_test.cc ${CMAKE_SOURCE_DIR}/src/runner_llama.cpp)
     add_llama_backend(runner_raii_test)
+
+    # 真模型路径单独进程级：缺 LLMOPT_TEST_MODEL 时 CTest 记 Skip(77)，不再伪装 Passed。
+    add_executable(runner_real_probe integration/runner_real_probe.cc
+                   ${CMAKE_SOURCE_DIR}/src/runner_llama.cpp)
+    target_link_libraries(runner_real_probe PRIVATE llmopt_core llmopt_warnings)
+    add_llama_backend(runner_real_probe)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME integration_runner_real
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_runner_real.py
+                         $<TARGET_FILE:runner_real_probe>)
+        set_tests_properties(integration_runner_real PROPERTIES
+                             LABELS "integration;slow;needs-gpu"
+                             SKIP_RETURN_CODE 77
+                             TIMEOUT 300)
+    endif()
 endif()
 
 if(Python3_Interpreter_FOUND)

@@ -9,7 +9,7 @@
 
 ---
 
-## 1. 最终闸门总览（本轮复跑，命令与退出码见 §5）
+## 1. 最终闸门总览（三轮修复后、A 补丁前）
 
 | 闸门 | 命令（工作目录） | 退出码 | 结果 | 原始日志 |
 | --- | --- | --- | --- | --- |
@@ -19,7 +19,7 @@
 | 代码静态闸门 | `python3 scripts/ci/check_code.py`（仓库根） | **0** | code PASS；deps/size/scope PASS；仅 CI-COD-004 重复率 3.58% warning（阈值 3% 警告 / 5% 失败，不阻塞）；**CI-COD-003 已消失** | `raw/phase8_check_code.log` |
 | 阶段 4 扫描器自测 | `python3 ci/test_phase4_scanners.py` | **0** | 5 OK / 0 失败 | `raw/phase8_scanners.log` |
 | 测试注册表自洽 | `python3 scripts/ci/check_tests.py` | **0** | tests PASS；49 个测试文件、6 条登记 | `raw/phase8_check_tests.log` |
-| Python tools 单测 | `python3 -m unittest discover -s tests/tools -t .` | **0** | **96 OK** / 0 失败 | `raw/phase8_tools_unittest.log` |
+| Python tools 单测 | `python3 -m unittest discover -s tests/tools -t .` | **0** | **97 OK** / 0 失败 | `raw/phase8_tools_unittest.log` |
 | ci 脚本单测 | `python3 -m unittest discover -s ci -t .` | **0** | **21 OK** / 0 失败 | `raw/phase8_ci_unittest.log` |
 | PR 模式全闸门 | `python3 scripts/ci/run_ci.py --mode pr` | **0** | docs / tests / code / diff 全 PASS | `raw/phase8_ci_pr.log` |
 | 改动文件格式 | `clang-format --dry-run -Werror`（14 个改动 C/HPP/CC 文件） | **0** | 0 违规（日志 0 行） | `raw/phase8_clang_format.log` |
@@ -31,7 +31,7 @@
 | ctest 注册 | 165 | **172** | 本轮新增 C++ 用例：admission 1、protocol 3、contract scheduler 2；其余为既有套件内扩断言 |
 | fast 通过 / 失败 | 164 / 0 | **171 / 0** | |
 | 全量通过 / 失败 / 跳过 | 164 / 0 / 1 | **171 / 0 / 1** | 跳过仍为同一条 e2e 真服务契约用例 |
-| tools unittest | 75 例，74 OK + 1 error | **96 OK / 0 失败** | 基线 `test_report` TypeError 已由 MainAgent 侧对齐；本轮新增 watch/capacity/real_contract_base 共 19 例 |
+| tools unittest | 75 例，74 OK + 1 error | **97 OK / 0 失败** | 基线 `test_report` TypeError 已由 MainAgent 侧对齐；本轮新增 watch/capacity/real_contract_base 共 19 例 + 短/长档 KV 类型声明回归 1 例 |
 | ci unittest | 21 OK | **21 OK** | 无回归 |
 | check_code | RC=1（COD-003 复杂度 + COD-001 gguf 格式） | **RC=0** | COD-003 由 MainAgent 拆分 `validate_model_entry/validate_runtime_limits/validate_backend_knobs` 消除；COD-001 经 clang-format 清零；COD-004 3.58% 为非阻塞 warning |
 | run_ci `--mode pr` | RC=1（code FAIL） | **RC=0** | 四步全 PASS |
@@ -87,11 +87,11 @@
 | R3-02 [P2] KV 峰值只验名解析，非递减 / 排空保留语义无断言 | **已补** | `tests/contract/scheduler_test.cc` 新增 **「KV 峰值随占用取大，排空后保留不清零」**；`tests/integration/test_server_metrics.py` 补 peak 序列存在、`peak ≥ used`、排空后 `peak ≥ 1` 断言。 | 变异记录：`std::max` 改为覆盖写后该 contract 断言变红（本轮前已验证）。 |
 | R3-03 [P2] `clear_env()` 未清两个新 env 键，用例间环境污染 | **已修** | `tests/unit/config_test.cc` `clear_env` 补清 `LLMOPT_MODEL_PROFILE`/`LLMOPT_CAPACITY_ONLY`；新增隔离自检用例 **「容量档位环境变量经 clear_env 后不残留到后续用例」**。 | 变异：不清两键时隔离用例变红（本轮前已验证）。 |
 | R3-04 [P2] `normalize_base` 无 hermetic 单测；非 200 体 `json.loads`/`int` 裸调用可崩用例 | **已补** | `tests/e2e/test_real_service_contract.py` 抽 `parse_json_body` / `error_object` 容错 helper，替换四处裸 `json.loads`；`LLMOPT_E2E_OVERFLOW_TOKENS` 非整数回退 1600 并打印 WARN。新建 `tests/tools/test_real_contract_base.py` hermetic 单测 10 例：`normalize_base` 6 分支（host:port / http 默认 80 / https 默认 443 / 拒路径 / 拒坏 scheme / 拒缺 host）+ 容错解析 4 例（非 JSON 空体 / JSON 数组非对象 / error 对象缺失或类型错 / error 对象提取）。 | tools discover 全量绿；新文件经 `check_tests.py` 目录级 scope 覆盖（49 文件登记 PASS）。 |
-| R3-05 [P2] `watch_matrix` 主循环零覆盖；snapshot 对非数值字段无容错 | **已修（脚本 + 测试）** | `scripts/bench/watch_matrix.py` 加 `_safe_int`、非对象行跳过；抽出纯函数 `decide(state, stall_after, until_report)`。`tests/tools/test_watch_matrix.py` 补 DirtyRowTest（脏字段不崩）+ DecideTest（超阈值 stalled / 阈值下不 stalled / 年龄未知不 stalled / 仅出 report 才退出）共 5 例；文件 8 例全绿。 | tools discover 96 OK。 |
-| R3-06 [P2] `capacity_check.py` 子进程超时/非零无兜底，整轮写 CSV 前崩掉；负样本偏薄 | **已修（脚本 + 测试）** | `run_one` 捕 `subprocess.TimeoutExpired`（exit 124，保留 partial 输出解析；注意 `TimeoutExpired` 构造参数名是 `output`，部分取 `exc.output`）/ `OSError`（exit 1，启动失败占位行）；`main` 先写表头再逐行 `writerow`+`flush`，失败行不丢早期行。`tests/tools/test_capacity_check.py` 补超时行保留、OSError 占位、半行/垃圾解析负样本、失败行不丢早期行共 4 例；文件 8 例全绿。 | tools discover 96 OK。 |
+| R3-05 [P2] `watch_matrix` 主循环零覆盖；snapshot 对非数值字段无容错 | **已修（脚本 + 测试）** | `scripts/bench/watch_matrix.py` 加 `_safe_int`、非对象行跳过；抽出纯函数 `decide(state, stall_after, until_report)`。`tests/tools/test_watch_matrix.py` 补 DirtyRowTest（脏字段不崩）+ DecideTest（超阈值 stalled / 阈值下不 stalled / 年龄未知不 stalled / 仅出 report 才退出）共 5 例；文件 8 例全绿。 | tools discover 97 OK。 |
+| R3-06 [P2] `capacity_check.py` 子进程超时/非零无兜底，整轮写 CSV 前崩掉；负样本偏薄 | **已修（脚本 + 测试）** | `run_one` 捕 `subprocess.TimeoutExpired`（exit 124，保留 partial 输出解析；注意 `TimeoutExpired` 构造参数名是 `output`，部分取 `exc.output`）/ `OSError`（exit 1，启动失败占位行）；`main` 先写表头再逐行 `writerow`+`flush`，失败行不丢早期行。`tests/tools/test_capacity_check.py` 补超时行保留、OSError 占位、半行/垃圾解析负样本、失败行不丢早期行共 4 例；文件 8 例全绿。 | tools discover 97 OK。 |
 | R3-07 [P2] `llmopt_vram_device_mib` 服务端发射未在集成测试核对 | **已补** | `test_server_metrics.py` 补 `llmopt_vram_device_mib` 序列存在 + 非负或 NaN 断言。 | 随 `integration_server_metrics` 回归。 |
 | R3-08 [P2] 两个新增 `.sh` 可执行位未入 git 索引；调用方式未固化 | **只记录证据，不改码** | 实测：`scripts/bench/run_long_matrix.sh`、`run_real_contract.sh` 当前 untracked，磁盘 0777；`core.filemode=false`，入库后 git 记 100644；两脚本均 `cd "$(dirname "$0")/../.."` 自定位。**调用必须 `bash scripts/bench/<name>.sh`，不可直接 `./`**（入库后直接执行会因 644 无执行位失败）。 | 证据见 §8.2。 |
-| R3-09 [P3] 采样器用例依赖 `time.sleep(0.22)` 定时等待，脆弱点 | **已改测试侧** | `tests/tools/test_matrix.py` 采样器固定 sleep 改为轮询 `sampler.kv_used == 0` 直到首轮回调写入、2s 上限兜底；`tools/bench/matrix.py` 未动。 | 17 例全绿（tools discover 内）。 |
+| R3-09 [P3] 采样器用例依赖 `time.sleep(0.22)` 定时等待，脆弱点 | **已改测试侧** | `tests/tools/test_matrix.py` 采样器固定 sleep 改为轮询 `sampler.kv_used == 0` 直到首轮回调写入、2s 上限兜底；`tools/bench/matrix.py` 未动。 | 18 例全绿（tools discover 内）。 |
 | R3-10 [P3] 档位 JSON 缺类型不符 / 非正整数负样本 | **已补** | `tests/unit/gguf_test.cc` 用例 **「容量档位拒绝浮点/字符串/非正整数字段」** 补三个拒绝子例：浮点 `1.5`、字符串 `"64"`、`block_count=0`。该文件以 MainAgent 格式化版本为准，本轮未再动。 | 随 `unit_gguf` 回归。 |
 | R3-11 [P3] 短/长证据矩阵未设 `kv_cache_type`，落默认 f16 | **观察项，不改证据配置** | `scripts/bench/matrix/phase8b_short.json`、`phase8b_long.json` 实测无 `kv_cache_type` 键；容量档 q8_0 建议口径与 f16 默认存在偏差。属禁改证据配置，仅列出供后续矩阵校准。 | 无。 |
 
@@ -111,7 +111,7 @@
 | 6 | `python3 scripts/ci/check_code.py` | 0 | code PASS；COD-004 3.58% warning（非阻塞） |
 | 7 | `python3 ci/test_phase4_scanners.py` | 0 | Ran 5 tests，OK |
 | 8 | `python3 scripts/ci/check_tests.py` | 0 | tests PASS，49 文件 / 6 登记 |
-| 9 | `python3 -m unittest discover -s tests/tools -t .` | 0 | Ran 96 tests，OK |
+| 9 | `python3 -m unittest discover -s tests/tools -t .` | 0 | Ran 97 tests，OK |
 | 10 | `python3 -m unittest discover -s ci -t .` | 0 | Ran 21 tests，OK |
 | 11 | `python3 scripts/ci/run_ci.py --mode pr` | 0 | docs/tests/code/diff 全 PASS |
 | 12 | `clang-format --dry-run -Werror`（14 个改动 C/HPP/CC） | 0 | 0 违规，日志 0 行 |
@@ -221,8 +221,18 @@
 | `phase8_check_code.log` | check_code 输出，RC=0，COD-004 warning |
 | `phase8_scanners.log` | phase4 扫描器自测，5 OK |
 | `phase8_check_tests.log` | 测试注册表自洽，49 文件 / 6 登记 |
-| `phase8_tools_unittest.log` | tests/tools discover，96 OK |
+| `phase8_tools_unittest.log` | tests/tools discover，97 OK |
 | `phase8_ci_unittest.log` | ci/ discover，21 OK |
 | `phase8_ci_pr.log` | `run_ci.py --mode pr` 四步全 PASS |
 | `phase8_clang_format.log` | 14 个改动文件 dry-run，0 违规（空文件） |
 | `phase8_e2e_skip.log` | e2e 直跑 SKIP 文本与 RC=77 |
+
+## 11 A 补丁后的最终口径
+
+在 §1 复跑之后又落了三项低风险收口，当前状态以本节为准：
+
+- 短/长档配置显式声明 `kv_cache_type=f16`，新增 `test_phase8b_configs_declare_kv_type`；旧 manifest 早于该键，结果不受影响，README 已注明。
+- 真模型 runner 从 `runner_raii_test` 拆出：新增 `runner_real_probe` + `test_runner_real.py`，缺 `LLMOPT_TEST_MODEL` 时 CTest 记 Skip(77)，不再把早退计为 Passed。
+- 两个 `.sh` 已以 `100755` 入库；新增 `scripts/ci/run_real_e2e.sh`，缺 `LLMOPT_REAL_BASE` 时 77 跳过。
+- 当前复跑：`ctest -L fast` **170/170**；全量 **172 注册 / 170 通过 / 0 失败 / 2 跳过**（`integration_runner_real`、`e2e_real_service_contract`）；`tests/tools` **97/97**；Release 构建 0 warning；`check_code` PASS（仅重复率 3.58% warning）。
+
