@@ -179,6 +179,29 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+  # rule: CI-TLS-001 —— TLS 是可选构建；至少一个 Linux 作业编译并跑握手/隔离回归
+  tls:
+    name: tls
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install OpenSSL headers
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev
+      - name: configure
+        run: >
+          cmake -S . -B build-tls -DCMAKE_BUILD_TYPE=Release
+          -DLLMOPT_ENABLE_TLS=ON
+      - name: build
+        run: cmake --build build-tls --parallel
+      - name: TLS and control isolation
+        run: >
+          ctest --test-dir build-tls --output-on-failure
+          -R "integration_server_tls|integration_server_control_isolation|integration_server_tls_config_error"
+
   # rule: CI-LLM-001 —— 真实后端不进默认链接，但必须至少被编译一次
   llama-compile:
     name: llama-compile

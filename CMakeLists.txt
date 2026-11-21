@@ -9,11 +9,16 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 option(LLMOPT_ENABLE_LLAMA "Link the real llama.cpp backend (Linux/WSL)" OFF)
 option(LLMOPT_BUILD_TESTS "Build doctest unit, contract and integration tests" ON)
 option(LLMOPT_COVERAGE "Instrument with gcov (GCC/Clang) for line coverage" OFF)
+option(LLMOPT_ENABLE_TLS "Build HTTPS server support with OpenSSL" OFF)
 set(LLMOPT_DEPS_DIR "${CMAKE_SOURCE_DIR}/third_party/_deps" CACHE PATH "FetchContent cache")
 # CMake ≥4 默认拒绝 min<3.5 的第三方工程；doctest 2.4.11 仍写 3.0，这里统一放宽下限。
 set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 include(cmake/deps.cmake)
+
+if(LLMOPT_ENABLE_TLS)
+    find_package(OpenSSL REQUIRED)
+endif()
 
 add_library(llmopt_warnings INTERFACE)
 target_compile_options(llmopt_warnings INTERFACE
@@ -61,6 +66,12 @@ endif()
 
 add_executable(llmopt_server src/http_server.cpp src/main.cpp)
 target_link_libraries(llmopt_server PRIVATE llmopt_core httplib::httplib spdlog::spdlog llmopt_warnings llmopt_coverage)
+if(LLMOPT_ENABLE_TLS)
+    # cpp-httplib 是 header-only：定义必须挂在包含 httplib.h 的目标上。
+    target_compile_definitions(llmopt_server PRIVATE
+        CPPHTTPLIB_OPENSSL_SUPPORT=1 LLMOPT_HAS_TLS=1)
+    target_link_libraries(llmopt_server PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+endif()
 if(LLMOPT_ENABLE_LLAMA)
     add_llama_backend(llmopt_server)
     target_sources(llmopt_server PRIVATE src/runner_llama.cpp)

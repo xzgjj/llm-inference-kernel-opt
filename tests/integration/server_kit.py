@@ -7,6 +7,7 @@ import http.client
 import json
 import os
 import socket
+import ssl
 import struct
 import subprocess
 import time
@@ -68,6 +69,46 @@ def get(port: int, path: str, timeout: float = 10.0) -> tuple[int, bytes, dict]:
         conn.close()
 
 
+def get_https(port: int, path: str, timeout: float = 10.0) -> tuple[int, bytes, dict]:
+    """自签证书测试专用；生产客户端必须配置 CA，不关闭校验。"""
+    context = ssl._create_unverified_context()
+    conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=timeout, context=context)
+    try:
+        conn.request("GET", path)
+        response = conn.getresponse()
+        return response.status, response.read(), dict(response.getheaders())
+    finally:
+        conn.close()
+
+
+def post_https(port: int, path: str, payload: dict,
+               timeout: float = 30.0) -> tuple[int, bytes, dict]:
+    context = ssl._create_unverified_context()
+    conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=timeout, context=context)
+    try:
+        conn.request("POST", path, json.dumps(payload), {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        return response.status, response.read(), dict(response.getheaders())
+    finally:
+        conn.close()
+
+
+def wait_ready_https(port: int, proc: subprocess.Popen[bytes], timeout: float = 30.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            out, err = proc.communicate()
+            raise RuntimeError(f"服务提前退出 rc={proc.returncode}\n{out}\n{err}")
+        try:
+            status, _, _ = get_https(port, "/healthz")
+            if status == 200:
+                return
+        except (OSError, ssl.SSLError):
+            pass
+        time.sleep(0.1)
+    raise RuntimeError("等待 HTTPS /healthz 就绪超时")
+
+
 def wait_ready(port: int, proc: subprocess.Popen[bytes], timeout: float = 30.0) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -98,6 +139,31 @@ def running_server(server: Path, model: Path, args: list[str],
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
     try:
         wait_ready(port, proc)
+        yield port
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+@contextmanager
+def running_server_tls(server: Path, model: Path, args: list[str], cert: Path, key: Path,
+                       env_extra: dict | None = None) -> Iterator[int]:
+    """起一个 HTTPS stub 服务；证书由调用方生成，退出时确保回收。"""
+    port = free_port()
+    env = dict(os.environ)
+    env["LLMOPT_ALLOW_STUB"] = "1"
+    if env_extra:
+        env.update(env_extra)
+    cmd = [str(server), "--model", str(model), "--host", "127.0.0.1", "--port", str(port),
+           "--backend", "stub", "--mode", "off",
+           "--tls-cert", str(cert), "--tls-key", str(key)] + args
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    try:
+        wait_ready_https(port, proc)
         yield port
     finally:
         proc.terminate()

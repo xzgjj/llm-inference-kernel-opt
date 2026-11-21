@@ -60,7 +60,10 @@ void clear_env() {
                             "LLMOPT_RATE_LIMIT_BURST",
                             "LLMOPT_DRAIN_DEADLINE_SECONDS",
                             "LLMOPT_API_KEY",
-                            "LLMOPT_STEP_TRACE_RATE"}) {
+                            "LLMOPT_STEP_TRACE_RATE",
+                            "LLMOPT_CONTROL_PORT",
+                            "LLMOPT_TLS_CERT",
+                            "LLMOPT_TLS_KEY"}) {
         set_env(key, "");
     }
 }
@@ -178,6 +181,33 @@ TEST_CASE("端口、上下文、并发与安全比例做范围校验") {
     CHECK(load({"--model", "m.gguf", "--safety-ratio", "0.96"}, cfg, message) ==
           ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--mode", "nope"}, cfg, message) == ErrCode::ConfigInvalid);
+}
+
+TEST_CASE("控制面端口与 TLS 证书必须成对且端口不冲突") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.control_port == 0);
+    CHECK(cfg.tls_cert_path.empty());
+    CHECK(cfg.tls_key_path.empty());
+
+    CHECK(load({"--model", "m.gguf", "--control-port", "8081", "--port", "8080"}, cfg, message) ==
+          ErrCode::Ok);
+    CHECK(cfg.control_port == 8081);
+
+    CHECK(load({"--model", "m.gguf", "--control-port", "8080", "--port", "8080"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--control-port", "-1"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--tls-cert", "server.pem"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--tls-key", "server.key"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--tls-cert", "server.pem", "--tls-key", "server.key"}, cfg,
+               message) == ErrCode::Ok);
+    CHECK(cfg.tls_cert_path == "server.pem");
+    CHECK(cfg.tls_key_path == "server.key");
 }
 
 TEST_CASE("stub 后端必须显式放行") {

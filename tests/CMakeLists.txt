@@ -187,6 +187,33 @@ if(Python3_Interpreter_FOUND)
                          LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_slow_client PROPERTIES TIMEOUT 120)
 
+    add_test(NAME integration_server_control_isolation
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_control_isolation.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_control_isolation PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_control_isolation PROPERTIES TIMEOUT 120)
+
+    if(LLMOPT_ENABLE_TLS)
+        add_test(NAME integration_server_tls
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_tls.py
+                         $<TARGET_FILE:llmopt_server>)
+        set_tests_properties(integration_server_tls PROPERTIES
+                             LABELS "integration;fast;hermetic"
+                             SKIP_RETURN_CODE 77)
+        set_tests_properties(integration_server_tls PROPERTIES TIMEOUT 120)
+    endif()
+
+    add_test(NAME integration_server_tls_config_error
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_tls_config_error.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_tls_config_error PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_tls_config_error PROPERTIES TIMEOUT 120)
+
     # 真实服务契约：需要外部已运行的真模型服务（LLMOPT_REAL_BASE）；未设置即 SKIP(77)。
     add_test(NAME e2e_real_service_contract
              COMMAND ${Python3_EXECUTABLE}

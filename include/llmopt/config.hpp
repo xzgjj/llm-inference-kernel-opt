@@ -65,6 +65,12 @@ struct ServerConfig {
     std::int32_t request_deadline_seconds = 120;
     std::string api_key;              // 空=不鉴权；不写日志、不打印
     std::int32_t step_trace_rate = 0; // 1/N 采样；0=关
+    // 控制面隔离：>0 时在 loopback 上另起一个独立线程池的 /healthz /readyz /metrics。
+    // 0 保持旧行为（控制端点仍挂在数据面端口，兼容现有客户端）。
+    std::int32_t control_port = 0;
+    // TLS：两项必须同时设置；空=明文 HTTP。仅 LLMOPT_ENABLE_TLS=ON 的构建可用。
+    std::string tls_cert_path;
+    std::string tls_key_path;
 };
 
 // 返回 Ok 或用例错误；message 带具体参数名，main 负责映射退出码。

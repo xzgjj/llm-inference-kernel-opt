@@ -30,6 +30,7 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
               [--threads 0] [--n-gpu-layers 0] [--backend llama|stub] \
               [--rate-limit-rps 0] [--rate-limit-burst 32] \
               [--drain-deadline-seconds 30] [--api-key ""] [--step-trace-rate 0] \
+              [--control-port 0] [--tls-cert ""] [--tls-key ""] \
               [--log-level info|debug|warn]
 ```
 
@@ -69,10 +70,13 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 | `--request-deadline-seconds` | `LLMOPT_REQUEST_DEADLINE_SECONDS` | `120` | 1–3600 | 请求级总时限，从入队起算；流式/非流式共享，到期由 Scheduler 以 `TIMEOUT` 收尾 |
 | `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值 |
 | `--step-trace-rate` | `LLMOPT_STEP_TRACE_RATE` | `0` | 0–64 | 每步 trace 1/N 采样；0=关（行为在 7-5 接入） |
+| `--control-port` | `LLMOPT_CONTROL_PORT` | `0` | 0–65535，且不得等于 `--port` | `>0` 时在 `127.0.0.1` 另起独立控制面 listener（独立 4 线程池），只提供 `/healthz`、`/readyz`、`/metrics`；`0` 保持旧行为 |
+| `--tls-cert` | `LLMOPT_TLS_CERT` | 空 | PEM 证书链路径 | 与 `--tls-key` 必须成对；需 `-DLLMOPT_ENABLE_TLS=ON` 构建，否则启动退出 3 |
+| `--tls-key` | `LLMOPT_TLS_KEY` | 空 | PEM 私钥路径 | 不打印内容；证书/私钥无效时启动退出 3 |
 
 阶段 3 起支持 chunked prefill，`ctx-tokens` 不再受单步预算限制；`chunk-size` 取四档，其他值启动即拒绝。调度顺序固定为：在跑 decode 保位 → 在跑 prefill 的下一 chunk → 预算内补新请求，合计 token 不超过 `max-num-batched-tokens`。
 
-并发口径：HTTP 线程池大小 = `max-concurrency + 3`，额外 3 路固定留给 `/healthz`、`/readyz`、`/metrics` 与排空监视；一个连接由 cpp-httplib 串行处理，单连接并发恒为 1。入口准入预算为 `max-concurrency + queue-capacity`，超出的请求不占 handler。
+并发口径：数据面 HTTP 线程池大小 = `max-concurrency + 3`；控制端点仍保留在数据面端口以兼容旧探针。配置 `--control-port>0` 后，额外起一个只绑 `127.0.0.1` 的控制面 listener，使用独立的 4 线程池，只提供 `/healthz`、`/readyz`、`/metrics`，数据面长流占满时不会饿死探针。一个连接由 cpp-httplib 串行处理，单连接并发恒为 1。入口准入预算为 `max-concurrency + queue-capacity`，超出的请求不占 handler。
 
 优先级固定：**CLI > `LLMOPT_*` > `--config` 文件 > 内置默认**。启动第一行打印生效配置，随后逐行打印 `config source: <键>=cli|env|file|default`，第三行打印预算与门控结论，便于复核。
 
@@ -186,6 +190,10 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 
 鉴权语义（D6-2，默认关）：配置 `--api-key` 后，`/v1/completions`、`/v1/chat/completions`、`/v1/models` 必须带 `Authorization: Bearer <api-key>`；缺失或错误回 401 `UNAUTHORIZED` + `WWW-Authenticate: Bearer`。`/healthz`、`/readyz`、`/metrics` 不校验，供探针与 Prometheus 抓取。
 
+TLS 语义（阶段 9）：`--tls-cert/--tls-key` 同时设置时，数据面以 `https` 提供服务；需 `-DLLMOPT_ENABLE_TLS=ON` 构建，默认构建配置证书会在启动时退出 3。证书/私钥无效、不可读同样退出 3。控制面仍为 loopback 明文，跨机控制面由前置代理终止 TLS。
+
+控制面隔离（阶段 9）：`--control-port>0` 时另起 `127.0.0.1` listener，独立 4 线程池，只提供 `/healthz`、`/readyz`、`/metrics`；数据面仍保留这三个端点。控制端口绑定失败退出 3。
+
 限流语义（6-G4）：`--rate-limit-rps > 0` 时先过令牌桶再解析；超额回 429 `RATE_LIMITED` + `Retry-After: 1`，不进队列、不占调度预算，并累加 `llmopt_rate_limited_total`。
 
 排空语义（6-G3）：SIGTERM/SIGINT 后状态转 `draining`，`/readyz` 与新请求立即 503；在飞请求在 `--drain-deadline-seconds` 内自然收尾，超时记 `llmopt_drain_timeout_total` 并强制停止，进程退出码仍为 0。`/healthz` 始终 200，body 的 `status` 反映 `starting|ready|draining|stopped`。
@@ -197,7 +205,7 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | 0 | 正常退出 | SIGINT/SIGTERM 后 HTTP 停止、调度排空 |
 | 1 | 启动失败 | 模型文件不可读/元数据缺失、取值非法、后端未编译 |
 | 2 | 用法错误 | 缺 `--model`、未知参数、缺少取值、`--config` 未知键/类型不符/越界/坏 JSON |
-| 3 | 资源不足 | `required > free`，或端口被占用 |
+| 3 | 资源不足 | `required > free`，或数据面/控制面端口被占用，或 TLS 证书/私钥无效/构建未启用 TLS |
 | 4 | 门控拒绝 | `auto` 软超预算、`force_on` 未带开关、快照字段缺失 |
 
 
@@ -243,9 +251,10 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | `LLMOPT_ALLOW_STUB=1` | 允许 stub 后端，供测试与 CI | 未设置即拒绝 |
 | `LLMOPT_LLAMA_ROOT` | CMake 查 llama.cpp 头/库的根 | `/root/llm-src/llama.cpp` |
 
-- 默认只绑 `127.0.0.1`；`--api-key` 提供单 token Bearer（默认关，空值不校验），不做多租户/配额。对外暴露仍建议反向代理承担 TLS 与更强认证。
+- 默认只绑 `127.0.0.1`；`--api-key` 提供单 token Bearer（默认关，空值不校验），不做多租户/配额。阶段 9 起可选用进程内 TLS；公网/多租户仍建议反向代理承担 TLS、mTLS 与更强认证。
 - 请求体上限 4 MB；读超时 5 s；写超时 120 s；单请求非流式排空上限 120 s。
 - 队列容量 32，满即 429；等待中的请求只占分词后的 token 数组，不占 KV。
+- 控制面独立端口只绑 loopback；不要把 `--control-port` 暴露到公网，除非前置代理做了访问控制。
 
 
 
@@ -265,6 +274,16 @@ ctest --test-dir build --output-on-failure
 cmake -S . -B build-wsl -DCMAKE_BUILD_TYPE=Release \
   -DLLMOPT_ENABLE_LLAMA=ON -DLLMOPT_LLAMA_ROOT=/root/llm-src/llama.cpp
 cmake --build build-wsl --parallel
+```
+
+TLS 构建（可选；需要 OpenSSL 开发包）：
+
+```bash
+cmake -S . -B build-tls -DCMAKE_BUILD_TYPE=Release -DLLMOPT_ENABLE_TLS=ON
+cmake --build build-tls --parallel
+./build-tls/llmopt_server --model model.gguf \
+  --tls-cert server.pem --tls-key server.key \
+  --control-port 8081
 ```
 
 启动（真实模型，CPU）：

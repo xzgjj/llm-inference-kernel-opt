@@ -19,7 +19,7 @@
 
 仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 CUDA kernel；本项目不做自定义算子，也不做分布式与训练。规模限定在单机、单进程、0.5B–27B 量化模型，本机实测档为 Qwen3-8B Q4_K_M。
 
-当前阶段 0–6 与阶段质量整改 A 已落地：162 条用例全绿（Windows stub 档 + WSL 真后端各一轮），Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
+当前阶段 0–8 与阶段 9 的 TLS/控制面隔离已落地：`ctest -L fast` 173 条全绿，全量 175 注册、2 条需真服务/真模型用例跳过；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
 
 
 
@@ -246,7 +246,7 @@ python scripts/spec5/recompute_spec5.py \
 
 ## 当前水平与局限
 
-已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据；阶段 5 只做预研判据，不落实现。WSL `ctest -L fast` 170 条全绿、全量 172 条 0 失败（2 条需真服务/真模型用例跳过）；真服务 e2e 10 项另行通过。
+已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离；阶段 5 只做预研判据，不落实现。WSL `ctest -L fast` 173 条全绿、全量 175 注册 0 失败（2 条需真服务/真模型用例跳过）；真服务 e2e 10 项另行通过。
 
 官方 8B 矩阵（WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q4_K_M，每档 30 请求 × 32 token × 2 轮，`ngl 24 / threads 0`，真实 token 口径）：
 
@@ -264,6 +264,7 @@ python scripts/spec5/recompute_spec5.py \
 - 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主，本机没有 Docker 与 SIGTERM 语义。
 - llama.cpp 的 `llama_batch` 没有 slot 字段，cell 由内部 `find_slot` 选择且无公开 getter，块表与 cell 的对账依赖内部头文件，属于**源码耦合点**，升级 llama.cpp 必须复核。
 - 兼容面是最小集：不做多租户、配额、WebUI、OpenAI 全量字段；鉴权只有一个 Bearer token。
+- 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
 - `/metrics` 不含直方图，p99 需离线复算；慢读退化与真后端容器冒烟仍缺真机复测。
 - 基准噪声偏大：同一档两轮的 TTFT / 吞吐漂移经常越过 10%，暂不适合做精细调参依据。
 

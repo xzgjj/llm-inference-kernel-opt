@@ -56,6 +56,9 @@ constexpr FieldSpec kFields[] = {
         {"request-deadline-seconds", false},
         {"api-key", false},
         {"step-trace-rate", false},
+        {"control-port", false},
+        {"tls-cert", false},
+        {"tls-key", false},
 };
 
 constexpr const char* kConfigKeys[] = {
@@ -90,6 +93,9 @@ constexpr const char* kConfigKeys[] = {
         "request-deadline-seconds",
         "api-key",
         "step-trace-rate",
+        "control-port",
+        "tls-cert",
+        "tls-key",
 };
 
 bool is_flag_key(const std::string& key) {
@@ -275,6 +281,12 @@ ErrCode apply_service_arg(ServerConfig& cfg, const std::string& key, const std::
         cfg.api_key = value;
     } else if (key == "--step-trace-rate") {
         return parse_int(value, cfg.step_trace_rate) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--control-port") {
+        return parse_int(value, cfg.control_port) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--tls-cert") {
+        cfg.tls_cert_path = value;
+    } else if (key == "--tls-key") {
+        cfg.tls_key_path = value;
     } else {
         return ErrCode::NotSupported;
     }
@@ -357,6 +369,18 @@ ErrCode validate_service_limits(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.api_key.size() > 512) {
         message = "api-key 长度不能超过 512";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.control_port < 0 || cfg.control_port > 65535) {
+        message = "control-port 必须在 0..65535（0=关闭独立控制面）";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.control_port != 0 && cfg.control_port == cfg.port) {
+        message = "control-port 不能与数据面 port 相同";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.tls_cert_path.empty() != cfg.tls_key_path.empty()) {
+        message = "tls-cert 与 tls-key 必须同时设置";
         return ErrCode::InvalidJson;
     }
     return ErrCode::Ok;
@@ -465,6 +489,8 @@ ErrCode load_env_strings(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sour
             {"LLMOPT_PREEMPT_TRACE", "preempt-trace", &cfg.preempt_trace_path},
             {"LLMOPT_STEP_TRACE", "step-trace", &cfg.step_trace_path},
             {"LLMOPT_API_KEY", "api-key", &cfg.api_key},
+            {"LLMOPT_TLS_CERT", "tls-cert", &cfg.tls_cert_path},
+            {"LLMOPT_TLS_KEY", "tls-key", &cfg.tls_key_path},
     };
     for (const StringBinding& binding : strings) {
         if (env_string(binding.env, *binding.target) != nullptr) {
@@ -502,6 +528,7 @@ ErrCode load_env_ints(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sources
             {"LLMOPT_REQUEST_DEADLINE_SECONDS", "request-deadline-seconds",
              &cfg.request_deadline_seconds},
             {"LLMOPT_STEP_TRACE_RATE", "step-trace-rate", &cfg.step_trace_rate},
+            {"LLMOPT_CONTROL_PORT", "control-port", &cfg.control_port},
     };
     for (const IntBinding& binding : ints) {
         const char* raw = std::getenv(binding.env);

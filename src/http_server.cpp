@@ -51,7 +51,8 @@ std::int32_t inflight(const SchedulerCore& core) {
 
 // 收到 SIGTERM/SIGINT 后：Draining（/readyz 与准入立刻 503）→ 等在飞清零 →
 // 超过 drain_deadline_seconds 记 drain_timeout_total 后强制停止。
-void drain_loop(const std::shared_ptr<AppContext>& ctx, httplib::Server& server) {
+void drain_loop(const std::shared_ptr<AppContext>& ctx, httplib::Server* data,
+                httplib::Server* control) {
     while (!g_signal_requested.load(std::memory_order_relaxed) && !ctx->listen_done.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
@@ -75,7 +76,12 @@ void drain_loop(const std::shared_ptr<AppContext>& ctx, httplib::Server& server)
         logger()->info("draining: 在飞请求已清零");
     }
     ctx->service.transit(ServiceState::Stopped);
-    server.stop();
+    if (control != nullptr) {
+        control->stop();
+    }
+    if (data != nullptr) {
+        data->stop();
+    }
 }
 
 // 拼接 Allow 头取值：按注册顺序去重列出允许的方法。
@@ -449,6 +455,46 @@ std::string model_id_from_path(const std::string& path) {
     return dot == std::string::npos ? name : name.substr(0, dot);
 }
 
+// 控制面路由只读状态；独立 listener 用独立 ThreadPool，避免被推理长连接占满。
+void register_control_routes(httplib::Server& server, const std::shared_ptr<AppContext>& ctx) {
+    server.Get("/healthz", [ctx](const httplib::Request&, httplib::Response& res) {
+        res.set_content("{\"status\":\"" + std::string(service_state_name(ctx->service.state())) +
+                                "\"}",
+                        "application/json; charset=utf-8");
+    });
+    server.Get("/readyz", [ctx](const httplib::Request&, httplib::Response& res) {
+        const ServiceState state = ctx->service.state();
+        res.status = state == ServiceState::Ready ? 200 : 503;
+        res.set_content("{\"status\":\"" + std::string(service_state_name(state)) + "\"}",
+                        "application/json; charset=utf-8");
+    });
+    server.Get("/metrics", [ctx](const httplib::Request&, httplib::Response& res) {
+        res.set_content(ctx->metrics->render(), "text/plain; version=0.0.4");
+    });
+}
+
+// 数据面可按 TLS 配置选择 SSLServer；控制面始终只绑 loopback，保持明文以满足本机探针。
+bool make_data_server(const ServerConfig& config, std::unique_ptr<httplib::Server>& out) {
+    if (config.tls_cert_path.empty()) {
+        out = std::make_unique<httplib::Server>();
+        return true;
+    }
+#ifdef LLMOPT_HAS_TLS
+    auto ssl = std::make_unique<httplib::SSLServer>(config.tls_cert_path.c_str(),
+                                                    config.tls_key_path.c_str());
+    if (!ssl->is_valid()) {
+        logger()->error("TLS 证书或私钥无效：cert={} key={}", config.tls_cert_path,
+                        config.tls_key_path);
+        return false;
+    }
+    out = std::move(ssl);
+    return true;
+#else
+    logger()->error("当前构建未启用 TLS；请用 -DLLMOPT_ENABLE_TLS=ON 重新构建");
+    return false;
+#endif
+}
+
 } // namespace
 
 // 安装路由并监听；SIGINT/SIGTERM 触发 stop，返回后由 main 关闭调度线程。
@@ -465,15 +511,16 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
                 std::make_unique<RateLimiter>(config.rate_limit_rps, config.rate_limit_burst);
     }
 
-    httplib::Server server;
-    // 总并发上限与 Scheduler 的活跃序列上限绑定；额外 3 个线程留给控制端点
-    // （/healthz、/readyz、/metrics）与排空监视，避免健康检查被推理请求饿死。
-    // cpp-httplib 每个连接串行处理请求，因此单连接天然并发为 1。
+    std::unique_ptr<httplib::Server> server;
+    if (!make_data_server(config, server)) {
+        return 3;
+    }
+    // 数据面并发上限与 Scheduler 的活跃序列上限绑定；控制面不再共享这组线程。
     const std::size_t handler_threads = static_cast<std::size_t>(core.concurrency_limit() + 3);
-    server.new_task_queue = [handler_threads] { return new httplib::ThreadPool(handler_threads); };
-    server.set_payload_max_length(std::size_t{4} * 1024 * 1024);
-    server.set_read_timeout(5, 0);
-    server.set_write_timeout(120, 0);
+    server->new_task_queue = [handler_threads] { return new httplib::ThreadPool(handler_threads); };
+    server->set_payload_max_length(std::size_t{4} * 1024 * 1024);
+    server->set_read_timeout(5, 0);
+    server->set_write_timeout(120, 0);
 
     // 已登记路由表：错误处理器据此区分 404（路径未登记）与 405（路径存在、方法不对）。
     std::map<std::string, std::vector<std::string>> route_methods;
@@ -481,19 +528,20 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
         route_methods[path].push_back(method);
     };
     register_route("POST", "/v1/completions");
-    server.Post("/v1/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
+    server->Post("/v1/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
         inference_handler(ctx, req, res, false);
     });
     register_route("POST", "/completion");
-    server.Post("/completion", [ctx](const httplib::Request& req, httplib::Response& res) {
+    server->Post("/completion", [ctx](const httplib::Request& req, httplib::Response& res) {
         inference_handler(ctx, req, res, false);
     });
     register_route("POST", "/v1/chat/completions");
-    server.Post("/v1/chat/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
-        inference_handler(ctx, req, res, true);
-    });
+    server->Post("/v1/chat/completions",
+                 [ctx](const httplib::Request& req, httplib::Response& res) {
+                     inference_handler(ctx, req, res, true);
+                 });
     register_route("GET", "/v1/models");
-    server.Get("/v1/models", [ctx](const httplib::Request& req, httplib::Response& res) {
+    server->Get("/v1/models", [ctx](const httplib::Request& req, httplib::Response& res) {
         if (!bearer_allowed(req.get_header_value("Authorization"), ctx->config->api_key)) {
             res.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");
             send_error(res, make_error(ErrCode::Unauthorized, "缺少或无效的 Bearer token"));
@@ -503,27 +551,14 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
                         "application/json; charset=utf-8");
     });
     register_route("GET", "/healthz");
-    server.Get("/healthz", [ctx](const httplib::Request&, httplib::Response& res) {
-        res.set_content("{\"status\":\"" + std::string(service_state_name(ctx->service.state())) +
-                                "\"}",
-                        "application/json; charset=utf-8");
-    });
-    // /readyz 只在 Ready 返回 200；Starting/Draining/Stopped 一律 503（6-G3）。
     register_route("GET", "/readyz");
-    server.Get("/readyz", [ctx](const httplib::Request&, httplib::Response& res) {
-        const ServiceState state = ctx->service.state();
-        res.status = state == ServiceState::Ready ? 200 : 503;
-        res.set_content("{\"status\":\"" + std::string(service_state_name(state)) + "\"}",
-                        "application/json; charset=utf-8");
-    });
     register_route("GET", "/metrics");
-    server.Get("/metrics", [ctx](const httplib::Request&, httplib::Response& res) {
-        res.set_content(ctx->metrics->render(), "text/plain; version=0.0.4");
-    });
+    register_control_routes(*server, ctx);
 
     // httplib 在 handler 不被调用的出口（413 超限、未匹配路由）直接回默认空体；
     // 这里兜底成统一错误 JSON。已由 handler 回包的 4xx 不覆盖其错误体。
-    server.set_error_handler([&route_methods](const httplib::Request& req, httplib::Response& res) {
+    server->set_error_handler([&route_methods](const httplib::Request& req,
+                                               httplib::Response& res) {
         if (!res.body.empty()) {
             return httplib::Server::HandlerResponse::Unhandled;
         }
@@ -550,18 +585,65 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
         return httplib::Server::HandlerResponse::Unhandled;
     });
 
-    g_server = &server;
+    g_server = server.get();
     g_signal_requested.store(false);
     ctx->listen_done.store(false);
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
+
+    // 独立控制面：只绑 loopback，自己的 ThreadPool；数据面再拥挤也不会占满这组线程。
+    httplib::Server control;
+    std::thread control_thread;
+    const bool control_enabled = config.control_port > 0;
+    if (control_enabled) {
+        control.new_task_queue = [] { return new httplib::ThreadPool(4); };
+        control.set_read_timeout(5, 0);
+        control.set_write_timeout(30, 0);
+        register_control_routes(control, ctx);
+        control.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
+            if (res.body.empty()) {
+                send_error(res,
+                           make_error(ErrCode::NotSupported, "控制面未登记的端点: " + req.path));
+            }
+            return httplib::Server::HandlerResponse::Handled;
+        });
+        if (!control.bind_to_port("127.0.0.1", config.control_port)) {
+            logger()->error("control-port {} 绑定失败（需 loopback 可用）", config.control_port);
+            return 3;
+        }
+        control_thread = std::thread([&control] { control.listen_after_bind(); });
+    }
+
+    if (!server->bind_to_port(config.host, config.port)) {
+        logger()->error("listen 失败：端口 {} 可能被占用", config.port);
+        if (control_enabled) {
+            control.stop();
+            control_thread.join();
+        }
+        return 3;
+    }
+
     ctx->service.transit(ServiceState::Ready);
-    logger()->info("listening on http://{}:{} backend={}", config.host, config.port,
+    logger()->info("listening on {}://{}:{} backend={}",
+                   config.tls_cert_path.empty() ? "http" : "https", config.host, config.port,
                    runner.backend_name());
-    std::thread drain_thread([ctx, &server] { drain_loop(ctx, server); });
-    const bool ok = server.listen(config.host, config.port);
+    if (control_enabled) {
+        logger()->info("control listening on http://127.0.0.1:{} (isolated pool=4)",
+                       config.control_port);
+    }
+    std::thread drain_thread(
+            [ctx, data = server.get(), ctrl = control_enabled ? &control : nullptr] {
+                drain_loop(ctx, data, ctrl);
+            });
+    const bool ok = server->listen_after_bind();
     ctx->listen_done.store(true);
+    if (control_enabled) {
+        control.stop();
+    }
     drain_thread.join();
+    if (control_thread.joinable()) {
+        control_thread.join();
+    }
     g_server = nullptr;
     ctx->stopping.store(true);
     if (ctx->service.state() == ServiceState::Ready) {
