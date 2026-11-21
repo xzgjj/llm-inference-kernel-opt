@@ -4,35 +4,38 @@
 
 [简体中文](README.md) ｜ [English](README.en.md)
 
+
+
 ## 项目简介
 
-作者原话：
+本项目和 llama 相关，主要围绕 C++ 大模型推理服务：目前 C++ 大模型主要有以下方向，我结合能力和设备情况选择尝试服务调度。
 
-> 本项目和 llama 相关，主要围绕 C++ 大模型推理服务：
-> 目前 C++ 大模型主要有以下方向，我结合能力和设备情况选择尝试服务调度。
->
 > - 偏算子 / 后端：ggml 后端插件化：自定义 Backend 与算子加速
 > - **偏服务调度：C++ 大模型推理服务：Continuous Batching 与请求调度**
-> - 偏算法加速：LLM 投机解码落地与端到端加速评估
+>- 偏算法加速：LLM 投机解码落地与端到端加速评估
 > - 偏低比特：低比特量化下的推理精度 — 吞吐权衡（INT4/FP8）
 
 计算面不自己写 GEMM：模型加载、图构建与 kernel 执行直接复用 ggml / llama.cpp；自研部分全部落在控制面——准入、组批、KV 块表、chunked prefill、抢占与恢复、容量门控、指标打点。要回答的问题很具体：在这台机器上，continuous batching 与 chunked prefill 到底带来多少收益，控制面的开销在哪里、边界在哪。
 
-仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 CUDA kernel；本项目不做自定义算子，也不做分布式与训练。规模限定在单机、单进程、0.5B–7B 量化模型。
+仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 CUDA kernel；本项目不做自定义算子，也不做分布式与训练。规模限定在单机、单进程、0.5B–27B 量化模型，本机实测档为 Qwen3-8B Q4_K_M。
 
-当前阶段 0–6 与阶段质量整改 A 已落地：Windows 侧 153 条 fast 用例全绿，Linux/WSL 侧真实 llama.cpp 后端跑通端到端，30 分钟 soak 与 TSan 10 轮均无异常。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
+当前阶段 0–6 与阶段质量整改 A 已落地：162 条用例全绿（Windows stub 档 + WSL 真后端各一轮），Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
+
+
 
 ## 核心功能
 
 1. **Continuous Batching**：按 token 级组批，运行序列与等待队列分离；每步受 `max-num-batched-tokens` 预算约束，达上限的请求进 waiting 队列，队列满返回 429。
 2. **块表 KV 管理**：定长块（默认 16 token）+ 引用计数 + 满块哈希 + CoW。块表是 KV 分配的唯一决策者，后端 cell 只作下游映射，不做反向回写。
-3. **前缀复用**：相同前缀的满块可共享，可关闭（`--disable-prefix-cache`）；后端不支持零拷贝共享时自动退化为不共享。
+3. **前缀复用**：相同前缀的满块共享逻辑块与引用计数，可关闭（`--disable-prefix-cache`）；物理 KV 仍由后端 `seq_cp` 复制或目标槽预留，不宣称物理零拷贝。
 4. **Chunked Prefill**：长 prompt 按 `--chunk-size`（32/64/128/256）切块，与 decode 批次混排；只有末块采样，中间块只推进 KV。
 5. **抢占与恢复**：显存/块不足时按代价模型选 victim，重算恢复；支持等待老化豁免、同请求连续抢占上限，抢占事件可写 CSV 回溯。
 6. **最小 OpenAI 兼容面**：`/v1/completions`、`/completion`、`/v1/chat/completions`、`/v1/models`；流式走 SSE，逐 token 下发，以 `data: [DONE]` 收尾。
-7. **容量门控**：启动前探测 RAM / GPU 空闲显存，按 `required ≤ free × 0.80` 给出 `ELIGIBLE / DEGRADED / BLOCKED` 三态，`off / auto / force_on` 三档决策，默认 `off`。
+7. **容量门控**：启动前探测 RAM / GPU 空闲显存，按 `required ≤ free × safety_ratio` 给出 `ELIGIBLE / DEGRADED / BLOCKED` 三态，`off / auto / force_on` 三档决策，默认 `off`；`n_gpu_layers` 小于层数时按**显存/内存双池**分别判据（8B 在 8GB 卡上靠它才起得来）。
 8. **可运维性**：CLI > env > JSON 配置 > 默认 四层优先级；`/healthz`、`/readyz`；SIGTERM 排空；令牌桶限流；可选单 token Bearer 鉴权；Prometheus 文本指标（仅 counter/gauge）。
 9. **实验与证据链**：`tools/bench` 负责请求生成、SSE 采集、聚合与绘图，结果按 `phaseN/runs/<run_id>/` 归档，CSV / JSONL / 日志可复现。
+
+
 
 ## 技术栈
 
@@ -52,9 +55,13 @@
 
 依赖约束：直接第三方库 ≤ 5（doctest / cpp-httplib / nlohmann / spdlog / llama.cpp），运行期不依赖 Python，无数据库。
 
+
+
 ## 快速开始
 
 前置条件：C++20 编译器（GCC 13+ 或 Clang 16+ 实测可用）、CMake ≥ 3.20、Python 3.10+（仅工具与 CI）。GPU 可选，CPU 路径必须能跑完单测与闭环。
+
+
 
 ### 1. 构建与测试（stub 后端，无需模型权重）
 
@@ -65,6 +72,8 @@ ctest --test-dir build -L fast --output-on-failure
 ```
 
 产物为 `build/llmopt_server`（Windows 下为 `build/llmopt_server.exe`）。
+
+
 
 ### 2. stub 自检（跑通 HTTP → 调度 → SSE）
 
@@ -82,18 +91,23 @@ curl -N -X POST http://127.0.0.1:18080/completion \
   -d '{"prompt":"hello","stream":true,"max_tokens":16}'
 ```
 
+
+
 ### 3. 真实后端（Linux / WSL，需先编好 llama.cpp）
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DLLMOPT_ENABLE_LLAMA=ON -DLLMOPT_LLAMA_ROOT=/root/llm-src/llama.cpp
 cmake --build build --parallel
-./build/llmopt_server --model /root/llm-src/models/qwen2.5-0.5b-q4.gguf \
-  --port 8080 --ctx-tokens 2048 --max-num-batched-tokens 512 \
-  --chunk-size 64 --max-concurrency 8 --mode auto --threads 8
+./build/llmopt_server --model /mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf \
+  --port 8080 --ctx-tokens 1024 --max-num-batched-tokens 1024 \
+  --chunk-size 64 --max-concurrency 4 --mode off --threads 12 \
+  --n-gpu-layers 30 --kv-cache-type q8_0 --donor-slots 0 --disable-prefix-cache
 ```
 
 `LLMOPT_ENABLE_LLAMA=OFF` 时只编 stub 后端；Windows 本机没有 CUDA 工具链与 SIGTERM 语义，真后端与部署用例以 Linux/CI 为准。
+
+
 
 ### 4. 开发工具单入口
 
@@ -109,6 +123,8 @@ cmake --build build --parallel
 | `python scripts/ci/check_coverage.py --build-dir build --base origin/main` | 覆盖率门禁（`src/` 行 ≥ 70%，改动行 ≥ 80%） |
 
 `dev.py` 退出码：0 成功、1 失败、2 用法错误、3 环境缺失、4 跳过。
+
+
 
 ## 环境变量
 
@@ -130,10 +146,13 @@ cmake --build build --parallel
 | `LLMOPT_API_KEY` | 空 | 单 token Bearer 鉴权，空表示不鉴权，日志与启动摘要只打印 set/unset |
 | `LLMOPT_RATE_LIMIT_RPS` | `0` | 全局令牌桶速率，0 关闭；超额 429 `RATE_LIMITED` + `Retry-After: 1` |
 | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | SIGTERM 后在飞请求的排空上限 |
+| `LLMOPT_REQUEST_DEADLINE_SECONDS` | `120` | 请求级总时限，从入队起算；流式/非流式共享 |
 | `LLMOPT_ALLOW_STUB` | 未设置 | 设为 `1` 才允许 stub 后端，供测试与 CI 使用 |
 | `LLMOPT_LLAMA_ROOT` | `/root/llm-src/llama.cpp` | CMake 查找 llama.cpp 头文件与库的根目录 |
 
 无 `DATABASE_URL`：本项目不引入数据库与持久化。
+
+
 
 ## 项目结构
 
@@ -162,6 +181,8 @@ llm-inference-kernel-opt/
 
 目录约束：顶层只保留源码、测试、脚本、文档与根级配置；深度 ≤ 3，不建 `application/domain/infrastructure` 之类抽象层。源码目标固定为 `http protocol tokenizer gate runner sampler sched seq kv metrics main`。
 
+
+
 ## 使用说明
 
 ### 请求与流式响应
@@ -181,6 +202,8 @@ curl -s -X POST http://127.0.0.1:8080/v1/completions \
 请求体上限 4 MB，主要字段：`prompt`（必填）、`id`、`stream`、`max_tokens` / `n_predict`（默认 128）、`top_k`、`top_p`、`min_p`、`temperature`、`repeat_penalty`、`seed`、`stop`（最多 4 条）、`n`（1–4，仅非流式）。采样链顺序固定为 **惩罚 → top-k → top-p → min-p → 温度 → dist**，请求不能改顺序。
 
 Chat 端点只支持纯文本 `system / user / assistant`；`tools`、`tool_choice`、`logprobs`、`logit_bias`、`response_format`、图片分片等一律返回 400 `UNSUPPORTED_FIELD`，不静默忽略。
+
+
 
 ### 错误与探针
 
@@ -204,6 +227,8 @@ curl -s http://127.0.0.1:8080/metrics | grep llmopt_requests_total
 
 进程退出码：0 正常、1 启动失败、2 用法错误、3 资源不足、4 门控拒绝。
 
+
+
 ### 基准与复现
 
 ```bash
@@ -217,32 +242,34 @@ python scripts/spec5/recompute_spec5.py \
 
 `/metrics` 只输出 counter / gauge；p50 / p95 / p99 由基准工具离线复算，避免在线直方图与自研后端口径冲突。
 
+
+
 ## 当前水平与局限
 
-已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度；阶段 5 只做预研判据，不落实现。Windows 本机 `ctest -L fast` 153 条（100 unit / 40 contract / 13 integration）全绿；Linux 侧 ASan / UBSan 无报告，TSan 10 轮 0 race，30 分钟 soak 343,736 请求 / 0 非 200 / RSS +0.25 MiB。
+已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度；阶段 5 只做预研判据，不落实现。Windows 本机 `ctest -L fast` 162 条（107 unit / 42 contract / 13 integration）全绿；Linux 侧 ASan / UBSan 无报告，TSan 10 轮 0 race，30 分钟 soak 343,736 请求 / 0 非 200 / RSS +0.25 MiB。
 
-官方 7 × 2 矩阵（WSL Ubuntu 26.04，CPU 16 线程，Qwen2.5-0.5B Q4_K_M，每档 30 请求 × 64 token × 2 轮）：
+官方 8B 矩阵（WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q4_K_M，每档 30 请求 × 32 token × 2 轮，`ngl 24 / threads 8`）：
 
-| 并发 P | TTFT p50 短 / 长 (ms) | 总吞吐 短 / 长 (tok/s) | KV 内部碎片率 |
-| --- | --- | --- | --- |
-| 1 | 99.0 / 797.4 | 137.2 / 482.6 | 0.667 |
-| 2 | 168.2 / 841.1 | 152.4 / 625.6 | 0.667 / 0.615 |
-| 4 | 341.6 / 2476.5 | 157.4 / 580.0 | 0.593 / 0.615 |
-| 8 | 658.0 / 5642.4 | 207.7 / 694.6 | 0.582 |
-| 16 | 1253.9 / 9406.8 | 207.8 / 727.3 | 0.585 / 0.116 |
-| 32 | 7847.8 / 24762.7 | 163.7 / 560.0 | 0.024 |
-| 64 | 5515.0 / 17524.3 | 209.1 / 762.6 | 0.025 / 0.027 |
+| 并发 P | TTFT p50 (ms) | ITL p99 (ms) | 总吞吐 (tok/s) | 相对 P=1 | 两轮偏差 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 229.5 | 245.6 | 40.96 | 1.00× | ≤7% |
+| 2 | 434.4 | 291.0 | 50.28 | 1.23× | ≤7% |
+| 4 | 711.7 | 407.1 | 65.94 | 1.61× | ≤5% |
 
-怎么读这组数：短 prompt 下 P=8 吞吐约为 P=1 的 1.5 倍，是 continuous batching 生效的直接证据；继续加到 P=16 吞吐不再涨，TTFT 已经到秒级，说明控制面与单执行线程成为瓶颈。两轮之间的 p50 偏差多数超过 10% 阈值（矩阵里 `deviation_flag=high`），所以这些数只能作**同环境相对对比**，不能当 SLA 或跨机器结论。
+同为 P=4 的调优对照：`ngl 28` 把 TTFT 压到 347.8 ms；`threads 12` 再降到 339 ms、ITL p99 从 393 ms 砍到 230 ms；`ngl 30 + q8_0 KV + donor 0`（前缀关闭）拿到当前最优 **31.07 tok/s 纯 decode、TTFT 339 ms、ITL p99 210 ms**。
+
+怎么读这组数：P=4 吞吐 1.61×（含 prefill token）过 1.5× 门槛，纯 decode 23.3→31.1 tok/s；两轮偏差 ≤7%，复现性达标。ITL p99 随并发放大（245→407 ms）是 13/37 层留在 CPU 的必然结果——8B Q4 在这张 8GB 卡上无法全量驻留（`-ngl 99` 需 5370 MiB，桌面常驻后仅剩约 4996 MiB，被判 BLOCKED）。0.5B 的旧矩阵保留在 `docs/evidence/` 作历史对照。
 
 局限，直说：
 
-- 单机单进程，只支持 0.5B–7B 量化模型；不做分布式、张量并行、PD 分离进程形态、训练、自定义 CUDA kernel。
+- 单机单进程，实测覆盖 0.5B–8B 量化模型；27B 档只做容量与抢占验证，不出吞吐结论。
 - 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主，本机没有 Docker 与 SIGTERM 语义。
 - llama.cpp 的 `llama_batch` 没有 slot 字段，cell 由内部 `find_slot` 选择且无公开 getter，块表与 cell 的对账依赖内部头文件，属于**源码耦合点**，升级 llama.cpp 必须复核。
 - 兼容面是最小集：不做多租户、配额、WebUI、OpenAI 全量字段；鉴权只有一个 Bearer token。
 - `/metrics` 不含直方图，p99 需离线复算；慢读退化与真后端容器冒烟仍缺真机复测。
 - 基准噪声偏大：同一档两轮的 TTFT / 吞吐漂移经常越过 10%，暂不适合做精细调参依据。
+
+
 
 ## 后续演进规划
 
