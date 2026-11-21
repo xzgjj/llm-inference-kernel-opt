@@ -15,29 +15,41 @@
 >- 偏算法加速：LLM 投机解码落地与端到端加速评估
 > - 偏低比特：低比特量化下的推理精度 — 吞吐权衡（INT4/FP8）
 
-计算面不自己写 GEMM：模型加载、图构建与 kernel 执行直接复用 ggml / llama.cpp；自研部分全部落在控制面——准入、组批、KV 块表、chunked prefill、抢占与恢复、容量门控、指标打点。要回答的问题很具体：在这台机器上，continuous batching 与 chunked prefill 到底带来多少收益，控制面的开销在哪里、边界在哪。
 
-仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 CUDA kernel；本项目不做自定义算子，也不做分布式与训练。规模限定在单机、单进程、0.5B–27B 量化模型，本机实测档为 Qwen3-8B Q4_K_M。
 
-当前阶段 0–11 已落地（阶段 10 为真后端 nightly 可靠性收口，阶段 11 为静态 key + 租户配额 + KV 域隔离），阶段 12 进行中（本地文档 `docs/SPEC-DEBUG1.md`：缺陷面修复与算力入口封堵）：`ctest -L fast` 全绿，注册数见下方统计块；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
+项目不训练模型，也不写 CUDA 算子。模型加载和计算直接交给 llama.cpp / ggml，只在做“交通调度”：谁先算、几个一起算、显存不够时让谁等、KV 缓存怎么分块和复用。仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 GPU kernel；项目不做分布式与训练，规模限定在单机、单进程、0.5B–27B 量化模型。要回答的问题也很具体：**把请求拼批、切块、复用 KV，究竟能快多少、代价是。**
+
+阶段 11 已落地静态 key + 租户配额 + KV 域隔离；阶段 12 收口了断连取消、30 分钟长稳、batching 重基线、key 热加载和打包运维。Linux/WSL 侧接真 llama.cpp 后端，以 Qwen3-8B 为主力档（S3 用 `Q3_K_M` 全驻留，早期 L1 证据用 `Q4_K_M`）；Windows 侧主要跑 stub 后端做调度与接口测试。它既可以当学习 continuous batching 的可运行参考，也可以当 llama.cpp 之上的最小 OpenAI 兼容服务骨架。注册数见下方统计块。
 
 
 
 ## 核心功能
 
-1. **Continuous Batching**：按 token 级组批，运行序列与等待队列分离；每步受 `max-num-batched-tokens` 预算约束，达上限的请求进 waiting 队列，队列满返回 429。
-2. **块表 KV 管理**：定长块（默认 16 token）+ 引用计数 + 满块哈希 + CoW。块表是 KV 分配的唯一决策者，后端 cell 只作下游映射，不做反向回写。
-3. **前缀复用**：相同前缀的满块共享逻辑块与引用计数，可关闭（`--disable-prefix-cache`）；物理 KV 仍由后端 `seq_cp` 复制或目标槽预留，不宣称物理零拷贝。
-4. **Chunked Prefill**：长 prompt 按 `--chunk-size`（32/64/128/256）切块，与 decode 批次混排；只有末块采样，中间块只推进 KV。
-5. **抢占与恢复**：显存/块不足时按代价模型选 victim，重算恢复；支持等待老化豁免、同请求连续抢占上限，抢占事件可写 CSV 回溯。
-6. **最小 OpenAI 兼容面**：`/v1/completions`、`/completion`、`/v1/chat/completions`、`/v1/models`；流式走 SSE，逐 token 下发，以 `data: [DONE]` 收尾。
-7. **容量门控**：启动前探测 RAM / GPU 空闲显存，按 `required ≤ free × safety_ratio` 给出 `ELIGIBLE / DEGRADED / BLOCKED` 三态，`off / auto / force_on` 三档决策，默认 `off`；`n_gpu_layers` 小于层数时按**显存/内存双池**分别判据（8B 在 8GB 卡上靠它才起得来）。
-8. **可运维性**：CLI > env > JSON 配置 > 默认 四层优先级；`/healthz`、`/readyz`；SIGTERM 排空；令牌桶限流；静态 key 文件鉴权与每租户并发/队列/限流/KV 配额（阶段 11）；Prometheus 文本指标（仅 counter/gauge，含 `llmopt_tenant_*` 租户标签）。
-9. **实验与证据链**：`tools/bench` 负责请求生成、SSE 采集、聚合与绘图，结果按 `phaseN/runs/<run_id>/` 归档，CSV / JSONL / 日志可复现。
+每条先说明“解决什么问题”，再说怎么做，最后给实测数字或边界。
+
+1. **Continuous Batching（请求拼批）**——解决“一次只能服务一个请求、GPU 总在等人”的问题。把多个请求按 token 拼进同一批，每步有 token 预算上限（`max-num-batched-tokens`），跑不下的进等待队列，队列满直接回 429。实测（8B 全驻留）：1 路 77.1 tok/s，8 路 80.7 tok/s，**只快 5%**；但单请求尾延迟 ITL p99 从 23.3 ms 涨到 171.3 ms。所以“拼批一定提吞吐”在这台机器上不成立，瓶颈是单执行线程串行 + 显存带宽封顶，控制面本身只占 0.01–0.02% CPU。
+
+2. **块表 KV 管理（给显存做分页）**——解决“KV 缓存越长越占显存、释放不干净”的问题。把 KV 切成固定 16 token 的块，用引用计数标记谁在用，写时复制（CoW）避免互相踩；块表是分配的唯一决策者，后端只按块表给的地址算，不反向改块表。实测 30 分钟压测收尾后 `used=cached=0`，块表对账差异为 0。
+
+3. **前缀复用（相同开头不重复算）**——解决“同一段系统提示、同一段上下文反复 prefill”的浪费。相同前缀的满块共享逻辑块与引用计数，可用 `--disable-prefix-cache` 关掉。注意：共享的是逻辑块，物理 KV 仍由 llama.cpp 的 `seq_cp` 复制或预留目标槽，**不宣称物理零拷贝**。单测里同前缀第二次请求命中 8 token，只需再算剩余 2 token。
+
+4. **Chunked Prefill（长提示切段）**——解决“一个超长 prompt 把整批卡住、别的请求干等”的问题。长 prompt 按 `--chunk-size`（32/64/128/256）切段，和正在生成的 token 混着算；只有最后一段采样输出，中间段只推进 KV。单测覆盖 320 token 切成 128/128/64，切块与整段 prefill 的输出逐 token 一致。
+
+5. **抢占与恢复（显存不够时让位）**——解决“资源不够就整批失败或 OOM”的问题。按代价模型挑一个“最划算”的请求暂停、释放它的 KV，等资源够了再重算恢复；等太久的请求有老化豁免，同一请求连续被抢有上限，每次抢占可写 CSV 回溯。原则是**宁可慢一点，也不 OOM、不 5xx**。
+
+6. **最小 OpenAI 兼容面（现成客户端能直接连）**——解决“不想自己写协议适配”的问题。提供 `/v1/completions`、`/completion`、`/v1/chat/completions`、`/v1/models`；流式走 SSE，逐 token 下发，以 `data: [DONE]` 收尾。只做常用字段，不追求完整 OpenAI 字段集。
+
+7. **容量门控（启动前先算账）**——解决“模型一加载就 OOM”的问题。启动前探测内存和显存，按“需求 ≤ 空闲 × 0.8”判断，给出 `ELIGIBLE / DEGRADED / BLOCKED` 三态，`off / auto / force_on` 三档，默认 `off`；层没全放 GPU 时，显存和内存分开算。8B 在 8 GB 卡上就是靠“部分层放 CPU”才起得来；全驻留时权重占 3672 MiB，KV 随上下文涨到约 918 MiB。
+
+8. **可运维性（能上线、能排障）**——解决“出了事不知道、停服很粗暴”的问题。配置按 CLI > 环境变量 > JSON > 默认四层覆盖；有 `/healthz`（活着没）和 `/readyz`（能接活没）；SIGTERM 后先拒新请求、把在飞请求收尾再退出；令牌桶限流；静态 key 文件鉴权 + 每租户并发/队列/限流/KV 配额（阶段 11）；Prometheus 文本指标只出 counter/gauge，带 `llmopt_tenant_*` 租户标签。实测：容器 `docker stop` 退出码 0；30 分钟压测 297,441 个请求、0 错误、RSS 只涨 0.05 MiB。
+
+9. **实验与证据链（结论可复查）**——解决“性能数字口口相传、回头没法复现”的问题。`tools/bench` 负责发请求、收 SSE、算 TTFT/ITL/吞吐、画图，结果按 `phaseN/runs/<run_id>/` 归档，CSV / JSONL / 日志都能重跑。阶段 12 的 30 分钟长稳和 batching 矩阵就是这么出的数，原始文件在 `evidence/phase12/`。
 
 
 
 ## 技术栈
+
+
 
 | 类别 | 选型 |
 | --- | --- |
@@ -249,13 +261,17 @@ python scripts/spec5/recompute_spec5.py \
 
 ## 当前水平与局限
 
+
+
 已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额、阶段 12 缺陷面修复（S0，3 项 P1 + 9 项 P2）；阶段 5 只做预研判据，不落实现。真服务 e2e 10 项另行通过。
 
 <!-- test-counts:start -->
 测试基线由脚本从 CTest 注册表生成，见 [docs/testing.md](docs/testing.md) §2.1（勿手改）。
 <!-- test-counts:end -->
 
-官方 8B 矩阵（阶段 12 S3 重基线，WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q3_K_M，`ngl 37` 全驻留 + `q8_0 KV`，每档 30 请求 × 32 token × **5 轮**，真实 token 口径）：
+
+
+- 官方 8B 矩阵（阶段 12 S3 重基线，WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q3_K_M，`ngl 37` 全驻留 + `q8_0 KV`，每档 30 请求 × 32 token × **5 轮**，真实 token 口径）：
 
 | 并发 P | TTFT p50 (ms) | ITL p99 (ms) | 总 token 吞吐 (tok/s) | 相对 P1 | 调度 CPU 占比 |
 | --- | --- | --- | --- | --- | --- |
@@ -280,19 +296,22 @@ python scripts/spec5/recompute_spec5.py \
 
 
 
-## 后续演进规划
+## 演进规划
 
 按现有 SPEC 与证据推进，不新开架构方向：
 
-1. **质量整改 B / C**：阶段 A 已收掉请求身份、流式 stop、token 预算、drain 镜像、抢占预判与错误面；B/C 项（长稳、边界语义、文档与契约对齐）待排期。
-2. **chunk 调参验证**：SPEC-5 判据把当前数据判为 `candidate_pending_chunk`，需要在同一硬件上补调参后矩阵，才可能从候选转为触发。
-3. **基线稳定性**：重测阶段 0 基线，缩小轮间漂移；GPU 路径目前只透传 `n-gpu-layers`，未做显存水位下的调度策略。
-4. **预研立项门槛**：PD 分离与投机解码官方 14 行复算结果为 0 触发 / 12 候选 / 2 不可判，结论是“本期数据不支持翻案”；要立项必须先有新矩阵与链路实测。
-5. **部署面补齐**：S5 已完成容器镜像、六项冒烟、logrotate 与 systemd 单元校验；真后端镜像（llama.cpp 运行库）与慢读退化复测仍待排期。
+1. **chunk 调参验证**：SPEC-5 判据把当前数据判为 `candidate_pending_chunk`，需要在同一硬件上补调参后矩阵，才可能从候选转为触发。
+2. **基线稳定性**：重测阶段 0 基线，缩小轮间漂移；GPU 路径目前只透传 `n-gpu-layers`，未做显存水位下的调度策略。
+3. **预研立项门槛**：PD 分离与投机解码官方 14 行复算结果为 0 触发 / 12 候选 / 2 不可判，结论是“本期数据不支持翻案”；要立项必须先有新矩阵与链路实测。
+4. **部署面补齐**：S5 已完成容器镜像、六项冒烟、logrotate 与 systemd 单元校验；真后端镜像（llama.cpp 运行库）与慢读退化复测仍待排期。
+
+
 
 ## 部署说明
 
 最小部署面是「一个二进制 + 一个模型文件 + 一份 JSON 配置」。
+
+
 
 ### 容器
 
@@ -314,6 +333,8 @@ docker run --rm -p 8080:8080 -e LLMOPT_ALLOW_STUB=1 \
 
 - 就绪探针用 `/readyz`，存活探针用 `/healthz`；
 - SIGTERM / SIGINT 后状态转 `draining`，`/readyz` 与新请求立即 503，在飞请求在 `--drain-deadline-seconds` 内收尾，超时计数后强制停止，退出码仍为 0。
+
+
 
 ### 夜间作业
 
