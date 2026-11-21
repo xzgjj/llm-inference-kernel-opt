@@ -219,9 +219,17 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `tests/unit/auth_test.cc`（`unit_auth`，3 例）：空 token 放行；`Bearer` 前缀、大小写、长度、尾随空格严格匹配；`secure_equals` 长度不同即失败。
 - `tests/integration/test_auth.py`（`auth_test`）：配置 `--api-key secret-token` 后无 header/错误 token 均 401 `UNAUTHORIZED` + `WWW-Authenticate: Bearer`，正确 token 的 chat 200；`/healthz`、`/readyz`、`/metrics` 仍 200，`/v1/models` 无 token 401。
 
+阶段 6 的 Linux/云主机复测（本机 Windows 无法执行的项）：
 
-
-
+- 构建前置：项目 `cmake/deps.cmake` 的 `FetchContent_Declare(... URL ...)` 需要 CMake ≥ 3.24；Ubuntu 22.04 自带的 3.22 会报 `At least one entry of URL is a path (invalid in a list)`。复测机用 pip 安装 CMake 3.30.3 解决，未改项目脚本。
+- `ctest -L fast`：Linux（2 核 / 3 GB）147 条全绿（35 contract / 99 unit / 13 integration），与 Windows 一致。
+- `service_state_test`（6-G3）真跑：输出 `drain ok: inflight=8 rc=0`，即 SIGTERM 后 8 路在飞 SSE 全部以 `[DONE]` 收尾、进程退出码 0；不再走 Windows 的 skip 分支。
+- `build-asan`（`-fsanitize=address,undefined`，RelWithDebInfo）：147 条全绿，无泄漏/越界报告。
+- `build-tsan`（`-fsanitize=thread`）：**GCC 11 的 `libtsan` 未拦截 `pthread_cond_clockwait`**，而 libstdc++ 的 `condition_variable::wait_for/wait_until(steady_clock)` 走该函数，导致 TSan 把“同一把锁保护的队列”误报成 data race + double lock。用 30 行纯 std 程序（两线程 + deque + mutex + timed wait）可稳定复现；把定时等待换成不带超时的 `cv.wait` 后报告归零，确认是拦截缺失而非项目缺陷。
+- 本地绕过：`scripts/ci/tsan_clockwait_shim.c` 把 `CLOCK_MONOTONIC` 绝对期限折算成 `CLOCK_REALTIME` 后转调 `pthread_cond_timedwait`，`LD_PRELOAD` 后最小复现与项目套件的 TSan 报告均为 0。该 shim 只用于 GCC 11 本地验证，CI（ubuntu-latest，GCC 13+）不需要。
+- TSan 10 轮（shim + `halt_on_error=1`）：每轮 `ThreadSanitizer` 报告 0 条。稳定残留 2 个与竞争无关的用例失败，均为插桩降速引起的时序假设失效：`service_state_test`（排空结束时对已被拒绝请求的 503 响应读取出 `IncompleteRead`）、`integration_server_matrix`（`--smoke` 档在 2 核插桩环境下 step trace 汇总为空，`step_ns_p99_ms` 解析失败）。这两条在无插桩 Linux 构建与 ASan 构建下均稳定通过。
+- 未能执行：`deploy_smoke`（复测机无 docker）、`soak_30m`（按 30 min 另跑）、慢客户端真后端 ITL 判定（无 `/root/llm-src/llama.cpp` 与 GGUF 模型）。
+- `llama_chat_apply_template` API 兼容（6-G1 遗留）：对 llama.cpp 当前 master（`374d90a`）头文件做 `g++ -fsyntax-only -DLLMOPT_ENABLE_LLAMA=1 src/runner_llama.cpp` 通过，签名与调用方式一致。
 
 准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
 
