@@ -59,9 +59,9 @@ std::vector<RequestId> VictimPolicy::select(const std::vector<SequenceGroup*>& g
             best_score = score;
         }
     }
-    std::vector<RequestId> out;
+    std::vector<BackendId> out;
     if (best != nullptr) {
-        out.push_back(best->req_id);
+        out.push_back(best->backend_id);
     }
     return out;
 }
@@ -152,14 +152,14 @@ PreemptDecision try_preempt(const std::vector<SequenceGroup*>& groups, std::int3
         return decision;
     }
     while (kv.num_free_blocks() < need_blocks) {
-        const std::vector<RequestId> selected =
+        const std::vector<BackendId> selected =
                 policy.select(groups, fairness, &decision.aging_exempt);
         if (selected.empty()) {
             break;
         }
         SequenceGroup* victim = nullptr;
         for (SequenceGroup* group : groups) {
-            if (group != nullptr && group->req_id == selected.front()) {
+            if (group != nullptr && group->backend_id == selected.front()) {
                 victim = group;
                 break;
             }
@@ -170,7 +170,7 @@ PreemptDecision try_preempt(const std::vector<SequenceGroup*>& groups, std::int3
         const std::int32_t free_before = kv.num_free_blocks();
         kv.free(victim->seq);
         const std::int32_t released = kv.num_free_blocks() - free_before;
-        decision.victims.push_back(victim->req_id);
+        decision.victims.push_back(victim->backend_id);
         decision.released_per_victim.push_back(released);
         decision.blocks_released += released;
     }

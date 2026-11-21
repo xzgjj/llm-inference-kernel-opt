@@ -51,6 +51,7 @@ constexpr FieldSpec kFields[] = {
         {"rate-limit-rps", false},
         {"rate-limit-burst", false},
         {"drain-deadline-seconds", false},
+        {"request-deadline-seconds", false},
         {"api-key", false},
         {"step-trace-rate", false},
 };
@@ -82,6 +83,7 @@ constexpr const char* kConfigKeys[] = {
         "rate-limit-rps",
         "rate-limit-burst",
         "drain-deadline-seconds",
+        "request-deadline-seconds",
         "api-key",
         "step-trace-rate",
 };
@@ -253,6 +255,8 @@ ErrCode apply_service_arg(ServerConfig& cfg, const std::string& key, const std::
         return parse_int(value, cfg.rate_limit_burst) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--drain-deadline-seconds") {
         return parse_int(value, cfg.drain_deadline_seconds) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--request-deadline-seconds") {
+        return parse_int(value, cfg.request_deadline_seconds) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--api-key") {
         cfg.api_key = value;
     } else if (key == "--step-trace-rate") {
@@ -316,6 +320,34 @@ ErrCode validate_sched_config(const ServerConfig& cfg, std::string& message) {
     return ErrCode::Ok;
 }
 
+ErrCode validate_service_limits(const ServerConfig& cfg, std::string& message) {
+    if (cfg.rate_limit_rps < 0.0 || cfg.rate_limit_rps > 1'000'000.0) {
+        message = "rate-limit-rps 必须在 0..1000000";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.rate_limit_burst < 1 || cfg.rate_limit_burst > 1024) {
+        message = "rate-limit-burst 必须在 1..1024";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.drain_deadline_seconds < 1 || cfg.drain_deadline_seconds > 300) {
+        message = "drain-deadline-seconds 必须在 1..300";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.request_deadline_seconds < 1 || cfg.request_deadline_seconds > 3600) {
+        message = "request-deadline-seconds 必须在 1..3600";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.step_trace_rate < 0 || cfg.step_trace_rate > 64) {
+        message = "step-trace-rate 必须在 0..64";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.api_key.size() > 512) {
+        message = "api-key 长度不能超过 512";
+        return ErrCode::InvalidJson;
+    }
+    return ErrCode::Ok;
+}
+
 ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
     if (cfg.model_path.empty()) {
         message = "缺少 --model 或 LLMOPT_MODEL";
@@ -336,32 +368,15 @@ ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
     if (validate_sched_config(cfg, message) != ErrCode::Ok) {
         return ErrCode::InvalidJson;
     }
+    if (validate_service_limits(cfg, message) != ErrCode::Ok) {
+        return ErrCode::InvalidJson;
+    }
     if (cfg.safety_ratio < 0.80 || cfg.safety_ratio > 0.85) {
         message = "safety-ratio 必须在 0.80..0.85";
         return ErrCode::InvalidJson;
     }
     if (cfg.backend != "llama" && cfg.backend != "stub") {
         message = "backend 必须是 llama 或 stub";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.rate_limit_rps < 0.0 || cfg.rate_limit_rps > 1'000'000.0) {
-        message = "rate-limit-rps 必须在 0..1000000";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.rate_limit_burst < 1 || cfg.rate_limit_burst > 1024) {
-        message = "rate-limit-burst 必须在 1..1024";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.drain_deadline_seconds < 1 || cfg.drain_deadline_seconds > 300) {
-        message = "drain-deadline-seconds 必须在 1..300";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.step_trace_rate < 0 || cfg.step_trace_rate > 64) {
-        message = "step-trace-rate 必须在 0..64";
-        return ErrCode::InvalidJson;
-    }
-    if (cfg.api_key.size() > 512) {
-        message = "api-key 长度不能超过 512";
         return ErrCode::InvalidJson;
     }
     if (cfg.backend == "stub") {
@@ -430,6 +445,8 @@ ErrCode load_env_ints(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sources
             {"LLMOPT_RATE_LIMIT_BURST", "rate-limit-burst", &cfg.rate_limit_burst},
             {"LLMOPT_DRAIN_DEADLINE_SECONDS", "drain-deadline-seconds",
              &cfg.drain_deadline_seconds},
+            {"LLMOPT_REQUEST_DEADLINE_SECONDS", "request-deadline-seconds",
+             &cfg.request_deadline_seconds},
             {"LLMOPT_STEP_TRACE_RATE", "step-trace-rate", &cfg.step_trace_rate},
     };
     for (const IntBinding& binding : ints) {
@@ -748,6 +765,59 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
 // 前缀复用的有效开关：后端不支持共享时请求开启也降级为关闭，避免不可用路径。
 bool effective_prefix_cache(bool requested, bool backend_supports) noexcept {
     return requested && backend_supports;
+}
+
+namespace {
+
+constexpr std::int32_t kDonorSlots = 4; // 与 main 的 donor 槽一致，只由派生层定义
+
+std::int32_t donor_slots_for(const ServerConfig& cfg) noexcept {
+    return (cfg.enable_prefix_cache && cfg.n_gpu_layers > 0) ? kDonorSlots : 0;
+}
+
+} // namespace
+
+SchedulerConfig make_scheduler_config(const ServerConfig& cfg, std::int32_t concurrency,
+                                      bool prefix_cache) {
+    SchedulerConfig scheduler_cfg;
+    scheduler_cfg.max_concurrency = std::max<std::int32_t>(concurrency, 1);
+    scheduler_cfg.max_num_batched_tokens = cfg.max_num_batched_tokens;
+    scheduler_cfg.queue_capacity = cfg.queue_capacity;
+    scheduler_cfg.enable_prefix_cache = prefix_cache;
+    scheduler_cfg.chunk_size = cfg.chunk_size;
+    scheduler_cfg.fairness_aging_enabled = cfg.fairness_aging;
+    scheduler_cfg.aging_threshold_ns =
+            static_cast<std::int64_t>(cfg.aging_threshold_ms) * 1'000'000;
+    scheduler_cfg.max_consecutive_preemptions = cfg.max_consecutive_preemptions;
+    scheduler_cfg.request_deadline_ns =
+            static_cast<std::int64_t>(cfg.request_deadline_seconds) * 1'000'000'000;
+    scheduler_cfg.preempt_trace_path = cfg.preempt_trace_path;
+    scheduler_cfg.step_trace_path = cfg.step_trace_path;
+    return scheduler_cfg;
+}
+
+ModelConfig make_model_config(const ServerConfig& cfg, std::int32_t concurrency) {
+    ModelConfig model_cfg;
+    model_cfg.model_path = cfg.model_path;
+    model_cfg.n_ctx = cfg.ctx_tokens;
+    model_cfg.n_seq_max = std::max<std::int32_t>(concurrency, 1) + donor_slots_for(cfg);
+    model_cfg.n_ctx_total = cfg.ctx_tokens * model_cfg.n_seq_max;
+    model_cfg.n_batch = std::max<std::int32_t>(cfg.max_num_batched_tokens, cfg.chunk_size);
+    model_cfg.n_ubatch = 512;
+    model_cfg.threads = cfg.threads;
+    model_cfg.n_gpu_layers = cfg.n_gpu_layers;
+    return model_cfg;
+}
+
+KVConfig make_kv_config(const ServerConfig& cfg, std::int32_t concurrency, bool prefix_cache) {
+    const std::int32_t tokens = cfg.ctx_tokens * std::max<std::int32_t>(concurrency, 1);
+    KVConfig kv_config;
+    kv_config.block_tokens = cfg.block_tokens;
+    kv_config.num_blocks = std::max<std::int32_t>(tokens / cfg.block_tokens, 1);
+    kv_config.watermark_ratio = cfg.watermark_ratio;
+    kv_config.enable_prefix_cache = prefix_cache;
+    kv_config.max_donors = prefix_cache ? kDonorSlots : 0;
+    return kv_config;
 }
 
 } // namespace llmopt

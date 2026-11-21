@@ -15,12 +15,12 @@ namespace {
 Batch prefill_batch(const RequestId& id, const std::vector<std::int32_t>& tokens) {
     Batch batch;
     NewRequestData data;
-    data.req_id = id;
+    data.backend_id = id;
     data.prefill_token_ids = tokens;
     batch.new_reqs.push_back(std::move(data));
     SequenceStep step;
-    step.seq_id = id;
-    step.route.req_id = id;
+    step.backend_id = id;
+    step.route.backend_id = id;
     step.phase = Phase::PrefillLast;
     step.pos_begin = 0;
     step.pos_end = static_cast<std::int32_t>(tokens.size());
@@ -60,7 +60,7 @@ TEST_CASE("同种子同 prompt 输出逐 token 可复现") {
     CHECK(std::string(runner->backend_name()) == "stub");
 
     Sequence seq;
-    seq.group_id = "req-det";
+    seq.backend_id = "req-det";
     seq.sampling.seed = 7;
     seq.prompt_token_ids = {256 + 104, 256 + 105};
     REQUIRE(runner->add_sequence(seq) == ErrCode::Ok);
@@ -75,11 +75,11 @@ TEST_CASE("同种子同 prompt 输出逐 token 可复现") {
           first);
 
     Sequence other;
-    other.group_id = seq.group_id;
+    other.backend_id = seq.backend_id;
     other.sampling.seed = 8;
     other.prompt_token_ids = seq.prompt_token_ids;
     CHECK(again->add_sequence(other) == ErrCode::InvalidJson);
-    again->release_sequence(seq.group_id, 0);
+    again->release_sequence(seq.backend_id, 0);
     REQUIRE(again->add_sequence(other) == ErrCode::Ok);
     CHECK(first_token(again->decode_step(prefill_batch("req-det", {256 + 104, 256 + 105}))) !=
           first);
@@ -90,7 +90,7 @@ TEST_CASE("decode 步推进 n_past，释放后状态被清除") {
     ModelConfig config;
     REQUIRE(runner->load_model(config) == ErrCode::Ok);
     Sequence seq;
-    seq.group_id = "req-step";
+    seq.backend_id = "req-step";
     seq.sampling.seed = 1;
     REQUIRE(runner->add_sequence(seq) == ErrCode::Ok);
     RunnerStepOutput prefill = runner->decode_step(prefill_batch("req-step", {1, 2, 3}));
@@ -98,12 +98,12 @@ TEST_CASE("decode 步推进 n_past，释放后状态被清除") {
 
     Batch decode;
     CachedRequestData cached;
-    cached.req_id = "req-step";
+    cached.backend_id = "req-step";
     cached.new_token_ids = {4};
     decode.cached_reqs.push_back(cached);
     SequenceStep step;
-    step.seq_id = "req-step";
-    step.route.req_id = "req-step";
+    step.backend_id = "req-step";
+    step.route.backend_id = "req-step";
     step.phase = Phase::Decode;
     step.pos_begin = 3;
     step.pos_end = 4;

@@ -4,6 +4,9 @@
 
 #include "llmopt/common.hpp"
 #include "llmopt/gate.hpp"
+#include "llmopt/kv.hpp"
+#include "llmopt/runner.hpp"
+#include "llmopt/scheduler.hpp"
 
 #include <cstdint>
 #include <string>
@@ -50,6 +53,8 @@ struct ServerConfig {
     double rate_limit_rps = 0.0; // 0=关
     std::int32_t rate_limit_burst = 32;
     std::int32_t drain_deadline_seconds = 30;
+    // 请求级总时限：从 submit 入队起算，流式/非流式共用；超时由 Scheduler 收尾。
+    std::int32_t request_deadline_seconds = 120;
     std::string api_key;              // 空=不鉴权；不写日志、不打印
     std::int32_t step_trace_rate = 0; // 1/N 采样；0=关
 };
@@ -61,11 +66,18 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
 bool parse_gate_mode(const std::string& text, GateMode& out) noexcept;
 // chunk 宽度只允许 32/64/128/256；CLI、env 与调度配置共用同一判定。
 bool is_valid_chunk_size(std::int32_t value) noexcept;
-// 前缀复用只有在后端确认能零拷贝共享 KV 时才启用；请求开启但后端不支持时降级为关闭。
+// 前缀复用只有在后端能安全借用 KV 时才启用；请求开启但后端不支持时降级为关闭。
 bool effective_prefix_cache(bool requested, bool backend_supports) noexcept;
 const char* server_backend_env();
 // JSON 配置键（kebab 或 snake）到规范 CLI 键；未知键返回空。供加载与打印共用。
 std::string canonical_config_key(const std::string& key);
+
+// 单一真源派生：main 不再逐字段手工搬运，默认值/单位换算只在这里定义一次。
+[[nodiscard]] SchedulerConfig make_scheduler_config(const ServerConfig& cfg,
+                                                    std::int32_t concurrency, bool prefix_cache);
+[[nodiscard]] ModelConfig make_model_config(const ServerConfig& cfg, std::int32_t concurrency);
+[[nodiscard]] KVConfig make_kv_config(const ServerConfig& cfg, std::int32_t concurrency,
+                                      bool prefix_cache);
 
 } // namespace llmopt
 

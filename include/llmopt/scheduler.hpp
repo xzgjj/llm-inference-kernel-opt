@@ -28,7 +28,7 @@ namespace llmopt {
 struct SchedulerConfig {
     std::int32_t max_concurrency = 8;
     std::int32_t max_num_batched_tokens = 2048;
-    std::int32_t queue_capacity = 64;
+    std::int32_t queue_capacity = 32;
     bool enable_prefix_cache = true;
     // 单步 prefill 宽度；生产值限定 {32,64,128,256}，用例可传更小值。
     std::int32_t chunk_size = 128;
@@ -36,6 +36,8 @@ struct SchedulerConfig {
     bool fairness_aging_enabled = false;
     std::int64_t aging_threshold_ns = 30'000'000'000LL;
     std::int32_t max_consecutive_preemptions = 3;
+    // 请求级总时限，从 enqueued_ns 起算；<=0 表示关闭（只给用例）。
+    std::int64_t request_deadline_ns = 120'000'000'000LL;
     // 预留：抢占事件 CSV；空串表示不落盘。
     std::string preempt_trace_path{};
     // 步级 trace（JSONL）：只给离线 p99 复算用，空串关闭，避免热路径写盘。
@@ -78,14 +80,15 @@ private:
 };
 
 struct SequenceGroup {
-    RequestId req_id;
+    RequestId req_id;     // 外部协议身份，只用于回包/取消/重复 ID 判定
+    BackendId backend_id; // 内部后端序列键，服务端生成且永不复用
     std::vector<std::int32_t> prompt_ids;
     SamplingParams sampling;
     bool stream = false;
     std::shared_ptr<ResponseSink> sink;
     Sequence seq;
     bool admitted = false;
-    RequestId prefix_source;
+    BackendId prefix_source;
     std::int32_t prefix_tokens = 0;
     // 前缀借用只在首个 chunk 下发一次，后续 chunk 不能重复 seq_cp。
     bool prefix_applied = false;
@@ -133,7 +136,7 @@ struct VictimWeights {
 class VictimPolicy {
 public:
     void configure(VictimWeights weights) noexcept;
-    [[nodiscard]] std::vector<RequestId> select(const std::vector<SequenceGroup*>& groups,
+    [[nodiscard]] std::vector<BackendId> select(const std::vector<SequenceGroup*>& groups,
                                                 const FairnessState& fairness,
                                                 std::int32_t* aging_exempt = nullptr) const;
 
@@ -142,7 +145,7 @@ private:
 };
 
 struct PreemptDecision {
-    std::vector<RequestId> victims;
+    std::vector<BackendId> victims;
     // 与 victims 一一对应；共享块未归零时单个 victim 释放数可能小于块表长度。
     std::vector<std::int32_t> released_per_victim;
     std::int32_t blocks_released = 0;
@@ -154,7 +157,7 @@ struct PreemptDecision {
 struct PreemptEvent {
     std::int64_t ts_ns = 0;
     PreemptTrigger trigger = PreemptTrigger::Admission;
-    RequestId victim;
+    BackendId victim;
     std::int32_t free_before = 0;
     std::int32_t need_blocks = 0;
     std::int32_t blocks_released = 0;
@@ -259,6 +262,8 @@ public:
     // 入口准入判定：HTTP 线程读镜像值，达到队列容量即回 429，不再先进队后报错。
     bool accepting() const noexcept;
     std::int32_t queue_capacity() const noexcept;
+    // HTTP 工作线程池按活跃序列上限绑定，不把等待队列折算成并行 handler。
+    std::int32_t concurrency_limit() const noexcept;
     // 准入预算 = max_concurrency + queue_capacity；含尚未被 Core 取走的在飞提交。
     std::int32_t admission_capacity() const noexcept;
     void cancel(const RequestId& req_id) noexcept;
@@ -283,6 +288,7 @@ private:
     void record_token_metrics(const std::shared_ptr<SequenceGroup>& group, std::int64_t token_ns,
                               std::int32_t previous, bool first_token);
     void pump();
+    void expire_deadlines();
     void preempt_for_waiting();
     void admit_waiting(TokenBudget& budget);
     bool submit_scheduled(Batch& batch, std::chrono::steady_clock::time_point started);
@@ -320,8 +326,9 @@ private:
     void reap_donors();
     void reconcile(const Sequence& seq);
     std::shared_ptr<SequenceGroup> find_running(const RequestId& req_id) const;
+    std::shared_ptr<SequenceGroup> find_running_by_backend(const BackendId& backend_id) const;
     std::shared_ptr<SequenceGroup> find_running_by_serial(std::int32_t serial) const;
-    RequestId find_live_donor(const PrefixHit& hit) const;
+    BackendId find_live_donor(const PrefixHit& hit) const;
 
     ModelRunner& runner_;
     KVBlockManager& kv_;
@@ -350,7 +357,7 @@ private:
     std::atomic<std::int32_t> running_depth_{0};
     // 已受理、尚未被 Core 处理的在飞提交数；准入预留的唯一原子锚点。
     std::atomic<std::int32_t> inflight_admissions_{0};
-    // 活跃外部 ID 集合：仅在 submit/finish 冷路径访问，防止重复 id 覆盖 runner 槽位。
+    // 活跃外部 ID 集合：仅在 submit/finish 冷路径访问，只判协议层重复，不参与后端槽位键。
     std::mutex active_ids_mutex_;
     std::unordered_set<RequestId> active_ids_;
     std::int64_t started_ns_ = 0;

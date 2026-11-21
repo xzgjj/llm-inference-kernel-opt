@@ -1,10 +1,13 @@
-// rate_limit_test.cc — C-15 原子令牌桶：关闭语义、突发容量与按时间回填。
+// rate_limit_test.cc — C-15 令牌桶：关闭语义、突发容量、按时间回填与并发精确计数。
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include "doctest/doctest.h"
 #include "llmopt/rate_limit.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <latch>
 #include <thread>
+#include <vector>
 
 using namespace llmopt;
 
@@ -32,4 +35,26 @@ TEST_CASE("低速率下桶容量不会被回填超过 burst") {
     CHECK(limiter.try_acquire());
     CHECK_FALSE(limiter.try_acquire()); // 即使再等也只补到 burst=1
     CHECK(limiter.rps() == doctest::Approx(10.0));
+}
+
+TEST_CASE("并发抢占 burst 时成功数精确等于容量，不漏扣不多扣") {
+    // 速率极低，使并发窗口内回填可忽略；16 线程同时抢 8 个令牌，必须恰好 8 个成功。
+    RateLimiter limiter(0.001, 8);
+    constexpr int kThreads = 16;
+    std::atomic<int> successes{0};
+    std::latch start(kThreads);
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int index = 0; index < kThreads; ++index) {
+        threads.emplace_back([&] {
+            start.arrive_and_wait();
+            if (limiter.try_acquire()) {
+                successes.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (std::thread& thread : threads) {
+        thread.join();
+    }
+    CHECK(successes.load(std::memory_order_relaxed) == 8);
 }

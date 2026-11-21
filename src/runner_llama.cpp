@@ -164,9 +164,9 @@ public:
     // 为序列分配 llama seq 槽并建独立采样链；prompt 全量喂给惩罚统计。
     ErrCode add_sequence(const Sequence& seq) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (states_.find(seq.group_id) != states_.end()) {
+        if (states_.find(seq.backend_id) != states_.end()) {
             last_error_ = make_error(ErrCode::InvalidJson, "请求 id 已被后端序列占用",
-                                     "op=add_sequence req=" + seq.group_id);
+                                     "op=add_sequence req=" + seq.backend_id);
             return ErrCode::InvalidJson;
         }
         if (slots_.empty()) {
@@ -184,7 +184,7 @@ public:
         for (std::int32_t id : seq.output_token_ids) {
             llama_sampler_accept(state.sampler.get(), id);
         }
-        states_.insert_or_assign(seq.group_id, std::move(state));
+        states_.insert_or_assign(seq.backend_id, std::move(state));
         return ErrCode::Ok;
     }
 
@@ -211,10 +211,10 @@ public:
                 return failed(
                         output,
                         make_error(ErrCode::ExecutionFailed, "批内步骤构建失败",
-                                   "op=add_step req=" + step.route.req_id + " phase=" +
+                                   "op=add_step req=" + step.route.backend_id + " phase=" +
                                            (step.phase == Phase::Decode ? "decode" : "prefill")));
             }
-            ordered.push_back(step.route.req_id);
+            ordered.push_back(step.route.backend_id);
             output_indexes.push_back(output_idx);
             need_sample.push_back(step.needs_sampling);
         }
@@ -238,7 +238,7 @@ public:
                                          "op=sample req=" + ordered[index] + " output_index=" +
                                                  std::to_string(output_indexes[index])));
             }
-            output.req_ids.push_back(ordered[index]);
+            output.backend_ids.push_back(ordered[index]);
             output.sampled.push_back(token);
             output.num_nans.push_back(0);
         }
@@ -247,9 +247,9 @@ public:
     }
 
     // 释放序列：keep_tokens>0 时只删尾部，前缀留在 KV 中供后续 seq_cp。
-    void release_sequence(const RequestId& req_id, std::int32_t keep_tokens = 0) override {
+    void release_sequence(const BackendId& backend_id, std::int32_t keep_tokens = 0) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = states_.find(req_id);
+        auto it = states_.find(backend_id);
         if (it == states_.end()) {
             return;
         }
@@ -364,9 +364,9 @@ public:
     }
 
     // 对账锚点：后端已写入该 llama seq 的最大位置。
-    std::int32_t seq_pos_max(const RequestId& req_id) const override {
+    std::int32_t seq_pos_max(const BackendId& backend_id) const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = states_.find(req_id);
+        auto it = states_.find(backend_id);
         if (it == states_.end() || !ctx_) {
             return -1;
         }
@@ -387,6 +387,7 @@ public:
 
     // 只有 GPU offload 才走统一 KV stream；纯 CPU 的 seq_cp 是跨 stream 复制，
     // 会 reset 目标 cells 并与本批写入冲突（实测 ExecutionFailed）。
+    // 该能力表示可安全 seq_cp 借用，不表示物理零拷贝。
     bool supports_prefix_share() const noexcept override {
         return n_gpu_layers_ > 0;
     }
@@ -394,7 +395,7 @@ public:
 private:
     // 整批失败：清空已完成采样，交给 Core 统一走 Error 收尾；原始原因随 Error 回投。
     static RunnerStepOutput failed(RunnerStepOutput output, Error error) {
-        output.req_ids.clear();
+        output.backend_ids.clear();
         output.sampled.clear();
         output.num_nans.clear();
         output.error = std::move(error);
@@ -408,7 +409,7 @@ private:
             return -1;
         }
         const NewRequestData& data = batch.new_reqs[index++];
-        auto it = states_.find(data.req_id);
+        auto it = states_.find(data.backend_id);
         if (it == states_.end()) {
             return -1;
         }
@@ -446,7 +447,7 @@ private:
             return -1;
         }
         const CachedRequestData& data = batch.cached_reqs[index++];
-        auto it = states_.find(data.req_id);
+        auto it = states_.find(data.backend_id);
         if (it == states_.end() || data.new_token_ids.empty()) {
             return -1;
         }
@@ -473,8 +474,8 @@ private:
     }
 
     // 按批内输出下标取 token；下标必须与 set_output_logits 的位置一致。
-    SampledToken sample(const RequestId& req_id, std::int32_t output_index) {
-        auto it = states_.find(req_id);
+    SampledToken sample(const BackendId& backend_id, std::int32_t output_index) {
+        auto it = states_.find(backend_id);
         if (it == states_.end() || !it->second.sampler) {
             return SampledToken{};
         }
@@ -503,7 +504,7 @@ private:
     mutable std::mutex mutex_;
     mutable std::mutex vocab_mutex_;
     std::vector<std::int32_t> slots_;
-    std::map<RequestId, LlamaSeqState> states_;
+    std::map<BackendId, LlamaSeqState> states_;
 };
 
 // 工厂：只在 LLMOPT_ENABLE_LLAMA=ON 的构建里链接本文件。

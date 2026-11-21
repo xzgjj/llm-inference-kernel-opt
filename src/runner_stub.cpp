@@ -56,16 +56,16 @@ public:
         return ErrCode::Ok;
     }
 
-    // 登记序列并重置 n_past；重复 req_id 直接拒绝，禁止覆盖已有状态。
+    // 登记序列并重置 n_past；重复内部 BackendId 直接拒绝，禁止覆盖已有状态。
     ErrCode add_sequence(const Sequence& seq) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (states_.find(seq.group_id) != states_.end()) {
+        if (states_.find(seq.backend_id) != states_.end()) {
             return ErrCode::InvalidJson;
         }
         StubState state;
         state.seed = seq.sampling.seed >= 0 ? static_cast<std::uint64_t>(seq.sampling.seed)
                                             : hash_tokens(seq.prompt_token_ids);
-        states_[seq.group_id] = state;
+        states_[seq.backend_id] = state;
         return ErrCode::Ok;
     }
 
@@ -86,7 +86,7 @@ public:
                                                              std::to_string(cached_index)));
                 }
                 const CachedRequestData& data = batch.cached_reqs[cached_index++];
-                StubState& state = states_[data.req_id];
+                StubState& state = states_[data.backend_id];
                 state.n_past = step.pos_end;
                 emit(state, output);
                 continue;
@@ -104,7 +104,7 @@ public:
                                          "op=prefix_borrow source=" + data.prefix_source +
                                                  " tokens=" + std::to_string(data.prefix_tokens)));
             }
-            StubState& state = states_[data.req_id];
+            StubState& state = states_[data.backend_id];
             state.n_past = step.pos_end;
             // 非末块 chunk 只推进 KV，不采样；末块才产出首个 token。
             if (step.needs_sampling) {
@@ -115,9 +115,9 @@ public:
     }
 
     // 释放序列：keep_tokens>0 时把 n_past 截到前缀长度并保留为 donor。
-    void release_sequence(const RequestId& req_id, std::int32_t keep_tokens = 0) override {
+    void release_sequence(const BackendId& backend_id, std::int32_t keep_tokens = 0) override {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = states_.find(req_id);
+        auto it = states_.find(backend_id);
         if (it == states_.end()) {
             return;
         }
@@ -162,9 +162,9 @@ public:
     }
 
     // 对账锚点：返回后端已写入的最大位置。
-    std::int32_t seq_pos_max(const RequestId& req_id) const override {
+    std::int32_t seq_pos_max(const BackendId& backend_id) const override {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = states_.find(req_id);
+        auto it = states_.find(backend_id);
         if (it == states_.end() || it->second.n_past <= 0) {
             return -1;
         }
@@ -189,7 +189,7 @@ public:
 private:
     // 整批失败：清空已累积结果，避免按步回投时把半批 token 当成成功。
     static RunnerStepOutput failed(RunnerStepOutput output, Error error) {
-        output.req_ids.clear();
+        output.backend_ids.clear();
         output.sampled.clear();
         output.num_nans.clear();
         output.error = std::move(error);
@@ -208,7 +208,7 @@ private:
 
     std::int32_t n_ctx_ = 2048;
     mutable std::mutex mutex_;
-    std::map<RequestId, StubState> states_;
+    std::map<BackendId, StubState> states_;
 };
 
 // 工厂：main 在 backend=stub 且显式放行时调用。

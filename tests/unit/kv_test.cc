@@ -10,7 +10,7 @@ namespace {
 // 构造只带必要字段的序列；prompt_token_ids 决定块哈希链。
 void init_sequence(Sequence& seq, std::int32_t id, std::int32_t prompt_len) {
     seq.id = id;
-    seq.group_id = "req-" + std::to_string(id);
+    seq.backend_id = "req-" + std::to_string(id);
     seq.prompt_len = prompt_len;
     seq.prompt_token_ids.assign(static_cast<std::size_t>(prompt_len), 0);
     for (std::int32_t index = 0; index < prompt_len; ++index) {
@@ -169,7 +169,7 @@ TEST_CASE("长 donor id 淘汰后仍安全写入待释放列表") {
     KVBlockManager kv(KVConfig{4, 4, 0.0, true, 1});
     Sequence first;
     init_sequence(first, 8, 16);
-    first.group_id = "req-0123456789abcdef";
+    first.backend_id = "req-0123456789abcdef";
     REQUIRE(kv.acquire(first, 16, 0, true).ok());
     kv.mark_written(first, 16);
     REQUIRE(kv.retain(first) == 16);
@@ -186,7 +186,8 @@ TEST_CASE("长 donor id 淘汰后仍安全写入待释放列表") {
     CHECK(kv.check_invariants(why));
 }
 
-TEST_CASE("共享块在 ref_cnt>1 时不被回收，最后一个持有者释放后才空闲") {    KVBlockManager kv(KVConfig{4, 4, 0.0, true, 2});
+TEST_CASE("共享块在 ref_cnt>1 时不被回收，最后一个持有者释放后才空闲") {
+    KVBlockManager kv(KVConfig{4, 4, 0.0, true, 2});
     Sequence first;
     init_sequence(first, 10, 12);
     REQUIRE(kv.acquire(first, 12, 0, true).ok());

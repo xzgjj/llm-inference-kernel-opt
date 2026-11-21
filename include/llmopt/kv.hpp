@@ -35,8 +35,8 @@ struct KVConfig {
 struct PrefixHit {
     std::vector<BlockRef> blocks;
     std::int32_t hit_tokens = 0;
-    // 提供这些块 KV 的序列：运行中的 seq_id 或留置 donor；空表示不可物理借用。
-    RequestId donor;
+    // 提供这些块 KV 的序列：运行中的内部 backend id 或留置 donor；空表示不可物理借用。
+    BackendId donor;
 };
 
 struct AllocResult {
@@ -57,7 +57,8 @@ struct KVUsage {
     std::int32_t watermark_blocks = 0;
 };
 
-// 逻辑块表：ref_cnt 区分独占/共享；满块哈希链支持前缀零拷贝复用。
+// 逻辑块表：ref_cnt 区分独占/共享；满块哈希链让相同前缀共享逻辑块。
+// 注意：共享的是块元数据与引用计数，后端仍需按 seq_cp/预留把物理 KV 写入目标槽。
 class KVBlockManager {
 public:
     explicit KVBlockManager(KVConfig config);
@@ -74,16 +75,14 @@ public:
     void free(Sequence& seq);
     // 序列释放后真正能回到空闲链的块数；共享块只减引用，不计入。
     std::int32_t releasable_blocks(const Sequence& seq) const;
-    // 按外部请求 id 丢弃同名前缀 donor；返回是否命中，调用方随后 reap 后端状态。
-    bool release_donor(const RequestId& donor);
     // 结束序列时留置满块内容：返回保留 token 数（0 表示未留置），seq.block_table 清空。
     std::int32_t retain(Sequence& seq);
     // 一步写出后确认哈希可用，避免未算完的块被命中。
     void mark_written(const Sequence& seq, std::int32_t computed_tokens);
     // 释放全部留置缓存（关停/测试收口用），返回需后端释放的序列 id。
-    std::vector<RequestId> flush_cache();
-    // 取走因淘汰而需后端释放的 cache donor。
-    std::vector<RequestId> take_dropped_donors();
+    std::vector<BackendId> flush_cache();
+    // 被驱逐、待后端释放的 donor backend id；由 Core 在安全点消费。
+    std::vector<BackendId> take_dropped_donors();
 
     std::int32_t num_free_blocks() const noexcept;
     std::int32_t num_total_blocks() const noexcept;
@@ -100,7 +99,7 @@ private:
         std::int32_t ref_cnt = 0;
         std::uint64_t hash = 0;
         bool verified = false;
-        RequestId owner;
+        BackendId owner;
         bool listed_free = true;
     };
 
@@ -110,7 +109,7 @@ private:
     void release_block(std::int32_t id);
     void push_free(std::int32_t id);
     bool ensure_free(std::int32_t need);
-    void evict_donor(const RequestId& donor);
+    void evict_donor(const BackendId& donor);
     void adopt_block(std::int32_t id, const std::string& owner);
     void forget_hash(std::int32_t id);
     void register_hash(std::int32_t id, std::uint64_t hash);
@@ -119,9 +118,9 @@ private:
     std::vector<BlockState> blocks_;
     std::vector<std::int32_t> free_list_;
     std::unordered_map<std::uint64_t, std::int32_t> hash_index_;
-    std::map<RequestId, std::vector<std::int32_t>> donors_;
-    std::vector<RequestId> donor_order_;
-    std::vector<RequestId> dropped_;
+    std::map<BackendId, std::vector<std::int32_t>> donors_;
+    std::vector<BackendId> donor_order_;
+    std::vector<BackendId> dropped_;
     std::int32_t ref_total_ = 0;
 };
 

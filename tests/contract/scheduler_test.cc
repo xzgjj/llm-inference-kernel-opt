@@ -5,8 +5,10 @@
 #include "llmopt/runner.hpp"
 #include "llmopt/scheduler.hpp"
 
+#include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace llmopt; // NOLINT：用例短名与契约同名
@@ -118,10 +120,35 @@ std::vector<Delta> drain(const std::shared_ptr<BoundedSink>& sink) {
 
 } // namespace
 
+TEST_CASE("请求级 deadline 到期按 Timeout 收尾，流式连接拿到终态") {
+    SchedulerConfig config;
+    config.max_concurrency = 1;
+    config.max_num_batched_tokens = 8;
+    config.queue_capacity = 2;
+    config.request_deadline_ns = 1'000'000; // 1ms
+    Harness harness(config);
+    const auto sink = harness.submit("deadline", 32);
+    std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    harness.pump(sink, 40);
+    const std::vector<Delta> frames = drain(sink);
+    REQUIRE(!frames.empty());
+    const Delta& last = frames.back();
+    REQUIRE(last.finish.has_value());
+    CHECK(*last.finish == FinishReason::Error);
+    bool saw_timeout = false;
+    for (const Delta& frame : frames) {
+        if (frame.error && frame.error->code == ErrCode::Timeout) {
+            saw_timeout = true;
+        }
+    }
+    CHECK(saw_timeout);
+    CHECK(harness.metrics.get(MetricId::RequestsError) == 1);
+}
+
 TEST_CASE("Prefill 投影带采样点，Decode 投影只带新 token") {
     Harness harness;
     Sequence seq;
-    seq.group_id = "req-proj";
+    seq.backend_id = "req-proj";
     seq.prompt_len = 5;
     seq.prompt_token_ids = {10, 11, 12, 13, 14};
 

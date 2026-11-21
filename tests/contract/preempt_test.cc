@@ -49,7 +49,7 @@ TEST_CASE("抢占预判不足时不改动 running 块表") {
     KVBlockManager kv(KVConfig{4, 4, 0.0, true, 2});
     Sequence donor;
     donor.id = 1;
-    donor.group_id = "donor";
+    donor.backend_id = "donor";
     donor.prompt_len = 8;
     donor.prompt_token_ids = {1, 2, 3, 4, 5, 6, 7, 8};
     REQUIRE(kv.acquire(donor, 8, 0, true).ok());
@@ -58,13 +58,14 @@ TEST_CASE("抢占预判不足时不改动 running 块表") {
 
     Sequence victim;
     victim.id = 2;
-    victim.group_id = "victim";
+    victim.backend_id = "victim";
     victim.status = SeqStatus::Running;
     REQUIRE(kv.acquire(victim, 8, 0, true).ok());
     SequenceGroup group;
     group.req_id = "victim";
+    group.backend_id = victim.backend_id;
     group.seq.id = victim.id;
-    group.seq.group_id = victim.group_id;
+    group.seq.backend_id = victim.backend_id;
     group.seq.status = SeqStatus::Running;
     group.seq.block_table = victim.block_table;
     std::vector<SequenceGroup*> groups{&group};
@@ -85,7 +86,7 @@ TEST_CASE("共享前缀块不计入可释放量：预判不足时零副作用") 
     KVBlockManager kv(KVConfig{4, 6, 0.0, true, 2});
     Sequence donor;
     donor.id = 1;
-    donor.group_id = "donor";
+    donor.backend_id = "donor";
     donor.prompt_len = 12;
     donor.prompt_token_ids = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
     REQUIRE(kv.acquire(donor, 12, 0, true).ok());
@@ -94,7 +95,7 @@ TEST_CASE("共享前缀块不计入可释放量：预判不足时零副作用") 
 
     Sequence victim;
     victim.id = 2;
-    victim.group_id = "victim";
+    victim.backend_id = "victim";
     victim.status = SeqStatus::Running;
     victim.prompt_len = 12;
     victim.prompt_token_ids = donor.prompt_token_ids;
@@ -106,8 +107,9 @@ TEST_CASE("共享前缀块不计入可释放量：预判不足时零副作用") 
 
     SequenceGroup group;
     group.req_id = "victim";
+    group.backend_id = victim.backend_id;
     group.seq.id = victim.id;
-    group.seq.group_id = victim.group_id;
+    group.seq.backend_id = victim.backend_id;
     group.seq.status = SeqStatus::Running;
     group.seq.prompt_len = victim.prompt_len;
     group.seq.prompt_token_ids = victim.prompt_token_ids;
@@ -186,9 +188,12 @@ TEST_CASE("压力档每次抢占落 trace：victim/块数/重算 token/代价可
     CHECK(content.find("ts_ns,trigger,victim,free_before,need_blocks,blocks_released,"
                        "recompute_tokens,path,cost_ms,cap_error") != std::string::npos);
     // A 占 14 块，free_before=2；B 需 15 块，释放 14 块，代价未标定为 NA。
-    const std::string expected =
-            ",admission,a,2,15,14," + std::to_string(recompute) + ",recompute,NA,0";
+    // victim 字段落内部 backend_id（seq-<serial>），不再泄露/依赖外部请求 id。
+    const std::string expected = ",admission,seq-";
     CHECK(content.find(expected) != std::string::npos);
+    CHECK(content.find(",2,15,14," + std::to_string(recompute) + ",recompute,NA,0") !=
+          std::string::npos);
+    CHECK(content.find(",admission,a,2,15,14,") == std::string::npos);
     if (std::getenv("LLMOPT_KEEP_PREEMPT_TRACE") == nullptr) {
         std::filesystem::remove(trace);
     }

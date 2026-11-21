@@ -235,8 +235,8 @@ void StepExecutor::loop() {
         std::size_t sample_index = 0;
         for (std::size_t i = 0; i < batch.steps.size(); ++i) {
             const SequenceStep& step = batch.steps[i];
-            Event event = make_event(EventKind::Completion, step.route.req_id);
-            event.completion.seq_id = step.route.req_id;
+            Event event = make_event(EventKind::Completion, step.route.backend_id);
+            event.completion.backend_id = step.route.backend_id;
             event.completion.seq_serial = step.kv.seq_id;
             event.completion.computed_tokens = step.pos_end;
             event.completion.sampled_expected = step.needs_sampling;
@@ -246,7 +246,7 @@ void StepExecutor::loop() {
             }
             // 关键通道：丢了这条就等于让 Core 永远等不到这一步。
             if (!mailbox_.push_critical(std::move(event))) {
-                logger()->error("completion 回投失败 req={} serial={}", step.route.req_id,
+                logger()->error("completion 回投失败 req={} serial={}", step.route.backend_id,
                                 step.kv.seq_id);
             }
         }
@@ -290,7 +290,8 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         group->stream = req.stream;
         group->sink = std::move(sink);
         group->seq.id = g_seq_id.fetch_add(1, std::memory_order_relaxed);
-        group->seq.group_id = group->req_id;
+        group->backend_id = "seq-" + std::to_string(group->seq.id);
+        group->seq.backend_id = group->backend_id;
         group->seq.prompt_len = static_cast<std::int32_t>(group->prompt_ids.size());
         group->seq.prompt_token_ids = group->prompt_ids;
         group->seq.sampling = group->sampling;
@@ -353,6 +354,10 @@ bool SchedulerCore::accepting() const noexcept {
 
 std::int32_t SchedulerCore::queue_capacity() const noexcept {
     return config_.queue_capacity;
+}
+
+std::int32_t SchedulerCore::concurrency_limit() const noexcept {
+    return config_.max_concurrency;
 }
 
 std::int32_t SchedulerCore::admission_capacity() const noexcept {
@@ -422,19 +427,20 @@ void SchedulerCore::run() {
 
 bool SchedulerCore::run_once(int wait_ms) {
     Event event;
-    if (!mailbox_.wait_pop_for(event, wait_ms)) {
-        return false;
+    const bool got_event = mailbox_.wait_pop_for(event, wait_ms);
+    if (got_event) {
+        handle(event);
+        Event extra;
+        while (mailbox_.try_pop(extra)) {
+            handle(extra);
+        }
     }
-    handle(event);
-    Event extra;
-    while (mailbox_.try_pop(extra)) {
-        handle(extra);
-    }
+    // 即使没有事件也要推进：请求级 deadline 只能在 Core 线程判定，不能等下一个事件。
     pump();
     // 深度只在 Core 线程写；HTTP 准入读镜像，避免跨线程读 deque。
     waiting_depth_.store(static_cast<std::int32_t>(waiting_.size()), std::memory_order_relaxed);
     running_depth_.store(static_cast<std::int32_t>(running_.size()), std::memory_order_relaxed);
-    return true;
+    return got_event;
 }
 
 // AddRequest 单独成函数：准入预留兑现、队列兜底拒绝与深度镜像都在这里收口。
@@ -599,6 +605,39 @@ bool SchedulerCore::submit_scheduled(Batch& batch, std::chrono::steady_clock::ti
     return true;
 }
 
+// 请求级 deadline：从提交入队起算，流式与非流式一致；到期的运行/排队请求都收终态。
+// 只在 Core 线程且无 pending 批时调用，finish 可安全释放后端与块表。
+void SchedulerCore::expire_deadlines() {
+    if (config_.request_deadline_ns <= 0) {
+        return;
+    }
+    const std::int64_t now = now_ns();
+    const auto expired = [&](const std::shared_ptr<SequenceGroup>& group) {
+        return group->enqueued_ns > 0 && now - group->enqueued_ns >= config_.request_deadline_ns;
+    };
+    for (auto it = waiting_.begin(); it != waiting_.end();) {
+        if (!expired(*it)) {
+            ++it;
+            continue;
+        }
+        auto group = *it;
+        it = waiting_.erase(it);
+        finish(group, FinishReason::Error,
+               make_error(ErrCode::Timeout, "请求超过总时限",
+                          "req=" + group->req_id + " deadline_s=" +
+                                  std::to_string(config_.request_deadline_ns / 1'000'000'000)));
+    }
+    std::vector<std::shared_ptr<SequenceGroup>> running_copy = running_;
+    for (const auto& group : running_copy) {
+        if (expired(group)) {
+            finish(group, FinishReason::Error,
+                   make_error(ErrCode::Timeout, "请求超过总时限",
+                              "req=" + group->req_id + " deadline_s=" +
+                                      std::to_string(config_.request_deadline_ns / 1'000'000'000)));
+        }
+    }
+}
+
 void SchedulerCore::pump() {
     if (pending_step_ || shutting_down_ || pumping_) {
         return;
@@ -613,6 +652,8 @@ void SchedulerCore::pump() {
         }
     } guard(pumping_);
     const auto started = std::chrono::steady_clock::now();
+    // 请求级总时限优先于组批：到期的请求不再消耗预算，直接按 Timeout 收尾。
+    expire_deadlines();
     // 上一 tick 淘汰的 donor 此刻才能真正释放：本批若还要借前缀，必须等复制完成。
     reap_donors();
     Batch batch;
@@ -791,11 +832,7 @@ bool SchedulerCore::acquire_blocks(const std::shared_ptr<SequenceGroup>& group,
 
 bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget) {
     Sequence& seq = group->seq;
-    // 外部 id 可在旧请求结束后复用；旧请求留下的同名前缀 donor 必须先丢，
-    // 否则后端 add_sequence 会把 donor 状态误判为“重复登记”，且前缀会指向自己。
-    if (kv_.release_donor(group->req_id)) {
-        reap_donors();
-    }
+    // 外部 id 只做协议身份；同名前缀 donor 属于另一内部 backend_id，不会撞新序列。
     const std::int32_t hit_tokens = apply_prefix_hit(group);
     const std::int32_t total_tokens = seq.prompt_len + seq.sampling.max_tokens;
     if (!acquire_blocks(group, total_tokens, hit_tokens)) {
@@ -813,7 +850,7 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
     if (slice.n_tokens <= 0) {
         metrics_.inc(MetricId::ChunkDeferred);
         kv_.free(seq);
-        runner_.release_sequence(group->req_id, 0);
+        runner_.release_sequence(group->backend_id, 0);
         finish(group, FinishReason::Error,
                make_error(ErrCode::ExecutionFailed, "token 预算不足，无法生成首个切片",
                           "budget_left=" + std::to_string(budget.tokens_remain())));
@@ -836,17 +873,17 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
 void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTrigger trigger,
                                      std::int32_t free_before, std::int32_t need_blocks) {
     for (std::size_t index = 0; index < decision.victims.size(); ++index) {
-        const RequestId& req_id = decision.victims[index];
-        auto group = find_running(req_id);
+        const BackendId& victim_backend = decision.victims[index];
+        auto group = find_running_by_backend(victim_backend);
         if (!group) {
             continue;
         }
         Sequence& seq = group->seq;
         const std::int32_t recompute_tokens = context_tokens(seq);
-        runner_.release_sequence(req_id, 0);
+        runner_.release_sequence(victim_backend, 0);
         group->admitted = false;
         seq.num_computed = 0;
-        seq.id += 1; // 旧 serial 的完成事件一律 stale
+        seq.id = g_seq_id.fetch_add(1, std::memory_order_relaxed); // 旧 serial 完成事件一律 stale
         seq.status = SeqStatus::Swapped;
         group->prefix_source.clear();
         group->prefix_tokens = 0;
@@ -865,7 +902,7 @@ void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTri
         PreemptEvent event;
         event.ts_ns = now_ns();
         event.trigger = trigger;
-        event.victim = req_id;
+        event.victim = victim_backend;
         event.free_before = free_before;
         event.need_blocks = need_blocks;
         event.blocks_released = released;
@@ -929,12 +966,12 @@ bool SchedulerCore::append_decode(Batch& batch, const std::shared_ptr<SequenceGr
         return false;
     }
     CachedRequestData data;
-    data.req_id = group->req_id;
+    data.backend_id = group->backend_id;
     data.new_token_ids.push_back(seq.output_token_ids.back());
     data.new_block_ids = seq.block_table;
     SequenceStep step;
-    step.seq_id = group->req_id;
-    step.route.req_id = group->req_id;
+    step.backend_id = group->backend_id;
+    step.route.backend_id = group->backend_id;
     step.kv = KVPen{seq.id, 0};
     step.phase = Phase::Decode;
     step.pos_begin = seq.num_computed;
@@ -976,7 +1013,7 @@ bool SchedulerCore::append_prefill_chunk(Batch& batch, const std::shared_ptr<Seq
         return false;
     }
     NewRequestData data;
-    data.req_id = group->req_id;
+    data.backend_id = group->backend_id;
     data.prefill_token_ids.reserve(static_cast<std::size_t>(slice.n_tokens));
     for (std::int32_t offset = 0; offset < slice.n_tokens; ++offset) {
         const std::int32_t pos = seq.num_computed + offset;
@@ -997,8 +1034,8 @@ bool SchedulerCore::append_prefill_chunk(Batch& batch, const std::shared_ptr<Seq
         group->prefix_applied = true;
     }
     SequenceStep step;
-    step.seq_id = group->req_id;
-    step.route.req_id = group->req_id;
+    step.backend_id = group->backend_id;
+    step.route.backend_id = group->backend_id;
     step.kv = KVPen{seq.id, 0};
     step.phase = slice.is_last ? Phase::PrefillLast : Phase::PrefillChunk;
     step.pos_begin = seq.num_computed;
@@ -1043,7 +1080,7 @@ Batch SchedulerCore::build_batch(const Sequence& seq) const {
     SequenceStep step;
     if (seq.num_computed < seq.prompt_len) {
         NewRequestData data;
-        data.req_id = seq.group_id;
+        data.backend_id = seq.backend_id;
         data.prefill_token_ids = seq.prompt_token_ids;
         data.block_ids = seq.block_table;
         data.sampling = seq.sampling;
@@ -1053,19 +1090,19 @@ Batch SchedulerCore::build_batch(const Sequence& seq) const {
         batch.new_reqs.push_back(std::move(data));
     } else {
         CachedRequestData data;
-        data.req_id = seq.group_id;
+        data.backend_id = seq.backend_id;
         data.new_token_ids.push_back(seq.output_token_ids.back());
         step.phase = Phase::Decode;
         step.pos_end = seq.num_computed + 1;
         batch.total_tokens = 1;
         batch.cached_reqs.push_back(std::move(data));
     }
-    step.seq_id = seq.group_id;
+    step.backend_id = seq.backend_id;
     step.pos_begin = seq.num_computed;
     step.n_tokens = batch.total_tokens;
     step.needs_sampling = true;
     step.sample_pos = step.pos_end - 1;
-    step.route.req_id = seq.group_id;
+    step.route.backend_id = seq.backend_id;
     step.kv = KVPen{seq.id, 0};
     batch.steps.push_back(step);
     return batch;
@@ -1138,7 +1175,7 @@ void SchedulerCore::apply_completion(const Completion& completion) {
     pending_remaining_ -= 1;
     auto group = find_running_by_serial(completion.seq_serial);
     const bool batch_done = pending_remaining_ == 0;
-    if (!group || group->req_id != completion.seq_id) {
+    if (!group || group->backend_id != completion.backend_id) {
         conclude_step(batch_done);
         return;
     }
@@ -1264,7 +1301,7 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
         } else {
             kv_.free(seq);
         }
-        runner_.release_sequence(group->req_id, keep);
+        runner_.release_sequence(group->backend_id, keep);
     }
     running_.erase(std::remove(running_.begin(), running_.end(), group), running_.end());
     if (!pending_step_) {
@@ -1296,14 +1333,14 @@ void SchedulerCore::reap_donors() {
 }
 
 void SchedulerCore::reconcile(const Sequence& seq) {
-    const std::int32_t backend_pos = runner_.seq_pos_max(seq.group_id);
+    const std::int32_t backend_pos = runner_.seq_pos_max(seq.backend_id);
     const std::int32_t expected = seq.num_computed - 1;
     if (backend_pos < 0 || expected < 0) {
         return;
     }
     if (backend_pos != expected) {
         metrics_.inc(MetricId::KvReconcileDiffs);
-        logger()->warn("kv 对账差异 req={} backend_pos={} expected={}", seq.group_id, backend_pos,
+        logger()->warn("kv 对账差异 req={} backend_pos={} expected={}", seq.backend_id, backend_pos,
                        expected);
     }
 }
@@ -1311,6 +1348,16 @@ void SchedulerCore::reconcile(const Sequence& seq) {
 std::shared_ptr<SequenceGroup> SchedulerCore::find_running(const RequestId& req_id) const {
     for (const auto& group : running_) {
         if (group->req_id == req_id) {
+            return group;
+        }
+    }
+    return nullptr;
+}
+
+std::shared_ptr<SequenceGroup>
+SchedulerCore::find_running_by_backend(const BackendId& backend_id) const {
+    for (const auto& group : running_) {
+        if (group->backend_id == backend_id) {
             return group;
         }
     }
@@ -1338,7 +1385,7 @@ RequestId SchedulerCore::find_live_donor(const PrefixHit& hit) const {
         }
         for (const BlockRef& ref : group->seq.block_table) {
             if (ref.block_id == block_id) {
-                return group->req_id;
+                return group->backend_id;
             }
         }
     }

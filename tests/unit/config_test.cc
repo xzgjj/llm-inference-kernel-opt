@@ -170,6 +170,7 @@ TEST_CASE("阶段 2 调度参数默认值与 CLI 覆盖") {
     CHECK(cfg.watermark_ratio == doctest::Approx(0.05));
     CHECK(cfg.enable_prefix_cache);
     CHECK(cfg.chunk_size == 128);
+    CHECK(cfg.request_deadline_seconds == 120);
 
     CHECK(load({"--model", "m.gguf", "--ctx-tokens", "1024", "--max-num-batched-tokens", "1024",
                 "--queue-capacity", "8", "--block-size", "32", "--watermark-ratio", "0.10",
@@ -180,6 +181,10 @@ TEST_CASE("阶段 2 调度参数默认值与 CLI 覆盖") {
     CHECK(cfg.block_tokens == 32);
     CHECK(cfg.watermark_ratio == doctest::Approx(0.10));
     CHECK_FALSE(cfg.enable_prefix_cache);
+
+    CHECK(load({"--model", "m.gguf", "--request-deadline-seconds", "45"}, cfg, message) ==
+          ErrCode::Ok);
+    CHECK(cfg.request_deadline_seconds == 45);
 }
 
 TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
@@ -191,6 +196,7 @@ TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
     set_env("LLMOPT_BLOCK_SIZE", "8");
     set_env("LLMOPT_WATERMARK_RATIO", "0.0");
     set_env("LLMOPT_DISABLE_PREFIX_CACHE", "1");
+    set_env("LLMOPT_REQUEST_DEADLINE_SECONDS", "90");
     ServerConfig cfg;
     std::string message;
     CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::Ok);
@@ -200,6 +206,7 @@ TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
     CHECK(cfg.queue_capacity == 4);
     CHECK(cfg.block_tokens == 8);
     CHECK_FALSE(cfg.enable_prefix_cache);
+    CHECK(cfg.request_deadline_seconds == 90);
     clear_env();
 
     CHECK(load({"--model", "m.gguf", "--max-num-batched-tokens", "0"}, cfg, message) ==
@@ -210,6 +217,10 @@ TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
           ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--block-size", "2"}, cfg, message) == ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--watermark-ratio", "0.3"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--request-deadline-seconds", "0"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--request-deadline-seconds", "3601"}, cfg, message) ==
           ErrCode::ConfigInvalid);
 }
 
@@ -386,12 +397,51 @@ TEST_CASE("配置文件未知键、越界与坏 JSON 一律拒绝") {
 }
 
 // 6-G2 新增项：限流、排空、trace 采样与 api-key 也走同一优先级。
+TEST_CASE("派生配置单一真源：默认值与单位换算不再漂移") {
+    ServerConfig cfg;
+    cfg.model_path = "m.gguf";
+    cfg.ctx_tokens = 1024;
+    cfg.max_concurrency = 8;
+    cfg.queue_capacity = 32;
+    cfg.max_num_batched_tokens = 512;
+    cfg.chunk_size = 64;
+    cfg.block_tokens = 16;
+    cfg.request_deadline_seconds = 45;
+    cfg.aging_threshold_ms = 1000;
+    cfg.enable_prefix_cache = true;
+    cfg.n_gpu_layers = 0; // 无 GPU：不额外分配 donor 槽
+
+    const SchedulerConfig scheduler = make_scheduler_config(cfg, 4, false);
+    CHECK(scheduler.max_concurrency == 4);
+    CHECK(scheduler.queue_capacity == cfg.queue_capacity);
+    CHECK(scheduler.max_num_batched_tokens == cfg.max_num_batched_tokens);
+    CHECK(scheduler.chunk_size == cfg.chunk_size);
+    CHECK_FALSE(scheduler.enable_prefix_cache);
+    CHECK(scheduler.request_deadline_ns == 45'000'000'000LL);
+    CHECK(scheduler.aging_threshold_ns == 1'000'000'000LL);
+
+    const ModelConfig model = make_model_config(cfg, 4);
+    CHECK(model.n_seq_max == 4);
+    CHECK(model.n_ctx_total == cfg.ctx_tokens * 4);
+    CHECK(model.n_batch == 512);
+
+    const KVConfig kv = make_kv_config(cfg, 4, false);
+    CHECK(kv.num_blocks == (cfg.ctx_tokens * 4) / cfg.block_tokens);
+    CHECK(kv.block_tokens == cfg.block_tokens);
+    CHECK_FALSE(kv.enable_prefix_cache);
+    CHECK(kv.max_donors == 0);
+
+    // 两套结构体的默认值必须同源；历史上 ServerConfig=32、SchedulerConfig=64 已漂移过。
+    CHECK(ServerConfig{}.queue_capacity == SchedulerConfig{}.queue_capacity);
+}
+
 TEST_CASE("服务边界参数四层优先级与范围") {
     clear_env();
     const std::string file =
             write_config("llmopt_service_config.json",
                          R"({"model":"file.gguf","rate_limit_rps":10.0,"rate_limit_burst":16,
-                "drain_deadline_seconds":20,"step_trace_rate":8,"api_key":"file-token"})");
+                "drain_deadline_seconds":20,"request_deadline_seconds":75,
+                "step_trace_rate":8,"api_key":"file-token"})");
     ServerConfig cfg;
     std::string message;
     std::vector<ConfigSourceEntry> sources;
@@ -399,6 +449,7 @@ TEST_CASE("服务边界参数四层优先级与范围") {
     CHECK(cfg.rate_limit_rps == doctest::Approx(10.0));
     CHECK(cfg.rate_limit_burst == 16);
     CHECK(cfg.drain_deadline_seconds == 20);
+    CHECK(cfg.request_deadline_seconds == 75);
     CHECK(cfg.step_trace_rate == 8);
     CHECK(cfg.api_key == "file-token");
 

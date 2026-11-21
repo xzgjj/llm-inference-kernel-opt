@@ -29,7 +29,7 @@ public:
     virtual ErrCode add_sequence(const Sequence& seq) = 0;
     virtual RunnerStepOutput decode_step(const Batch& batch) = 0;
     // keep_tokens>0 表示保留 [0, keep_tokens) 的 KV 作为前缀 donor，其余释放。
-    virtual void release_sequence(const RequestId& req_id, std::int32_t keep_tokens = 0) = 0;
+    virtual void release_sequence(const BackendId& backend_id, std::int32_t keep_tokens = 0) = 0;
     virtual void release() = 0;
 
     // M3 tokenizer 随模型词表走，避免二次加载权重。
@@ -47,8 +47,8 @@ public:
     virtual bool is_eos(std::int32_t token_id) const = 0;
     virtual std::int32_t n_ctx() const noexcept = 0;
     // 后端已写入该序列的最大位置；-1 表示空或后端不支持对账。
-    virtual std::int32_t seq_pos_max(const RequestId& req_id) const {
-        (void)req_id;
+    virtual std::int32_t seq_pos_max(const BackendId& backend_id) const {
+        (void)backend_id;
         return -1;
     }
     // 最近一次失败的详细信息（message/detail）；适配器在此保留第三方原始 cause。
@@ -61,7 +61,8 @@ public:
         return false;
     }
 
-    // 后端能否零拷贝共享已算好的前缀 KV；默认关闭，只有确认安全的实现才打开。
+    // 后端能否安全借用已算好的前缀 KV：逻辑块共享由 KVBlockManager 负责，
+    // 物理侧仍可能是 seq_cp 复制或目标块预留，不承诺零拷贝。
     virtual bool supports_prefix_share() const noexcept {
         return false;
     }

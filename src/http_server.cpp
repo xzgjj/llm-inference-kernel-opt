@@ -96,9 +96,9 @@ bool write_frame(httplib::DataSink& sink, const std::string& frame) {
 // 非流式：排空 sink 并拼接文本；stop 命中即取消，避免继续消耗算力。
 std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const InferenceRequest& req,
                        SchedulerCore& core, StopFilter& filter, int& gen_tokens,
-                       FinishReason& finish, Error& error) {
+                       FinishReason& finish, Error& error, std::int32_t deadline_seconds) {
     std::string text;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(deadline_seconds);
     while (true) {
         Delta delta;
         if (sink->pop_frame(delta, 100)) {
@@ -124,7 +124,9 @@ std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const Inferenc
         }
         if (std::chrono::steady_clock::now() > deadline) {
             core.cancel(req.req_id);
-            error = make_error(ErrCode::Timeout, "等待生成结果超时（120s）", "req=" + req.req_id);
+            error = make_error(ErrCode::Timeout,
+                               "等待生成结果超时（" + std::to_string(deadline_seconds) + "s）",
+                               "req=" + req.req_id);
             finish = FinishReason::Aborted;
             break;
         }
@@ -367,8 +369,9 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
             FinishReason finish = FinishReason::None;
             Error error;
             StopFilter filter(reqs[index].stop);
-            const std::string text = drain_sink(sinks[index], reqs[index], *ctx->core, filter,
-                                                generated, finish, error);
+            const std::string text =
+                    drain_sink(sinks[index], reqs[index], *ctx->core, filter, generated, finish,
+                               error, ctx->config->request_deadline_seconds);
             if (finish == FinishReason::Error && error.ok()) {
                 error = make_error(ErrCode::ExecutionFailed, "推理失败（无详细原因）");
             } else if (finish == FinishReason::Aborted && error.ok()) {
@@ -439,6 +442,11 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     }
 
     httplib::Server server;
+    // 总并发上限与 Scheduler 的活跃序列上限绑定；额外 3 个线程留给控制端点
+    // （/healthz、/readyz、/metrics）与排空监视，避免健康检查被推理请求饿死。
+    // cpp-httplib 每个连接串行处理请求，因此单连接天然并发为 1。
+    const std::size_t handler_threads = static_cast<std::size_t>(core.concurrency_limit() + 3);
+    server.new_task_queue = [handler_threads] { return new httplib::ThreadPool(handler_threads); };
     server.set_payload_max_length(std::size_t{4} * 1024 * 1024);
     server.set_read_timeout(5, 0);
     server.set_write_timeout(120, 0);

@@ -29,7 +29,6 @@ constexpr std::int32_t kExitStartFail = 1;
 constexpr std::int32_t kExitUsage = 2;
 constexpr std::int32_t kExitResource = 3;
 constexpr std::int32_t kExitGate = 4;
-constexpr std::int32_t kDonorSlots = 4; // 前缀缓存最多保留的 donor 序列槽
 
 // MiB 换算只用于启动摘要，避免把字节数直接怼给人看。
 std::int64_t to_mib(std::int64_t bytes) {
@@ -58,6 +57,7 @@ void print_config(const ServerConfig& cfg) {
               << " backend=" << cfg.backend << " log_level=" << cfg.log_level
               << " rate_rps=" << cfg.rate_limit_rps << " rate_burst=" << cfg.rate_limit_burst
               << " drain_s=" << cfg.drain_deadline_seconds
+              << " request_deadline_s=" << cfg.request_deadline_seconds
               << " step_trace_rate=" << cfg.step_trace_rate
               << " api_key=" << (cfg.api_key.empty() ? "unset" : "set") << "\n";
 }
@@ -98,34 +98,12 @@ std::unique_ptr<ModelRunner> make_runner(const ServerConfig& cfg, std::string& m
 #endif
 }
 
-// donor 槽只在 GPU offload（统一 KV stream）且请求了前缀复用时才需要；
-// CPU 后端不支持零拷贝共享，前缀缓存会被降级关闭，多留 4 个槽只会稀释单序列上下文。
-std::int32_t donor_slots_for(const ServerConfig& cfg) {
-    return (cfg.enable_prefix_cache && cfg.n_gpu_layers > 0) ? kDonorSlots : 0;
-}
-
-// 组装后端配置：n_ctx_total 按“每序列上下文 × 全部序列槽”计，donor 槽也各占一份，
-// 否则 llama.cpp 会把 n_ctx_total 均分给 n_seq_max，单序列有效上下文被 donor 稀释。
-ModelConfig build_model_config(const ServerConfig& cfg, std::int32_t concurrency) {
-    ModelConfig model_cfg;
-    model_cfg.model_path = cfg.model_path;
-    model_cfg.n_ctx = cfg.ctx_tokens;
-    model_cfg.n_seq_max = concurrency + donor_slots_for(cfg);
-    model_cfg.n_ctx_total = cfg.ctx_tokens * model_cfg.n_seq_max;
-    // 单步物理批只需容纳调度预算；不再按 ctx 放大，避免大上下文配置白占缓冲。
-    model_cfg.n_batch = std::max<std::int32_t>(cfg.max_num_batched_tokens, cfg.chunk_size);
-    model_cfg.n_ubatch = 512;
-    model_cfg.threads = cfg.threads;
-    model_cfg.n_gpu_layers = cfg.n_gpu_layers;
-    return model_cfg;
-}
-
-// 后端不支持零拷贝共享时把前缀复用降级为关闭，并明确告知，避免静默走不可用路径。
+// 前缀复用：只有后端确认能安全借用 KV 才启用；请求开启但后端不支持时降级为关闭。
 bool resolve_prefix_cache(const ServerConfig& cfg, const ModelRunner& runner) {
     const bool enabled =
             effective_prefix_cache(cfg.enable_prefix_cache, runner.supports_prefix_share());
     if (cfg.enable_prefix_cache && !enabled) {
-        std::cout << "前缀复用已关闭：当前后端不支持零拷贝 KV 共享\n";
+        std::cout << "前缀复用已关闭：当前后端不能安全借用 KV（逻辑块共享仍需后端复制/预留）\n";
     }
     return enabled;
 }
@@ -154,9 +132,9 @@ std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::
         std::cerr << "读取模型元数据失败: " << meta.error << "\n";
         return kExitStartFail;
     }
-    // KV 预算按 n_seq_max 计，含 donor 槽；与 build_model_config 的 n_ctx_total 保持一致。
-    const std::int32_t kv_slots = requested + donor_slots_for(cfg);
-    ctx_total = cfg.ctx_tokens * kv_slots;
+    // KV 预算按 n_seq_max 计，含 donor 槽；与 make_model_config 的 n_ctx_total 保持一致。
+    const ModelConfig model_cfg = make_model_config(cfg, requested);
+    ctx_total = model_cfg.n_ctx_total;
     EstBudget budget;
     budget.model_bytes = meta.file_bytes;
     budget.kv_bytes = estimate_kv_bytes(meta, ctx_total);
@@ -173,7 +151,7 @@ std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::
 
 // 关停收尾：清空 donor 缓存并打印块表终态，作为零泄漏与对账证据。
 void report_shutdown(KVBlockManager& kv, ModelRunner& runner) {
-    for (const RequestId& donor : kv.flush_cache()) {
+    for (const BackendId& donor : kv.flush_cache()) {
         runner.release_sequence(donor, 0);
     }
     const KVUsage final_usage = kv.usage();
@@ -221,30 +199,15 @@ std::int32_t run(const ServerConfig& cfg) {
         concurrency = std::max<std::int32_t>(1, cfg.max_concurrency / 2);
         std::cout << "FORCE_ON 横幅：max_concurrency 降至 " << concurrency << "\n";
     }
-    const std::int32_t kv_tokens = cfg.ctx_tokens * concurrency;
-    const ModelConfig model_cfg = build_model_config(cfg, concurrency);
+    const ModelConfig model_cfg = make_model_config(cfg, concurrency);
     const ErrCode load_code = runner->load_model(model_cfg);
     if (load_code != ErrCode::Ok) {
         // 适配器保留的原始 cause 在这里落地，启动失败不再只有一句"模型加载失败"。
         return report_load_failure(load_code, runner->last_error());
     }
-    const std::int32_t blocks = std::max<std::int32_t>(kv_tokens / cfg.block_tokens, 1);
     const bool prefix_cache = resolve_prefix_cache(cfg, *runner);
-    KVBlockManager kv(
-            KVConfig{cfg.block_tokens, blocks, cfg.watermark_ratio, prefix_cache, kDonorSlots});
-    SchedulerConfig scheduler_cfg;
-    scheduler_cfg.max_concurrency = concurrency;
-    scheduler_cfg.max_num_batched_tokens = cfg.max_num_batched_tokens;
-    scheduler_cfg.queue_capacity = cfg.queue_capacity;
-    scheduler_cfg.enable_prefix_cache = prefix_cache;
-    scheduler_cfg.chunk_size = cfg.chunk_size;
-    scheduler_cfg.fairness_aging_enabled = cfg.fairness_aging;
-    scheduler_cfg.aging_threshold_ns =
-            static_cast<std::int64_t>(cfg.aging_threshold_ms) * 1'000'000;
-    scheduler_cfg.max_consecutive_preemptions = cfg.max_consecutive_preemptions;
-    scheduler_cfg.preempt_trace_path = cfg.preempt_trace_path;
-    scheduler_cfg.step_trace_path = cfg.step_trace_path;
-    SchedulerCore core(*runner, kv, metrics, scheduler_cfg);
+    KVBlockManager kv(make_kv_config(cfg, concurrency, prefix_cache));
+    SchedulerCore core(*runner, kv, metrics, make_scheduler_config(cfg, concurrency, prefix_cache));
 
     std::thread core_thread([&core] { core.run(); });
     const std::int32_t rc = run_server(cfg, *runner, metrics, core, gate);

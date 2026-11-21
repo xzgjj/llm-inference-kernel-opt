@@ -17,7 +17,8 @@ std::shared_ptr<SequenceGroup> make_group(const std::string& id, std::int32_t pr
                                           std::int64_t admit_order, std::int64_t progress_ns) {
     auto group = std::make_shared<SequenceGroup>();
     group->req_id = id;
-    group->seq.group_id = id;
+    group->backend_id = id;
+    group->seq.backend_id = id;
     group->seq.prompt_len = prompt;
     group->seq.num_output = output;
     group->seq.num_computed = prompt + std::max<std::int32_t>(0, output - 1);
@@ -47,7 +48,7 @@ TEST_CASE("fcfs_tail 选最晚准入，老化序列被豁免") {
     std::vector<SequenceGroup*> groups{older.get(), newer.get()};
     VictimPolicy policy;
     FairnessState fairness;
-    CHECK(policy.select(groups, fairness) == std::vector<RequestId>{"newer"});
+    CHECK(policy.select(groups, fairness) == std::vector<BackendId>{"newer"});
 
     fairness.aging_enabled = true;
     fairness.aging_threshold_ns = 100;
@@ -55,7 +56,7 @@ TEST_CASE("fcfs_tail 选最晚准入，老化序列被豁免") {
     newer->last_progress_ns = 950; // 新序列仍活跃
     older->last_progress_ns = 100; // 超过阈值，豁免
     std::int32_t exempt = 0;
-    CHECK(policy.select(groups, fairness, &exempt) == std::vector<RequestId>{"newer"});
+    CHECK(policy.select(groups, fairness, &exempt) == std::vector<BackendId>{"newer"});
     CHECK(exempt == 1);
 }
 
@@ -68,7 +69,7 @@ TEST_CASE("weighted 策略按配置权重打分，默认全 0 保持 fcfs_tail")
     VictimWeights weights;
     weights.blocks = 1.0; // 块越多分越高，优先释放大块
     policy.configure(weights);
-    CHECK(policy.select(groups, fairness) == std::vector<RequestId>{"long"});
+    CHECK(policy.select(groups, fairness) == std::vector<BackendId>{"long"});
 }
 
 TEST_CASE("recompute 代价按 token 线性；未标定系数返回 NA") {

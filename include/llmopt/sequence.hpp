@@ -20,7 +20,7 @@ enum class SeqStatus : std::uint8_t { Waiting, Running, Swapped, Finished };
 // C-04：num_computed 是已写入 KV 的 token 数，num_output 是已采样数。
 struct Sequence {
     std::int32_t id = -1;
-    GroupId group_id;
+    BackendId backend_id;
     std::int32_t prompt_len = 0;
     std::int32_t num_computed = 0;
     std::int32_t num_output = 0;

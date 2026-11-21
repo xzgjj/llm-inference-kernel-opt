@@ -38,8 +38,8 @@ public:
         lock.unlock();
         return inner_->decode_step(batch);
     }
-    void release_sequence(const RequestId& req_id, std::int32_t keep_tokens = 0) override {
-        inner_->release_sequence(req_id, keep_tokens);
+    void release_sequence(const BackendId& backend_id, std::int32_t keep_tokens = 0) override {
+        inner_->release_sequence(backend_id, keep_tokens);
     }
     void release() override {
         inner_->release();
@@ -56,8 +56,8 @@ public:
     std::int32_t n_ctx() const noexcept override {
         return inner_->n_ctx();
     }
-    std::int32_t seq_pos_max(const RequestId& req_id) const override {
-        return inner_->seq_pos_max(req_id);
+    std::int32_t seq_pos_max(const BackendId& backend_id) const override {
+        return inner_->seq_pos_max(backend_id);
     }
     bool supports_live_prefix() const noexcept override {
         return inner_->supports_live_prefix();

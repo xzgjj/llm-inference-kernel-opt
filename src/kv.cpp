@@ -105,14 +105,14 @@ void KVBlockManager::adopt_block(std::int32_t id, const std::string& owner) {
     donors_[owner].push_back(id);
 }
 
-void KVBlockManager::evict_donor(const RequestId& donor) {
+void KVBlockManager::evict_donor(const BackendId& donor) {
     auto it = donors_.find(donor);
     if (it == donors_.end()) {
         return;
     }
     // donor 可能正是 donor_order_ 里的元素（ensure_free 传 front()），下面 erase 会让它悬空，
     // 后续 push_back 必须用副本；ASan 下这里的 heap-use-after-free 是真实缺陷，不是误报。
-    const RequestId dropped_id = donor;
+    const BackendId dropped_id = donor;
     for (std::int32_t id : it->second) {
         BlockState& block = blocks_[static_cast<std::size_t>(id)];
         if (block.owner == donor) {
@@ -234,7 +234,7 @@ std::int32_t KVBlockManager::attach_prefix(Sequence& seq, const PrefixHit& hit) 
 void KVBlockManager::free(Sequence& seq) {
     for (const BlockRef& ref : seq.block_table) {
         BlockState& block = blocks_[static_cast<std::size_t>(ref.block_id)];
-        if (block.ref_cnt > 1 && block.owner == seq.group_id) {
+        if (block.ref_cnt > 1 && block.owner == seq.backend_id) {
             block.owner.clear();
             forget_hash(ref.block_id);
         }
@@ -254,14 +254,6 @@ std::int32_t KVBlockManager::releasable_blocks(const Sequence& seq) const {
     return count;
 }
 
-bool KVBlockManager::release_donor(const RequestId& donor) {
-    if (donors_.find(donor) == donors_.end()) {
-        return false;
-    }
-    evict_donor(donor);
-    return true;
-}
-
 std::int32_t KVBlockManager::retain(Sequence& seq) {
     if (!config_.enable_prefix_cache) {
         free(seq);
@@ -278,13 +270,13 @@ std::int32_t KVBlockManager::retain(Sequence& seq) {
             ++index;
             continue;
         }
-        if (block.owner == seq.group_id) {
+        if (block.owner == seq.backend_id) {
             ++index;
             keep_tokens += config_.block_tokens;
             continue;
         }
         if (block.owner.empty()) {
-            adopt_block(ref.block_id, seq.group_id);
+            adopt_block(ref.block_id, seq.backend_id);
             keep_tokens += config_.block_tokens;
         } else {
             // 内容已由别的 donor 持有，本序列无需再保留一份。
@@ -314,7 +306,7 @@ void KVBlockManager::mark_written(const Sequence& seq, std::int32_t computed_tok
     }
 }
 
-std::vector<RequestId> KVBlockManager::flush_cache() {
+std::vector<BackendId> KVBlockManager::flush_cache() {
     while (!donor_order_.empty()) {
         evict_donor(donor_order_.front());
     }
@@ -324,8 +316,8 @@ std::vector<RequestId> KVBlockManager::flush_cache() {
     return take_dropped_donors();
 }
 
-std::vector<RequestId> KVBlockManager::take_dropped_donors() {
-    std::vector<RequestId> out;
+std::vector<BackendId> KVBlockManager::take_dropped_donors() {
+    std::vector<BackendId> out;
     out.swap(dropped_);
     return out;
 }

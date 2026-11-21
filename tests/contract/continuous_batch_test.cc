@@ -33,8 +33,8 @@ public:
         }
         return inner_->decode_step(batch);
     }
-    void release_sequence(const RequestId& req_id, std::int32_t keep_tokens) override {
-        inner_->release_sequence(req_id, keep_tokens);
+    void release_sequence(const BackendId& backend_id, std::int32_t keep_tokens) override {
+        inner_->release_sequence(backend_id, keep_tokens);
     }
     void release() override {
         inner_->release();
@@ -51,8 +51,8 @@ public:
     std::int32_t n_ctx() const noexcept override {
         return inner_->n_ctx();
     }
-    std::int32_t seq_pos_max(const RequestId& req_id) const override {
-        return inner_->seq_pos_max(req_id);
+    std::int32_t seq_pos_max(const BackendId& backend_id) const override {
+        return inner_->seq_pos_max(backend_id);
     }
     const char* backend_name() const noexcept override {
         return "recording-stub";
@@ -293,15 +293,19 @@ TEST_CASE("同前缀二次请求命中 8 token，只算剩余 2 token 且输出�
 
     const std::vector<Batch> batches = harness.runner->batches();
     bool hit = false;
+    BackendId first_backend;
     for (const Batch& batch : batches) {
         if (batch.new_reqs.empty()) {
             continue;
         }
         const NewRequestData& data = batch.new_reqs.front();
-        if (data.req_id == "req-pre-b") {
+        if (data.prefix_tokens == 0 && data.prefill_token_ids.size() == 10) {
+            first_backend = data.backend_id;
+        } else if (data.prefix_tokens == 8) {
             hit = true;
-            CHECK(data.prefix_tokens == 8);
-            CHECK(data.prefix_source == "req-pre-a");
+            CHECK_FALSE(first_backend.empty());
+            CHECK(data.prefix_source == first_backend);
+            CHECK(data.backend_id != first_backend);
             CHECK(data.prefill_token_ids.size() == 2);
         }
     }

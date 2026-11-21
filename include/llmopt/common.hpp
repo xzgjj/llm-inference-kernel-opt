@@ -11,7 +11,9 @@
 namespace llmopt {
 
 using RequestId = std::string;
-using GroupId = std::string;
+// 内部后端序列键：由服务端生成、永不复用，客户端不可见；不得与外部 RequestId 混用。
+using BackendId = std::string;
+using GroupId = BackendId;
 
 // C-03：HTTP 映射在 protocol.cpp 一处维护。
 enum class ErrCode : std::uint8_t {
