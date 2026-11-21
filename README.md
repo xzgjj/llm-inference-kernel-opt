@@ -1,6 +1,6 @@
 # llm-inference-kernel-opt
 
-**单机、单进程的 C++20 大模型推理服务实验床**
+**C++20 模型推理服务实验**
 
 [简体中文](README.md) ｜ [English](README.en.md)
 
