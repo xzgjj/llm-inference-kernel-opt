@@ -86,7 +86,14 @@ public:
                                                              std::to_string(cached_index)));
                 }
                 const CachedRequestData& data = batch.cached_reqs[cached_index++];
-                StubState& state = states_[data.backend_id];
+                // DEBUG-10：缺失状态是生命周期错误，不得隐式插入后伪装成功。
+                auto state_it = states_.find(data.backend_id);
+                if (state_it == states_.end()) {
+                    return failed(output,
+                                  make_error(ErrCode::ExecutionFailed, "decode 序列状态缺失",
+                                             "op=decode_step backend_id=" + data.backend_id));
+                }
+                StubState& state = state_it->second;
                 state.n_past = step.pos_end;
                 emit(state, output);
                 continue;
@@ -104,7 +111,12 @@ public:
                                          "op=prefix_borrow source=" + data.prefix_source +
                                                  " tokens=" + std::to_string(data.prefix_tokens)));
             }
-            StubState& state = states_[data.backend_id];
+            auto state_it = states_.find(data.backend_id);
+            if (state_it == states_.end()) {
+                return failed(output, make_error(ErrCode::ExecutionFailed, "prefill 序列状态缺失",
+                                                 "op=decode_step backend_id=" + data.backend_id));
+            }
+            StubState& state = state_it->second;
             state.n_past = step.pos_end;
             // 非末块 chunk 只推进 KV，不采样；末块才产出首个 token。
             if (step.needs_sampling) {

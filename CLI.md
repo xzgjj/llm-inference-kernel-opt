@@ -58,11 +58,11 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 | `--step-trace` | `LLMOPT_STEP_TRACE` | 空 | 可写路径 | 每个调度 step 写一行 JSONL（ts/steps/tokens/prefill/decode/ns）；步级 p99 只离线复算，不写回 `/metrics` |
 | `--disable-prefix-cache` | `LLMOPT_DISABLE_PREFIX_CACHE` | `false` | 布尔开关，不带值 | 关闭满块哈希与前缀复用；后端不能安全借用 KV 时也会自动关闭。共享的是逻辑块元数据，物理 KV 仍由后端 `seq_cp`/预留写入目标槽，不是物理零拷贝 |
 | `--mode` | `LLMOPT_MODE` | `off` | `off`/`auto`/`force_on` | 门控三档，见第 5 节 |
-| `--safety-ratio` | `LLMOPT_SAFETY_RATIO` | `0.80` | 0.80–0.85 | 软预算系数 |
+| `--safety-ratio` | `LLMOPT_SAFETY_RATIO` | `0.80` | 0.80–0.95 | 软预算系数 |
 | `--allow-force-on` | `LLMOPT_ALLOW_FORCE_ON` | `false` | 布尔开关，不带值 | `force_on` 的二次确认 |
-| `--threads` | `LLMOPT_THREADS` | `0` | ≥0 | 0 交给 llama.cpp 决定 |
-| `--n-gpu-layers` | `LLMOPT_N_GPU_LAYERS` | `0` | ≥0 | 0 为纯 CPU |
-| `--model-profile` | `LLMOPT_MODEL_PROFILE` | 空 | 可读 JSON，含 `file_bytes/block_count/head_count/head_count_kv/key_length/value_length` 正整数 | 权重未落盘时，用声明值替代 GGUF 文件元数据做启动预算；只允许与 `--capacity-only` 搭配，不加载权重、不产出吞吐 |
+| `--threads` | `LLMOPT_THREADS` | `0` | 0–256 | 0 交给 llama.cpp 决定；负值与超上限启动即拒绝 |
+| `--n-gpu-layers` | `LLMOPT_N_GPU_LAYERS` | `0` | ≥0 | 0 为纯 CPU；负值拒绝（全层卸载请显式填层数），预算与后端共用同一解释 |
+| `--model-profile` | `LLMOPT_MODEL_PROFILE` | 空 | 可读 JSON，含 `file_bytes/block_count/head_count/head_count_kv/key_length/value_length` 正整数（后五项 ≤ INT32_MAX） | 权重未落盘时，用声明值替代 GGUF 文件元数据做启动预算；只允许与 `--capacity-only` 搭配，不加载权重、不产出吞吐 |
 | `--capacity-only` | `LLMOPT_CAPACITY_ONLY` | `false` | 布尔开关，不带值 | 打印 `estimate`/`decision`/`capacity-only: allow_start` 后退出：可启动回 0，软超预算回 4，硬阻塞回 3；不监听端口 |
 | `--backend` | `LLMOPT_BACKEND` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
 | `--log-level` | `LLMOPT_LOG_LEVEL` | `info` | spdlog 级别 | 跑基准建议 `warn` |
@@ -86,7 +86,7 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 
 `--model` 默认必填；只有 `--capacity-only` + `--model-profile` 同时出现时允许缺省。此时 `estimate: ...` 的 `kv` 已按 `--kv-cache-type` 折算（f16=2 B、q8_0≈1.0625 B、f32=4 B），不再按 f16 高估 2 倍。
 
-配置文件键与 CLI 同名，允许 kebab-case 或 snake_case（`ctx-tokens` / `ctx_tokens` 等价）；未知键、类型不符、越界与坏 JSON 一律退出 2，不静默取默认。`api-key` 可来自文件或 env，但启动摘要只打印 `set/unset`。`api-keys-file` 同样支持文件/env，启动摘要只打印来源，不打印路径内容与 key。
+配置文件键与 CLI 同名，允许 kebab-case 或 snake_case（`ctx-tokens` / `ctx_tokens` 等价）；未知键、类型不符、越界与坏 JSON 一律退出 2，不静默取默认。文件本身 **≤ 16 MiB**，超限按配置错误退出 2（不再整文件读入后 `bad_alloc`）。`donor-slots` 与 `kv-cache-type` 自阶段 12 起同样可从文件设置，CLI/env/file 三入口语义一致。`api-key` 可来自文件或 env，但启动摘要只打印 `set/unset`。`api-keys-file` 同样支持文件/env，启动摘要只打印来源，不打印路径内容与 key。
 
 被拒绝的参数：
 

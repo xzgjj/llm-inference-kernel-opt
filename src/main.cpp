@@ -10,6 +10,7 @@
 #include "llmopt/runner.hpp"
 #include "llmopt/scheduler.hpp"
 #include "llmopt/server.hpp"
+#include "llmopt/thread_guard.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -34,6 +35,10 @@ constexpr std::int32_t kExitGate = 4;
 std::int64_t to_mib(std::int64_t bytes) {
     return bytes / (1024LL * 1024);
 }
+
+// DEBUG-04：Core 线程持有守卫。正常路径与异常展开路径都先 shutdown 再 join；
+// 不允许出现 joinable 的 std::thread 在栈展开时析构（那会 std::terminate）。
+using CoreThreadGuard = ScopedThread;
 
 // 配置错误到退出码：用法类 2，取值类 1。
 std::int32_t exit_for(ErrCode code) {
@@ -160,11 +165,9 @@ std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::
     budget.required_bytes = budget.model_bytes + budget.kv_bytes;
     budget.safety_ratio = cfg.safety_ratio;
     // 部分卸载：按 n_gpu_layers 把权重与 KV 拆成显存/内存两池，其余仍走单池口径。
+    // 负值已在配置校验阶段拒绝（DEBUG-03），这里不再做第二种解释。
     const std::int32_t layers = meta.block_count;
     std::int32_t offloaded = cfg.n_gpu_layers;
-    if (offloaded < 0) {
-        offloaded = 0;
-    }
     if (layers > 0 && offloaded > layers) {
         offloaded = layers;
     }
@@ -260,10 +263,11 @@ std::int32_t run(const ServerConfig& cfg) {
     KVBlockManager kv(make_kv_config(cfg, concurrency, prefix_cache));
     SchedulerCore core(*runner, kv, metrics, make_scheduler_config(cfg, concurrency, prefix_cache));
 
-    std::thread core_thread([&core] { core.run(); });
+    // DEBUG-04：core 线程的 join 必须是 RAII——run_server 抛异常时先 shutdown 再 join，
+    // 否则 std::thread 在展开路径析构会直接 terminate，退出码契约失效。
+    CoreThreadGuard core_guard([&core] { core.run(); }, [&core] { core.shutdown(); });
     const std::int32_t rc = run_server(cfg, *runner, metrics, core, gate);
-    core.shutdown();
-    core_thread.join();
+    core_guard.stop_and_join();
     // 关停后显式清空 donor 缓存再释放后端，日志里的 used/free 是“零泄漏”证据。
     report_shutdown(kv, *runner);
     runner->release();

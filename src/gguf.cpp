@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 
 namespace llmopt {
@@ -292,11 +293,51 @@ std::int64_t estimate_kv_bytes(const GgufMeta& meta, std::int32_t ctx_tokens,
     if (!meta.ok || ctx_tokens <= 0) {
         return 0;
     }
-    const double per_token = static_cast<double>(meta.block_count) * meta.head_count_kv *
-                             (meta.key_length + meta.value_length) *
-                             kv_element_bytes(kv_cache_type);
-    return static_cast<std::int64_t>(per_token) * ctx_tokens;
+    // DEBUG-08：profile 可声明任意大整数，乘积必须在饱和到上限前判定，避免负溢出被当成"够用"。
+    // 逐项先转 long double，避免 key_length + value_length 在 int32 里先溢出。
+    const long double per_token = static_cast<long double>(meta.block_count) *
+                                  static_cast<long double>(meta.head_count_kv) *
+                                  (static_cast<long double>(meta.key_length) +
+                                   static_cast<long double>(meta.value_length)) *
+                                  static_cast<long double>(kv_element_bytes(kv_cache_type));
+    const long double total = per_token * static_cast<long double>(ctx_tokens);
+    const long double kMax = static_cast<long double>(std::numeric_limits<std::int64_t>::max());
+    if (!(total >= 0.0L)) {
+        return 0;
+    }
+    if (total >= kMax) {
+        return std::numeric_limits<std::int64_t>::max();
+    }
+    return static_cast<std::int64_t>(total);
 }
+
+namespace {
+constexpr std::int64_t kMaxInt32 = std::numeric_limits<std::int32_t>::max();
+
+// profile 必填字段：缺失/非整数/非正一律失败，错误信息由调用方统一给。
+bool read_profile_int(const nlohmann::json& data, const char* key, std::int64_t& out) {
+    if (!data.contains(key) || !data[key].is_number_integer()) {
+        return false;
+    }
+    out = data[key].get<std::int64_t>();
+    return out > 0;
+}
+
+// profile 可选字段：缺省不动；超过 int32 上限必须报错，不能截断成预算。
+bool read_profile_optional_int32(const nlohmann::json& data, const char* key, std::int32_t& out,
+                                 std::string& error) {
+    if (!data.contains(key) || !data[key].is_number_integer()) {
+        return true;
+    }
+    const std::int64_t value = data[key].get<std::int64_t>();
+    if (value > kMaxInt32) {
+        error = "容量档位 " + std::string(key) + " 超出 int32 上限";
+        return false;
+    }
+    out = static_cast<std::int32_t>(value);
+    return true;
+}
+} // namespace
 
 // 容量档位 JSON：只接受声明字段；数值必须为正，缺失或类型不符立即失败。
 GgufMeta read_model_profile(const std::string& path) {
@@ -313,24 +354,27 @@ GgufMeta read_model_profile(const std::string& path) {
         meta.error = "容量档位 JSON 非法: " + std::string(exc.what());
         return meta;
     }
-    const auto read_int = [&data](const char* key, std::int64_t& out) {
-        if (!data.contains(key) || !data[key].is_number_integer()) {
-            return false;
-        }
-        out = data[key].get<std::int64_t>();
-        return out > 0;
-    };
     std::int64_t file_bytes = 0;
     std::int64_t block_count = 0;
     std::int64_t head_count = 0;
     std::int64_t head_count_kv = 0;
     std::int64_t key_length = 0;
     std::int64_t value_length = 0;
-    if (!read_int("file_bytes", file_bytes) || !read_int("block_count", block_count) ||
-        !read_int("head_count", head_count) || !read_int("head_count_kv", head_count_kv) ||
-        !read_int("key_length", key_length) || !read_int("value_length", value_length)) {
+    if (!read_profile_int(data, "file_bytes", file_bytes) ||
+        !read_profile_int(data, "block_count", block_count) ||
+        !read_profile_int(data, "head_count", head_count) ||
+        !read_profile_int(data, "head_count_kv", head_count_kv) ||
+        !read_profile_int(data, "key_length", key_length) ||
+        !read_profile_int(data, "value_length", value_length)) {
         meta.error = "容量档位缺字段或非正整数: file_bytes/block_count/head_count/"
                      "head_count_kv/key_length/value_length";
+        return meta;
+    }
+    // file_bytes 允许超过 int32（模型体积）；其余字段会被窄化成 int32，先判上界。
+    if (block_count > kMaxInt32 || head_count > kMaxInt32 || head_count_kv > kMaxInt32 ||
+        key_length > kMaxInt32 || value_length > kMaxInt32) {
+        meta.error = "容量档位字段超出 int32 上限: block_count/head_count/head_count_kv/"
+                     "key_length/value_length";
         return meta;
     }
     meta.file_bytes = file_bytes;
@@ -339,11 +383,9 @@ GgufMeta read_model_profile(const std::string& path) {
     meta.head_count_kv = static_cast<std::int32_t>(head_count_kv);
     meta.key_length = static_cast<std::int32_t>(key_length);
     meta.value_length = static_cast<std::int32_t>(value_length);
-    if (data.contains("embedding_length") && data["embedding_length"].is_number_integer()) {
-        meta.embedding_length = data["embedding_length"].get<std::int32_t>();
-    }
-    if (data.contains("context_length") && data["context_length"].is_number_integer()) {
-        meta.context_length = data["context_length"].get<std::int32_t>();
+    if (!read_profile_optional_int32(data, "embedding_length", meta.embedding_length, meta.error) ||
+        !read_profile_optional_int32(data, "context_length", meta.context_length, meta.error)) {
+        return meta;
     }
     if (data.contains("name") && data["name"].is_string()) {
         meta.architecture = data["name"].get<std::string>();

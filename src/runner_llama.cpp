@@ -66,17 +66,25 @@ void ensure_backend() {
 }
 
 // 把 (0,1] 的 top_p/min_p 转成 llama 需要的 min_keep=1，避免空候选。
+// DEBUG-05：链与各节点都可能因 OOM 返回空指针，空链必须让调用方拿到错误而不是解引用。
 SamplerPtr build_chain(const SamplingParams& sampling, std::int32_t n_vocab) {
     SamplerPtr chain{llama_sampler_chain_init(llama_sampler_chain_default_params())};
-    llama_sampler_chain_add(chain.get(), llama_sampler_init_penalties(
-                                                 n_vocab, 64, sampling.repeat_penalty, 0.0F, 0.0F));
-    llama_sampler_chain_add(chain.get(), llama_sampler_init_top_k(sampling.top_k));
-    llama_sampler_chain_add(chain.get(), llama_sampler_init_top_p(sampling.top_p, 1));
-    llama_sampler_chain_add(chain.get(), llama_sampler_init_min_p(sampling.min_p, 1));
-    llama_sampler_chain_add(chain.get(), llama_sampler_init_temp(sampling.temperature));
+    if (!chain) {
+        return chain;
+    }
+    const auto add = [&chain](llama_sampler* node) {
+        if (node != nullptr) {
+            llama_sampler_chain_add(chain.get(), node);
+        }
+    };
+    add(llama_sampler_init_penalties(n_vocab, 64, sampling.repeat_penalty, 0.0F, 0.0F));
+    add(llama_sampler_init_top_k(sampling.top_k));
+    add(llama_sampler_init_top_p(sampling.top_p, 1));
+    add(llama_sampler_init_min_p(sampling.min_p, 1));
+    add(llama_sampler_init_temp(sampling.temperature));
     const std::uint32_t seed =
             sampling.seed >= 0 ? static_cast<std::uint32_t>(sampling.seed) : LLAMA_DEFAULT_SEED;
-    llama_sampler_chain_add(chain.get(), llama_sampler_init_dist(seed));
+    add(llama_sampler_init_dist(seed));
     return chain;
 }
 
@@ -189,6 +197,12 @@ public:
         state.slot = slots_.back();
         slots_.pop_back();
         state.sampler = build_chain(seq.sampling, n_vocab_);
+        if (!state.sampler) {
+            slots_.push_back(state.slot);
+            last_error_ = make_error(ErrCode::ResourceInsufficient, "采样链分配失败",
+                                     "op=add_sequence req=" + seq.backend_id);
+            return ErrCode::ResourceInsufficient;
+        }
         for (std::int32_t id : seq.prompt_token_ids) {
             llama_sampler_accept(state.sampler.get(), id);
         }

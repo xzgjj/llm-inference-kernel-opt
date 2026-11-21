@@ -53,6 +53,8 @@ constexpr FieldSpec kFields[] = {
         {"log-level", false},
         {"threads", false},
         {"n-gpu-layers", false},
+        {"donor-slots", false},
+        {"kv-cache-type", false},
         {"model-profile", false},
         {"capacity-only", true},
         {"backend", false},
@@ -92,6 +94,8 @@ constexpr const char* kConfigKeys[] = {
         "log-level",
         "threads",
         "n-gpu-layers",
+        "donor-slots",
+        "kv-cache-type",
         "model-profile",
         "capacity-only",
         "backend",
@@ -439,6 +443,16 @@ ErrCode validate_backend_knobs(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.donor_slots < 0 || cfg.donor_slots > 8) {
         message = "donor-slots 必须在 0..8";
+        return ErrCode::InvalidJson;
+    }
+    // DEBUG-03：门控、预算与后端必须共用同一解释；负值不再"预算按 0、后端按全卸载"。
+    if (cfg.n_gpu_layers < 0) {
+        message = "n-gpu-layers 必须 >= 0（0=纯 CPU；全部卸载请显式填写模型层数）";
+        return ErrCode::InvalidJson;
+    }
+    // DEBUG-07：0=自动；负值静默改自动会与显式配置不符，极大值会创建过量线程。
+    if (cfg.threads < 0 || cfg.threads > 256) {
+        message = "threads 必须在 0..256（0=自动）";
         return ErrCode::InvalidJson;
     }
     if (cfg.donor_slots == 0 && cfg.enable_prefix_cache && cfg.n_gpu_layers > 0) {
@@ -882,6 +896,19 @@ ErrCode load_config_file(const std::string& path, ServerConfig& cfg,
         message = "无法读取配置文件 " + path;
         return ErrCode::NotSupported;
     }
+    // DEBUG-06：先看大小再读，避免超大文件把配置错误升级成 bad_alloc。
+    in.seekg(0, std::ios::end);
+    const std::streamoff file_size = in.tellg();
+    if (!in || file_size < 0) {
+        message = "无法读取配置文件 " + path;
+        return ErrCode::NotSupported;
+    }
+    constexpr std::streamoff kMaxConfigBytes = 16LL * 1024 * 1024;
+    if (file_size > kMaxConfigBytes) {
+        message = "配置文件超过 16 MiB 上限：" + path;
+        return ErrCode::NotSupported;
+    }
+    in.seekg(0, std::ios::beg);
     std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     const json parsed = json::parse(text, nullptr, false);
     if (parsed.is_discarded() || !parsed.is_object()) {

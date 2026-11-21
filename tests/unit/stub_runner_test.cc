@@ -38,6 +38,25 @@ std::int32_t first_token(const RunnerStepOutput& output) {
     return output.sampled.front().token_id;
 }
 
+// 组装 decode 批次：不经过 add_sequence，用来制造"状态缺失"的生命周期错误。
+Batch decode_batch_unknown(const RequestId& id) {
+    Batch batch;
+    CachedRequestData data;
+    data.backend_id = id;
+    batch.cached_reqs.push_back(std::move(data));
+    SequenceStep step;
+    step.backend_id = id;
+    step.route.backend_id = id;
+    step.phase = Phase::Decode;
+    step.pos_begin = 0;
+    step.pos_end = 1;
+    step.n_tokens = 1;
+    step.needs_sampling = true;
+    batch.total_tokens = 1;
+    batch.steps.push_back(step);
+    return batch;
+}
+
 } // namespace
 
 TEST_CASE("分词按 UTF-8 字节且可逆") {
@@ -115,4 +134,16 @@ TEST_CASE("decode 步推进 n_past，释放后状态被清除") {
     CHECK(runner->decode_step(decode).error.ok());
     runner->release_sequence("req-step");
     CHECK(runner->is_eos(0) == false);
+}
+
+// DEBUG-10：未登记序列不得隐式插入后继续产出，否则生命周期错误会被伪成功掩盖。
+TEST_CASE("stub 对未登记的 backend_id 返回 ExecutionFailed，不隐式建状态") {
+    auto runner = make_stub_runner();
+    ModelConfig config;
+    config.n_ctx = 128;
+    REQUIRE(runner->load_model(config) == ErrCode::Ok);
+    const RunnerStepOutput output = runner->decode_step(decode_batch_unknown("ghost-seq"));
+    REQUIRE_FALSE(output.error.ok());
+    CHECK_EQ(output.error.code, ErrCode::ExecutionFailed);
+    CHECK(output.sampled.empty());
 }

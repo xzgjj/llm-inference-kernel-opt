@@ -21,6 +21,21 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+# DEBUG-11：/v1/models 与推理端点共用鉴权；只配 key 文件时也必须带合法 key。
+def get_models(port: int, key: str = "") -> tuple[int, dict, dict]:
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    headers = {}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        conn.request("GET", "/v1/models", headers=headers)
+        response = conn.getresponse()
+        body = json.loads(response.read().decode())
+        return response.status, body, dict(response.getheaders())
+    finally:
+        conn.close()
+
+
 def post(port: int, path: str, payload: dict, key: str = "") -> tuple[int, dict, dict]:
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
     headers = {"Content-Type": "application/json"}
@@ -101,6 +116,13 @@ def main() -> int:
 
             status, body, _ = post(port, "/v1/completions", payload, "who")
             assert status == 401, (status, body)
+
+            status, body, _ = get_models(port)
+            assert status == 401, (status, body)
+            assert body["error"]["code"] == "UNAUTHORIZED", body
+            status, body, _ = get_models(port, KEY_A)
+            assert status == 200, (status, body)
+            assert body["data"], body
 
             status, body, _ = post(port, "/v1/completions", payload, KEY_A)
             assert status == 200, (status, body)

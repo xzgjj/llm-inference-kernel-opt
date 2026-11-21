@@ -42,6 +42,8 @@ llmopt_add_doctest(unit_text "unit;fast;hermetic" SOURCES unit/text_test.cc)
 llmopt_add_doctest(unit_sink "unit;fast;hermetic" SOURCES unit/sink_test.cc)
 llmopt_add_doctest(unit_metrics "unit;fast;hermetic" SOURCES unit/metrics_test.cc)
 llmopt_add_doctest(unit_service "unit;fast;hermetic" SOURCES unit/service_test.cc)
+# DEBUG-04：线程 join 的 RAII 守卫，异常展开路径不得 terminate。
+llmopt_add_doctest(unit_thread_guard "unit;fast;hermetic" SOURCES unit/thread_guard_test.cc)
 llmopt_add_doctest(unit_rate_limit "unit;fast;hermetic" SOURCES unit/rate_limit_test.cc)
 llmopt_add_doctest(unit_auth "unit;fast;hermetic" SOURCES unit/auth_test.cc)
 llmopt_add_doctest(unit_resource "unit;fast" SOURCES unit/resource_test.cc)
@@ -57,6 +59,9 @@ llmopt_add_doctest(state_test "contract;fast;hermetic" SOURCES contract/state_te
 llmopt_add_doctest(lifecycle_test "contract;fast;hermetic" SOURCES contract/lifecycle_test.cc)
 llmopt_add_doctest(admission_test "contract;fast;hermetic" SOURCES contract/admission_test.cc)
 llmopt_add_doctest(contract_tenant "contract;fast;hermetic" SOURCES contract/tenant_test.cc)
+# DEBUG-01/02：/metrics 只读 Core 快照；租户名额失败不留空计数器、不泄漏准入。
+llmopt_add_doctest(contract_metrics_snapshot "contract;fast;hermetic"
+                   SOURCES contract/metrics_snapshot_test.cc)
 llmopt_add_doctest(completion_watchdog_test "contract;fast;hermetic"
                    SOURCES contract/watchdog_test.cc)
 # 阶段 5：C-P5-01…03 预留值对象只证明默认值等价 v0，不接入热路径。

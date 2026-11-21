@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -214,4 +215,36 @@ TEST_CASE("magic 错误、版本过低、截断与缺字段都给出原因") {
 
     const GgufMeta absent = read_gguf_meta("Z:/definitely/not/here.gguf");
     CHECK_FALSE(absent.ok);
+}
+
+// DEBUG-08：profile 字段会被窄化成 int32；超界必须在读取阶段失败，不能截断后当预算。
+TEST_CASE("容量档位字段超出 int32 上限时拒绝，embedding/context 同样校验") {
+    const std::string overflow = write_profile(
+            R"({"file_bytes":1000000000,"block_count":4000000000,"head_count":32,
+                "head_count_kv":8,"key_length":128,"value_length":128})",
+            "llmopt_profile_overflow.json");
+    const GgufMeta meta = read_model_profile(overflow);
+    CHECK_FALSE(meta.ok);
+    CHECK(meta.error.find("int32") != std::string::npos);
+    std::filesystem::remove(overflow);
+
+    const std::string ctx_overflow = write_profile(
+            R"({"file_bytes":1000000000,"block_count":32,"head_count":32,"head_count_kv":8,
+                "key_length":128,"value_length":128,"context_length":3000000000})",
+            "llmopt_profile_ctx_overflow.json");
+    const GgufMeta ctx_meta = read_model_profile(ctx_overflow);
+    CHECK_FALSE(ctx_meta.ok);
+    CHECK(ctx_meta.error.find("context_length") != std::string::npos);
+    std::filesystem::remove(ctx_overflow);
+}
+
+TEST_CASE("KV 估算在乘积超出 int64 时饱和到上限，不返回负值") {
+    GgufMeta meta;
+    meta.ok = true;
+    meta.block_count = std::numeric_limits<std::int32_t>::max();
+    meta.head_count_kv = std::numeric_limits<std::int32_t>::max();
+    meta.key_length = std::numeric_limits<std::int32_t>::max();
+    meta.value_length = std::numeric_limits<std::int32_t>::max();
+    const std::int64_t estimate = estimate_kv_bytes(meta, 1024, "f16");
+    CHECK_EQ(estimate, std::numeric_limits<std::int64_t>::max());
 }

@@ -29,7 +29,7 @@
 
 C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机约定一致）；本机另建目录时手动执行 `ctest --test-dir <dir>`，不改本表。CI 的非默认构建目录（sanitizer、覆盖率）用 `run_registry.py --build-dir <dir>` 覆盖表里的路径，表本身仍保持一条可独立执行的命令。
 
-CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前共 **177 条**：160 条 doctest 用例 + 17 条进程级脚本。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
+CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前共 **204 条**：187 条 doctest 用例 + 17 条进程级脚本。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
 
 目录与命名约定见 [../tests/README.md](../tests/README.md)：`unit/` `contract/` `integration/` `e2e/` `perf/` 按层级分目录，Scope 一律写目录而不是单个文件，目录内新增用例自动被覆盖。
 
@@ -278,8 +278,16 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `unit_config` 扩到 24 例：api-keys 文件 `version/keys`、缺失/重复 id/重复 sha/坏 hex/越界配额、`--api-key` 互斥、POSIX 0600；新增跨语言硬编码 SHA 解析用例（233 断言）。
 - `unit_kv` +13 例：租户标记随 acquire/release 清理、`used_blocks_for` 含留置缓存、`evict_cached_for` 只回收本租户、跨租户同前缀零命中。
 - `contract_tenant`（3 例）：单租户 live 超限立即 `QUOTA_EXCEEDED` 且不拖累其他租户；running 满的租户让位；单请求 KV 超配额终态拒绝且块数归零；`tenant_stats()` 的 live/running/queued 快照。
-- `tenant_keys_test`（integration）：三租户 key 文件 401/200/429、A 限流、C KV 配额、`llmopt_tenant_*` 标签白名单。
-- Windows 本机复跑：`ctest -L fast` **191/191**（128 unit / 47 contract / 16 integration），全量 **192 注册**。
+- `tenant_keys_test`（integration）：三租户 key 文件 401/200/429、A 限流、C KV 配额、`llmopt_tenant_*` 标签白名单；`/v1/models` 无 key 401、合法 key 200（DEBUG-11）。
+- Windows 本机复跑：`ctest -L fast` **203/203**（137 unit / 50 contract / 16 integration），全量 **204 注册**。
+
+阶段 12（S0 缺陷面修复，对应 [SPEC-DEBUG1](SPEC-DEBUG1.md)）：
+
+- `contract_metrics_snapshot`（3 例）：`tenant_stats` 的 `kv_used` 与 Core 快照一致；配额拒绝不泄漏准入名额；多线程抓取与 Core 推进并发不崩（DEBUG-01/02）。
+- `unit_thread_guard`（2 例）：异常展开时先停止再 join；`stop_and_join` 幂等（DEBUG-04）。
+- `unit_config` +4 例：`n-gpu-layers` 负值三入口拒绝、`threads` 0..256、配置文件 16 MiB 上限、JSON 侧 `donor-slots`/`kv-cache-type` 生效（DEBUG-03/06/07/09）。
+- `unit_gguf` +2 例：profile 字段超 int32 拒绝、KV 估算饱和不返回负值（DEBUG-08）。
+- `unit_stub_runner` +1 例：未登记 `backend_id` 返回 `ExecutionFailed`（DEBUG-10）。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 

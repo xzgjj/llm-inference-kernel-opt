@@ -19,7 +19,7 @@
 
 仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 CUDA kernel；本项目不做自定义算子，也不做分布式与训练。规模限定在单机、单进程、0.5B–27B 量化模型，本机实测档为 Qwen3-8B Q4_K_M。
 
-当前阶段 0–11 已落地（阶段 10 为真后端 nightly 可靠性收口，阶段 11 为静态 key + 租户配额 + KV 域隔离）：`ctest -L fast` 191 条全绿，全量 192 注册；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
+当前阶段 0–11 已落地（阶段 10 为真后端 nightly 可靠性收口，阶段 11 为静态 key + 租户配额 + KV 域隔离），阶段 12 进行中（[SPEC-DEBUG1](docs/SPEC-DEBUG1.md)：缺陷面修复与算力入口封堵）：`ctest -L fast` 203 条全绿，全量 204 注册；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
 
 
 
@@ -249,7 +249,7 @@ python scripts/spec5/recompute_spec5.py \
 
 ## 当前水平与局限
 
-已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额；阶段 5 只做预研判据，不落实现。Windows 本机 `ctest -L fast` 191 条全绿（128 unit / 47 contract / 16 integration），全量 192 注册；真服务 e2e 10 项另行通过。
+已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额、阶段 12 缺陷面修复（S0，3 项 P1 + 9 项 P2）；阶段 5 只做预研判据，不落实现。Windows 本机 `ctest -L fast` 203 条全绿（137 unit / 50 contract / 16 integration），全量 204 注册；真服务 e2e 10 项另行通过。
 
 官方 8B 矩阵（WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q4_K_M，每档 30 请求 × 32 token × 2 轮，`ngl 24 / threads 0`，真实 token 口径）：
 

@@ -313,7 +313,8 @@ private:
     bool try_reserve_admission() noexcept;
     void release_admission() noexcept;
     // 租户 live 计数跨 HTTP/Core 线程：一把短锁保护 map，计数本身在原子里做加减。
-    bool reserve_tenant_live(const std::string& tenant, const TenantQuota& quota);
+    // 返回 ErrCode：Ok / QuotaExceeded / ResourceInsufficient（分配失败不得留空 slot）。
+    ErrCode reserve_tenant_live(const std::string& tenant, const TenantQuota& quota);
     void release_tenant_live(const std::string& tenant) noexcept;
     [[nodiscard]] bool tenant_slot_available(const std::string& tenant,
                                              const TenantQuota& quota) const;
@@ -389,6 +390,10 @@ private:
     };
     mutable std::mutex tenant_mutex_;
     std::unordered_map<std::string, std::shared_ptr<TenantCounter>> tenant_counters_;
+    // 租户 KV 块用量快照：只有 Core 线程能扫块表（publish_kv_usage），
+    // HTTP /metrics 线程只读这份不可变拷贝，避免跨线程遍历 KV（DEBUG-01）。
+    mutable std::mutex tenant_kv_mutex_;
+    std::unordered_map<std::string, std::int32_t> tenant_kv_used_;
     // Core 线程私有的 running 计数；admit/finish 是唯一写点。
     std::unordered_map<std::string, std::int32_t> tenant_running_;
     std::int64_t started_ns_ = 0;

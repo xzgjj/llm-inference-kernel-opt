@@ -42,7 +42,6 @@ struct AppContext {
     std::atomic<bool> listen_done{false};
 };
 
-httplib::Server* g_server = nullptr;
 std::atomic<bool> g_signal_requested{false};
 
 // 信号处理只置标志，真正的排空在监视线程里做（signal handler 不得做 IO/等待）。
@@ -237,9 +236,6 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
     std::string parse_detail;
     if (!ctx.service.accepting()) {
         return make_error(ErrCode::Unavailable, "服务正在排空，停止接收新请求");
-    }
-    if (!forced_id.empty()) {
-        req.req_id = forced_id;
     }
     ErrCode code = chat ? parse_chat_body(body, req, message, &parse_detail)
                         : parse_body(body, req, message, &parse_detail);
@@ -626,7 +622,11 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
                  });
     register_route("GET", "/v1/models");
     server->Get("/v1/models", [ctx](const httplib::Request& req, httplib::Response& res) {
-        if (!bearer_allowed(req.get_header_value("Authorization"), ctx->config->api_key)) {
+        // DEBUG-11：与推理端点共用同一鉴权解析；只配 key 文件时也必须带合法 key。
+        const AuthDecision auth = resolve_bearer(req.get_header_value("Authorization"),
+                                                 ctx->config->api_keys, ctx->default_quota);
+        if (!auth.ok) {
+            logger()->warn("http unauthorized path={}", req.path);
             res.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");
             send_error(res, make_error(ErrCode::Unauthorized, "缺少或无效的 Bearer token"));
             return;
@@ -669,7 +669,6 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
         return httplib::Server::HandlerResponse::Unhandled;
     });
 
-    g_server = server.get();
     g_signal_requested.store(false);
     ctx->listen_done.store(false);
     std::signal(SIGINT, handle_signal);
@@ -728,7 +727,6 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     if (control_thread.joinable()) {
         control_thread.join();
     }
-    g_server = nullptr;
     ctx->stopping.store(true);
     if (ctx->service.state() == ServiceState::Ready) {
         ctx->service.transit(ServiceState::Draining);

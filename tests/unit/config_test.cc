@@ -67,6 +67,10 @@ void clear_env() {
                             "LLMOPT_API_KEYS_FILE",
                             "LLMOPT_STEP_TRACE_RATE",
                             "LLMOPT_CONTROL_PORT",
+                            "LLMOPT_THREADS",
+                            "LLMOPT_N_GPU_LAYERS",
+                            "LLMOPT_DONOR_SLOTS",
+                            "LLMOPT_KV_CACHE_TYPE",
                             "LLMOPT_TLS_CERT",
                             "LLMOPT_TLS_KEY"}) {
         set_env(key, "");
@@ -682,5 +686,84 @@ TEST_CASE("单 api-key 仍可用，落库前转成 default 租户的 sha256") {
     CHECK_EQ(cfg.api_keys[0].id, "default");
     CHECK_EQ(cfg.api_keys[0].sha256.size(), 64U);
     CHECK_EQ(cfg.api_key, "legacy-secret");
+    clear_env();
+}
+
+// DEBUG-03：负值在 CLI / env / JSON 三个入口都必须是配置错误，而不是"预算按 0、后端按 -1"。
+TEST_CASE("n-gpu-layers 负值在 CLI、env 与配置文件三个入口都被拒绝") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf", "--n-gpu-layers", "-1"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(message.find("n-gpu-layers") != std::string::npos);
+
+    set_env("LLMOPT_N_GPU_LAYERS", "-1");
+    cfg = ServerConfig{};
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::ConfigInvalid);
+    set_env("LLMOPT_N_GPU_LAYERS", "");
+
+    const std::string path =
+            write_config("llmopt_bad_ngl.json", R"({"model":"m.gguf","n-gpu-layers":-1})");
+    cfg = ServerConfig{};
+    CHECK(load({"--config", path}, cfg, message) == ErrCode::ConfigInvalid);
+    std::filesystem::remove(path);
+    clear_env();
+}
+
+// DEBUG-07：0=自动；负值与超上限都不能静默落到后端的 n_threads。
+TEST_CASE("threads 只接受 0..256，负值与超上限被拒且 0 保留自动语义") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model", "m.gguf", "--threads", "-2"}, cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(message.find("threads") != std::string::npos);
+    cfg = ServerConfig{};
+    CHECK(load({"--model", "m.gguf", "--threads", "300"}, cfg, message) == ErrCode::ConfigInvalid);
+    cfg = ServerConfig{};
+    REQUIRE(load({"--model", "m.gguf", "--threads", "0"}, cfg, message) == ErrCode::Ok);
+    CHECK_EQ(cfg.threads, 0);
+    cfg = ServerConfig{};
+    REQUIRE(load({"--model", "m.gguf", "--threads", "256"}, cfg, message) == ErrCode::Ok);
+    CHECK_EQ(cfg.threads, 256);
+    clear_env();
+}
+
+// DEBUG-06：先看文件大小，超大文件必须是配置错误而不是 bad_alloc。
+TEST_CASE("配置文件超过 16 MiB 上限时先报配置错误") {
+    clear_env();
+    const std::filesystem::path path =
+            std::filesystem::temp_directory_path() / "llmopt_oversize_config.json";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        const std::string chunk(1024 * 1024, ' ');
+        for (int index = 0; index < 17; ++index) {
+            out.write(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        }
+    }
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--config", path.string()}, cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(message.find("16 MiB") != std::string::npos);
+    std::filesystem::remove(path);
+    clear_env();
+}
+
+// DEBUG-09：donor-slots / kv-cache-type 在 JSON 入口与 CLI 等价，不再按未知键拒绝。
+TEST_CASE("配置文件可设置 donor-slots 与 kv-cache-type 且来源记为 File") {
+    clear_env();
+    const std::string path = write_config(
+            "llmopt_donor_kv.json",
+            R"({"model":"m.gguf","donor-slots":2,"kv-cache-type":"q8_0"})");
+    ServerConfig cfg;
+    std::string message;
+    std::vector<ConfigSourceEntry> sources;
+    REQUIRE(load({"--config", path}, cfg, message, &sources) == ErrCode::Ok);
+    CHECK_EQ(cfg.donor_slots, 2);
+    CHECK_EQ(cfg.kv_cache_type, "q8_0");
+    CHECK_EQ(std::string(source_of(sources, "donor-slots")), "file");
+    CHECK_EQ(std::string(source_of(sources, "kv-cache-type")), "file");
+    std::filesystem::remove(path);
     clear_env();
 }

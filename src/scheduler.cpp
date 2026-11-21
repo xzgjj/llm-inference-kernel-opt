@@ -201,6 +201,8 @@ void StepExecutor::stop() {
     }
     cv_.notify_all();
     if (thread_.joinable()) {
+        // DEBUG-12：后端 decode_step 不可取消；这里显式说明"join 可能在等后端返回"，不假装能超时。
+        logger()->warn("executor stop：若后端 decode_step 不返回，join 会一直等待（已知限制）");
         thread_.join();
     }
 }
@@ -281,10 +283,15 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         metrics_.inc(MetricId::RequestsQueueFull);
         return ErrCode::QueueFull;
     }
-    if (!reserve_tenant_live(req.tenant, req.tenant_quota)) {
+    const ErrCode tenant_code = reserve_tenant_live(req.tenant, req.tenant_quota);
+    if (tenant_code != ErrCode::Ok) {
         release_admission();
-        logger()->warn("tenant quota rejected tenant={} req={}", req.tenant, req.req_id);
-        return ErrCode::QuotaExceeded;
+        if (tenant_code == ErrCode::QuotaExceeded) {
+            logger()->warn("tenant quota rejected tenant={} req={}", req.tenant, req.req_id);
+        } else {
+            metrics_.inc(MetricId::RequestsError);
+        }
+        return tenant_code;
     }
     bool id_reserved = false;
     try {
@@ -408,18 +415,43 @@ std::int32_t tenant_capacity(const SchedulerConfig& config, const TenantQuota& q
     return max_concurrency + queue_capacity;
 }
 
-bool SchedulerCore::reserve_tenant_live(const std::string& tenant, const TenantQuota& quota) {
+// 租户 live 名额：强异常安全——先构造计数器再插表，失败不留空 slot（DEBUG-02）。
+ErrCode SchedulerCore::reserve_tenant_live(const std::string& tenant, const TenantQuota& quota) {
     const std::int32_t capacity = tenant_capacity(config_, quota);
-    std::lock_guard<std::mutex> lock(tenant_mutex_);
-    auto& slot = tenant_counters_[tenant];
-    if (!slot) {
-        slot = std::make_shared<TenantCounter>();
+    std::shared_ptr<TenantCounter> slot;
+    {
+        std::lock_guard<std::mutex> lock(tenant_mutex_);
+        auto it = tenant_counters_.find(tenant);
+        if (it != tenant_counters_.end()) {
+            slot = it->second;
+        }
     }
+    if (!slot) {
+        try {
+            slot = std::make_shared<TenantCounter>();
+        } catch (const std::bad_alloc&) {
+            logger()->error("租户计数器分配失败 tenant={}", tenant);
+            return ErrCode::ResourceInsufficient;
+        }
+        try {
+            std::lock_guard<std::mutex> lock(tenant_mutex_);
+            auto& existing = tenant_counters_[tenant];
+            if (existing) {
+                slot = existing; // 并发插入时复用先到者的计数器
+            } else {
+                existing = slot;
+            }
+        } catch (const std::bad_alloc&) {
+            logger()->error("租户表插入失败 tenant={}", tenant);
+            return ErrCode::ResourceInsufficient;
+        }
+    }
+    std::lock_guard<std::mutex> lock(tenant_mutex_);
     if (slot->live.load(std::memory_order_relaxed) >= capacity) {
-        return false;
+        return ErrCode::QuotaExceeded;
     }
     slot->live.fetch_add(1, std::memory_order_acq_rel);
-    return true;
+    return ErrCode::Ok;
 }
 
 void SchedulerCore::release_tenant_live(const std::string& tenant) noexcept {
@@ -825,6 +857,26 @@ void SchedulerCore::publish_kv_usage() {
         frag_ratio = std::clamp(frag_ratio, 0.0, 1.0);
     }
     metrics_.set_float(MetricId::KvInternalFragRatio, frag_ratio);
+    // DEBUG-01：租户块用量由 Core 线程扫描后以快照发布，HTTP 抓取只读快照。
+    std::vector<std::string> tenants;
+    {
+        std::lock_guard<std::mutex> lock(tenant_mutex_);
+        tenants.reserve(tenant_counters_.size());
+        for (const auto& entry : tenant_counters_) {
+            if (entry.second) {
+                tenants.push_back(entry.first);
+            }
+        }
+    }
+    std::unordered_map<std::string, std::int32_t> kv_snapshot;
+    kv_snapshot.reserve(tenants.size());
+    for (const std::string& tenant : tenants) {
+        kv_snapshot.emplace(tenant, kv_.used_blocks_for(tenant));
+    }
+    {
+        std::lock_guard<std::mutex> lock(tenant_kv_mutex_);
+        tenant_kv_used_ = std::move(kv_snapshot);
+    }
 }
 
 void SchedulerCore::record_schedule_step(std::chrono::steady_clock::time_point started,
@@ -1576,6 +1628,9 @@ std::vector<TenantStat> SchedulerCore::tenant_stats() const {
         std::lock_guard<std::mutex> lock(tenant_mutex_);
         stats.reserve(tenant_counters_.size());
         for (const auto& [tenant, counter] : tenant_counters_) {
+            if (!counter) {
+                continue; // 防御：分配失败路径不得留下空 slot
+            }
             TenantStat stat;
             stat.tenant = tenant;
             stat.live = counter->live.load(std::memory_order_relaxed);
@@ -1587,8 +1642,15 @@ std::vector<TenantStat> SchedulerCore::tenant_stats() const {
             stats.push_back(std::move(stat));
         }
     }
+    // KV 用量读 Core 发布的快照；禁止在本线程遍历块表（DEBUG-01）。
+    std::unordered_map<std::string, std::int32_t> kv_snapshot;
+    {
+        std::lock_guard<std::mutex> lock(tenant_kv_mutex_);
+        kv_snapshot = tenant_kv_used_;
+    }
     for (TenantStat& stat : stats) {
-        stat.kv_used = kv_.used_blocks_for(stat.tenant);
+        auto used = kv_snapshot.find(stat.tenant);
+        stat.kv_used = used == kv_snapshot.end() ? 0 : used->second;
     }
     return stats;
 }
