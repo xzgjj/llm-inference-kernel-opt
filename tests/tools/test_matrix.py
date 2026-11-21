@@ -258,5 +258,47 @@ class LiveMetricSamplerTest(unittest.TestCase):
         self.assertEqual(sampler.kv_used, 37)
 
 
+class MixedWorkloadConfigTest(unittest.TestCase):
+    """P1-3：混长输出、批次策略与共享前缀必须能从配置一路落到 argv 与 prompt 集。"""
+
+    def load(self, extra: dict) -> matrix.MatrixConfig:
+        data = config_dict()
+        data.update(extra)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            return matrix.load_config(path)
+
+    def test_output_lengths_cycle_across_prompts(self) -> None:
+        data = {
+            "tiers": [{"name": "short", "max_prompt_tokens": 64, "n": 6}],
+            "output_lengths": [16, 64],
+        }
+        cfg = self.load(data)
+        rows = matrix.build_prompts(cfg)
+        self.assertEqual([row["max_tokens"] for row in rows], [16, 64, 16, 64, 16, 64])
+
+    def test_static_policy_is_explicit_in_argv(self) -> None:
+        cfg = self.load({"batch_policy": "static"})
+        argv = matrix.server_argv(cfg, 4, 18080)
+        self.assertEqual(argv[argv.index("--batch-policy") + 1], "static")
+
+    def test_shared_prefix_is_forwarded_to_prompts(self) -> None:
+        data = {
+            "tiers": [{"name": "short", "max_prompt_tokens": 64, "n": 4}],
+            "shared_prefix_tokens": 32,
+        }
+        cfg = self.load(data)
+        rows = matrix.build_prompts(cfg)
+        self.assertTrue(all(row["shared_prefix"] for row in rows))
+        self.assertEqual(len({row["text"] for row in rows}), 4)
+
+    def test_invalid_workload_values_are_rejected(self) -> None:
+        for extra in ({"output_lengths": [0]}, {"batch_policy": "batch"},
+                      {"shared_prefix_tokens": -1}, {"shared_prefix_tokens": 4097}):
+            with self.assertRaises(SystemExit):
+                self.load(extra)
+
+
 if __name__ == "__main__":
     unittest.main()

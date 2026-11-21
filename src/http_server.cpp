@@ -44,6 +44,63 @@ struct AppContext {
 
 std::atomic<bool> g_signal_requested{false};
 
+// 传输层过载标记：任务队列把"超出 线程+队列"的连接标记为 shed，worker 取到后
+// 在 pre-routing 阶段直接回 503，而不是先读 body、再等调度器回 429。
+thread_local bool t_transport_shed = false;
+
+// 有界任务队列：线程数覆盖 并发+队列+3，队列再留 queue_capacity 条正常等待位与
+// queue_capacity 条 shed 位。超过 线程+2×队列 的连接直接关闭（连 503 都写不出去），
+// 这是防止 socket/请求体内存无界的最后一道兜底。
+class BoundedShedQueue final : public httplib::TaskQueue {
+public:
+    BoundedShedQueue(std::size_t threads, std::size_t normal, std::size_t overflow)
+        : threads_(threads), normal_(normal), overflow_limit_(overflow),
+          pool_(std::make_unique<httplib::ThreadPool>(threads, normal + overflow)) {}
+
+    bool enqueue(std::function<void()> fn) override {
+        const std::size_t slot = inflight_.fetch_add(1, std::memory_order_relaxed);
+        const bool shed = slot >= threads_ + normal_;
+        if (shed && overflow_.fetch_add(1, std::memory_order_relaxed) >= overflow_limit_) {
+            inflight_.fetch_sub(1, std::memory_order_relaxed);
+            overflow_.fetch_sub(1, std::memory_order_relaxed);
+            return false;
+        }
+        auto wrapped = [this, fn = std::move(fn), shed]() mutable {
+            t_transport_shed = shed;
+            fn();
+            t_transport_shed = false;
+            if (shed) {
+                overflow_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            inflight_.fetch_sub(1, std::memory_order_relaxed);
+        };
+        if (!pool_->enqueue(std::move(wrapped))) {
+            inflight_.fetch_sub(1, std::memory_order_relaxed);
+            if (shed) {
+                overflow_.fetch_sub(1, std::memory_order_relaxed);
+            }
+            return false;
+        }
+        return true;
+    }
+
+    void shutdown() override {
+        pool_->shutdown();
+    }
+
+    void on_idle() override {
+        pool_->on_idle();
+    }
+
+private:
+    std::size_t threads_;
+    std::size_t normal_;
+    std::size_t overflow_limit_;
+    std::unique_ptr<httplib::ThreadPool> pool_;
+    std::atomic<std::size_t> inflight_{0};
+    std::atomic<std::size_t> overflow_{0};
+};
+
 // 信号处理只置标志，真正的排空在监视线程里做（signal handler 不得做 IO/等待）。
 void handle_signal(int) {
     g_signal_requested.store(true, std::memory_order_relaxed);
@@ -615,8 +672,34 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
         return 3;
     }
     // 数据面并发上限与 Scheduler 的活跃序列上限绑定；控制面不再共享这组线程。
-    const std::size_t handler_threads = static_cast<std::size_t>(core.concurrency_limit() + 3);
-    server->new_task_queue = [handler_threads] { return new httplib::ThreadPool(handler_threads); };
+    // 每个挂起请求（running 或 waiting）都要占一个 handler 线程直到流式/非流式回写完，
+    // 所以线程数必须覆盖"并发 + 队列"，否则容量预算不可达、QUEUE_FULL 永远不触发；
+    // 额外 +3 留给 healthz/readyz/metrics，避免探针排队在长请求后面。
+    const std::size_t handler_threads =
+            static_cast<std::size_t>(core.concurrency_limit() + core.queue_capacity() + 3);
+    // 任务队列分两段：前 queue_capacity 条正常等待，后 queue_capacity 条标记 shed；
+    // 再多由 httplib 直接关连接，避免无界 job 队列把 socket 与 4 MiB 请求体留在内存里。
+    const std::size_t max_queued = static_cast<std::size_t>(core.queue_capacity());
+    server->new_task_queue = [handler_threads, max_queued] {
+        return new BoundedShedQueue(handler_threads, max_queued, max_queued);
+    };
+    // shed 连接在路由前直接 503：不读业务 body、不占调度预算；控制端点仍放行，
+    // 保证过载时 /healthz、/metrics 可观测。
+    server->set_pre_routing_handler([ctx](const httplib::Request& req, httplib::Response& res) {
+        if (!t_transport_shed) {
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
+        if (req.path == "/healthz" || req.path == "/readyz" || req.path == "/metrics") {
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
+        ctx->metrics->inc(MetricId::HttpRequests);
+        res.status = 503;
+        res.set_header("Retry-After", "1");
+        res.set_content(
+                render_error_body(ErrCode::Unavailable, "服务过载：连接排队已满，请退避重试"),
+                "application/json; charset=utf-8");
+        return httplib::Server::HandlerResponse::Handled;
+    });
     server->set_payload_max_length(std::size_t{4} * 1024 * 1024);
     server->set_read_timeout(5, 0);
     server->set_write_timeout(120, 0);

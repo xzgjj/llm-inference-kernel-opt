@@ -45,6 +45,7 @@ constexpr FieldSpec kFields[] = {
         {"preempt-trace", false},
         {"step-trace", false},
         {"queue-capacity", false},
+        {"batch-policy", false},
         {"block-size", false},
         {"watermark-ratio", false},
         {"disable-prefix-cache", true},
@@ -87,6 +88,7 @@ constexpr const char* kConfigKeys[] = {
         "preempt-trace",
         "step-trace",
         "queue-capacity",
+        "batch-policy",
         "block-size",
         "watermark-ratio",
         "disable-prefix-cache",
@@ -188,10 +190,10 @@ bool parse_bool_text(const std::string& text, bool& out) {
 
 bool is_sched_key(const std::string& key) {
     return key == "--max-num-batched-tokens" || key == "--queue-capacity" ||
-           key == "--block-size" || key == "--watermark-ratio" || key == "--chunk-size" ||
-           key == "--aging-threshold-ms" || key == "--max-consecutive-preemptions" ||
-           key == "--preempt-trace" || key == "--step-trace" || key == "--disable-prefix-cache" ||
-           key == "--fairness-aging";
+           key == "--batch-policy" || key == "--block-size" || key == "--watermark-ratio" ||
+           key == "--chunk-size" || key == "--aging-threshold-ms" ||
+           key == "--max-consecutive-preemptions" || key == "--preempt-trace" ||
+           key == "--step-trace" || key == "--disable-prefix-cache" || key == "--fairness-aging";
 }
 
 ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::string& value) {
@@ -222,6 +224,10 @@ ErrCode apply_sched_arg(ServerConfig& cfg, const std::string& key, const std::st
     }
     if (key == "--queue-capacity") {
         return parse_int(value, cfg.queue_capacity) ? ErrCode::Ok : ErrCode::InvalidJson;
+    }
+    if (key == "--batch-policy") {
+        cfg.batch_policy = value;
+        return ErrCode::Ok;
     }
     if (key == "--block-size") {
         return parse_int(value, cfg.block_tokens) ? ErrCode::Ok : ErrCode::InvalidJson;
@@ -348,6 +354,19 @@ ErrCode validate_sched_config(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.queue_capacity < 1 || cfg.queue_capacity > 1024) {
         message = "queue-capacity 必须在 1..1024";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.batch_policy != "continuous" && cfg.batch_policy != "static") {
+        message = "batch-policy 只接受 continuous 或 static";
+        return ErrCode::InvalidJson;
+    }
+    // 数据面每个挂起请求占一个 HTTP handler 线程：线程数 = 并发 + 队列 + 3（探针保底）。
+    // 超过 256 直接判配置非法——否则线程先耗尽，capacity 之外的请求只能被困在 accept 队列里，
+    // QUEUE_FULL 看门狗永远不触发，队列容量形同虚设。
+    constexpr std::int32_t kMaxDataPlaneThreads = 256;
+    if (cfg.max_concurrency + cfg.queue_capacity + 3 > kMaxDataPlaneThreads) {
+        message =
+                "max-concurrency + queue-capacity + 3 不得超过 256（每个挂起请求占一个数据面线程）";
         return ErrCode::InvalidJson;
     }
     if (cfg.block_tokens < 4 || cfg.block_tokens > 128) {
@@ -783,6 +802,7 @@ ErrCode load_env_strings(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sour
             {"LLMOPT_API_KEYS_FILE", "api-keys-file", &cfg.api_keys_file},
             {"LLMOPT_TLS_CERT", "tls-cert", &cfg.tls_cert_path},
             {"LLMOPT_TLS_KEY", "tls-key", &cfg.tls_key_path},
+            {"LLMOPT_BATCH_POLICY", "batch-policy", &cfg.batch_policy},
     };
     for (const StringBinding& binding : strings) {
         if (env_string(binding.env, *binding.target) != nullptr) {
@@ -1201,6 +1221,7 @@ SchedulerConfig make_scheduler_config(const ServerConfig& cfg, std::int32_t conc
     scheduler_cfg.max_concurrency = std::max<std::int32_t>(concurrency, 1);
     scheduler_cfg.max_num_batched_tokens = cfg.max_num_batched_tokens;
     scheduler_cfg.queue_capacity = cfg.queue_capacity;
+    scheduler_cfg.continuous_batching = cfg.batch_policy == "continuous";
     scheduler_cfg.enable_prefix_cache = prefix_cache;
     scheduler_cfg.chunk_size = cfg.chunk_size;
     scheduler_cfg.fairness_aging_enabled = cfg.fairness_aging;

@@ -27,7 +27,7 @@
 
 每条先说明“解决什么问题”，再说怎么做，最后给实测数字或边界。
 
-1. **Continuous Batching（请求拼批）**——解决“一次只能服务一个请求、GPU 总在等人”的问题。把多个请求按 token 拼进同一批，每步有 token 预算上限（`max-num-batched-tokens`），跑不下的进等待队列，队列满直接回 429。实测（8B 全驻留）：1 路 77.1 tok/s，8 路 80.7 tok/s，**只快 5%**；但单请求尾延迟 ITL p99 从 23.3 ms 涨到 171.3 ms。所以“拼批一定提吞吐”在这台机器上不成立，瓶颈是单执行线程串行 + 显存带宽封顶，控制面本身只占 0.01–0.02% CPU。
+1. **Continuous Batching（请求拼批）**——解决“一次只能服务一个请求、GPU 总在等人”的问题。把多个请求按 token 拼进同一批，每步有 token 预算上限（`max-num-batched-tokens`），跑不下的进等待队列，队列满直接回 429。实测（8B 全驻留、等长短输出、单执行线程）：1 路 77.1 tok/s，8 路 80.7 tok/s，**只快 5%**；但单请求尾延迟 ITL p99 从 23.3 ms 涨到 171.3 ms。所以”拼批一定提吞吐”在这台机器上、这个负载形状下不成立，瓶颈是单执行线程串行 + 显存带宽封顶，控制面本身只占 0.01–0.02% CPU。等长负载抹掉了”短请求先完、槽位立刻复用”这一项，混长/静态批/前缀开关三组对照配置已备好、尚未跑完，结论边界见第 8 节。
 
 2. **块表 KV 管理（给显存做分页）**——解决“KV 缓存越长越占显存、释放不干净”的问题。把 KV 切成固定 16 token 的块，用引用计数标记谁在用，写时复制（CoW）避免互相踩；块表是分配的唯一决策者，后端只按块表给的地址算，不反向改块表。实测 30 分钟压测收尾后 `used=cached=0`，块表对账差异为 0。
 
@@ -150,7 +150,8 @@ cmake --build build --parallel
 | `LLMOPT_CTX_TOKENS` | `2048` | 上下文上限，同时决定 KV 估算与溢出判定 |
 | `LLMOPT_MAX_CONCURRENCY` | `8` | 同时在跑的序列上限，超出进 waiting 队列 |
 | `LLMOPT_MAX_NUM_BATCHED_TOKENS` | `2048` | 单步 token 预算；chunked prefill 后允许小于 `ctx-tokens` |
-| `LLMOPT_QUEUE_CAPACITY` | `32` | waiting 队列上限，满即 429 `QUEUE_FULL` |
+| `LLMOPT_QUEUE_CAPACITY` | `32` | waiting 队列上限，满即 429 `QUEUE_FULL`；数据面线程预算要求 `max-concurrency + queue-capacity + 3 ≤ 256` |
+| `LLMOPT_BATCH_POLICY` | `continuous` | `continuous`=完成即补位；`static`=整批跑空才准入，仅供对照实验 |
 | `LLMOPT_BLOCK_SIZE` | `16` | KV 逻辑块 token 数，也决定前缀命中粒度 |
 | `LLMOPT_CHUNK_SIZE` | `128` | chunked prefill 单步宽度，仅 32 / 64 / 128 / 256 |
 | `LLMOPT_MODE` / `LLMOPT_SAFETY_RATIO` | `off` / `0.80` | 容量门控模式与软预算系数 |
@@ -225,6 +226,7 @@ Chat 端点只支持纯文本 `system / user / assistant`；`tools`、`tool_choi
 | 场景 | HTTP | code |
 | --- | --- | --- |
 | 队列满 | 429 | `QUEUE_FULL` |
+| 连接排队满（传输层过载） | 503 | `SERVICE_UNAVAILABLE` |
 | 限流 | 429 | `RATE_LIMITED` |
 | 租户配额满 | 429 | `QUOTA_EXCEEDED` |
 | KV 低于水位 | 429 | `KV_BELOW_WATERMARK` |
@@ -281,6 +283,8 @@ python scripts/spec5/recompute_spec5.py \
 | 8 | 320.6 | 171.3 | 80.7 | 1.05× | 0.0001 |
 
 **结论：全驻留档下 continuous batching 的吞吐收益被证伪**（P8/P1 仅 1.05×，判据要求 ≥1.3×），代价是 ITL p99 放大 7.4×。归因是"单执行线程串行 + 显存带宽封顶"：调度步 p50 仅 4–8 µs、`sched_cpu_ratio` 0.01–0.02%，控制面不是瓶颈；77–81 tok/s 已接近该卡有效带宽上限。吞吐在 P=4 到平台，再往上只增加排队与尾延迟。旧表（`ngl 24`、13/37 层留 CPU 时的 1.61× 与 12.8 tok/s 单路）是 CPU-offload 天花板下的相对改善，**已作废**，只作历史对照。证据、分档显存分项与复现命令见 `evidence/phase12/perf/README.md`。
+
+**这条结论的边界**：负载是等长 32-token 短解码、prompt 单档、P=1/2/4/8，且没有"静态批"对照。它证明的是"把并发从 1 拉到 8 不再涨吞吐、只涨尾延迟"，不能推出"continuous batching 本身没有收益"——等长输出恰好抹掉了槽位复用，而没有静态批基线就无法把这 1.05× 精确归因到"补位"这一机制。混长输出、static/continuous 对照、前缀缓存开/关三组配置已落在 `scripts/bench/matrix/phase12_s3_*.json`，跑出来之前不要引用更宽的结论。
 
 局限，直说：
 

@@ -54,6 +54,8 @@ llmopt_add_doctest(cost_model_test "unit;fast;hermetic"
 llmopt_add_doctest(contract_scheduler "contract;fast;hermetic" SOURCES contract/scheduler_test.cc)
 llmopt_add_doctest(contract_continuous_batch "contract;fast;hermetic"
                    SOURCES contract/continuous_batch_test.cc)
+llmopt_add_doctest(contract_batch_policy "contract;fast;hermetic"
+                   SOURCES contract/batch_policy_test.cc)
 llmopt_add_doctest(preempt_test "contract;fast;hermetic" SOURCES contract/preempt_test.cc)
 llmopt_add_doctest(state_test "contract;fast;hermetic" SOURCES contract/state_test.cc)
 llmopt_add_doctest(lifecycle_test "contract;fast;hermetic" SOURCES contract/lifecycle_test.cc)
@@ -211,6 +213,23 @@ if(Python3_Interpreter_FOUND)
                          LABELS "integration;fast;hermetic")
     set_tests_properties(integration_server_admission PROPERTIES TIMEOUT 180)
 
+    add_test(NAME integration_server_queue_capacity
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_queue_capacity.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_queue_capacity PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_queue_capacity PROPERTIES TIMEOUT 180)
+
+    # P1-3：static / continuous 黑盒对照，证明"完成即补位"与"整批跑空"可区分。
+    add_test(NAME integration_server_batch_policy
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_batch_policy.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_server_batch_policy PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_server_batch_policy PROPERTIES TIMEOUT 180)
+
     # 4-G1：小矩阵端到端；档间重启与 manifest/CSV 契约。
     add_test(NAME integration_server_matrix
              COMMAND ${Python3_EXECUTABLE}
@@ -273,4 +292,19 @@ if(Python3_Interpreter_FOUND)
                          LABELS "e2e;slow;needs-gpu"
                          SKIP_RETURN_CODE 77
                          TIMEOUT 300)
+endif()
+
+# 并行安全边界：integration 用例都会起真实进程、抢临时端口（free_port 的 bind/close 之间
+# 存在 TOCTOU），因此共用一把 RESOURCE_LOCK 串行执行；unit/contract 不带锁，-j 仍并行。
+# 只按 LABELS 里的 integration 选取，不能把同目录的 unit/contract 一起锁掉（那会退化成串行）。
+get_property(llmopt_dir_tests DIRECTORY PROPERTY TESTS)
+set(llmopt_locked_tests "")
+foreach(t IN LISTS llmopt_dir_tests)
+    get_test_property(${t} LABELS llmopt_test_labels)
+    if(llmopt_test_labels MATCHES "integration" AND NOT t MATCHES "^e2e_")
+        list(APPEND llmopt_locked_tests "${t}")
+    endif()
+endforeach()
+if(llmopt_locked_tests)
+    set_tests_properties(${llmopt_locked_tests} PROPERTIES RESOURCE_LOCK llmopt_integration)
 endif()

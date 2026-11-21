@@ -67,6 +67,11 @@ if(LLMOPT_ENABLE_LLAMA)
 endif()
 
 add_executable(llmopt_server src/http_server.cpp src/main.cpp)
+if(MINGW)
+    # httplib 是 header-only，http_server.cpp 的 DWARF-5 调试信息会让 cc1plus 超出
+    # Windows 单进程内存上限（ucrt64 上实测 OOM）；该 TU 改用 DWARF-4，符号仍完整。
+    set_source_files_properties(src/http_server.cpp PROPERTIES COMPILE_OPTIONS "-gdwarf-4")
+endif()
 target_link_libraries(llmopt_server PRIVATE llmopt_core httplib::httplib spdlog::spdlog llmopt_warnings llmopt_coverage)
 if(LLMOPT_ENABLE_TLS)
     # cpp-httplib 是 header-only：定义必须挂在包含 httplib.h 的目标上。

@@ -68,6 +68,7 @@ def main() -> int:
         for concurrency in ("1", "2"):
             peak = manifest["resource_peak"][concurrency]
             check(peak["rss_peak_bytes"] > 0, "RSS 峰值应可归因到本进程")
+            check(int(peak["samples"]) >= 2, "start/stop 各一次同步采样，样本数应 ≥2")
             check(isinstance(peak["vram_known"], bool), "VRAM 未知应显式标记")
 
         metrics = (out / "metrics_p1_r1.prom").read_text(encoding="utf-8")

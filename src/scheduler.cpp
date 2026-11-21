@@ -817,9 +817,14 @@ void SchedulerCore::pump() {
         group->scheduled_this_pump = false;
     }
     // 1) 预算内先为等待队列做一次 KV 预检；2) decode 保位；3) 准入；4) 补 prefill。
-    preempt_for_waiting();
+    // 静态批对照：只在 running 排空时整批准入，不做"完成即补位"，也不为等待队列抢占。
+    if (config_.continuous_batching) {
+        preempt_for_waiting();
+    }
     append_decodes(batch, budget);
-    admit_waiting(budget);
+    if (config_.continuous_batching || running_.empty()) {
+        admit_waiting(budget);
+    }
     append_prefills(batch, budget);
     if (!submit_scheduled(batch, started)) {
         return;

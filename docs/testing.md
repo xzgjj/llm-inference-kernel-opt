@@ -32,10 +32,10 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`）。
 
 <!-- test-counts:start -->
-测试基线（脚本生成，勿手改）：`ctest -N` **214** 注册；`-L fast` **213**（144 unit / 50 contract / 19 integration）；`-L e2e` 1。
+测试基线（脚本生成，勿手改）：`ctest -N` **220** 注册；`-L fast` **219**（146 unit / 52 contract / 21 integration）；`-L e2e` 1。
 <!-- test-counts:end -->
 
-因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
+因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行：unit / contract 并行跑；integration 共用 `RESOURCE_LOCK llmopt_integration`，会被 CTest 串行化——它们都要起真实进程、抢临时端口，`free_port()` 的 bind/close 之间存在竞态，不串行会偶发假失败。
 
 目录与命名约定见 [../tests/README.md](../tests/README.md)：`unit/` `contract/` `integration/` `e2e/` `perf/` 按层级分目录，Scope 一律写目录而不是单个文件，目录内新增用例自动被覆盖。
 
@@ -175,14 +175,14 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 - `tests/unit/metrics_test.cc`（9 例）：`MetricId` 表与 KPI 冻结名、8 线程分片累加不丢、gauge 覆盖、标签白名单、sum/count、每个 family 唯一 TYPE/HELP、snapshot、reset 语义。
 - `tests/contract/admission_test.cc`（2 例）：预算 `max_concurrency + queue_capacity` 的突发拒绝只计一次；预留兑现后 `accepting()` 恢复且不重复拒绝。
-- `tests/unit/resource_test.cc`（5 例，4-G0-3）：无 GPU 依赖也能拿到正 RSS；20 次采样峰值只增不减；VRAM known/unknown 时 `vram_mib`/`vram_peak_mib`/`vram_probe_ok` 三者自洽（unknown 必须 NaN + 0）；`start`/`stop` 幂等；未显式 stop 析构也安全。`tests/tools/test_peak_sampler.py` 用真实子进程验证 `scripts/bench/peak_sampler.py` 的 CSV 五列与未知 pid 失败码。
+- `tests/unit/resource_test.cc`（5 例，4-G0-3）：无 GPU 依赖也能拿到正 RSS；20 次采样峰值只增不减；VRAM known/unknown 时 `vram_mib`/`vram_peak_mib`/`vram_probe_ok` 三者自洽（unknown 必须 NaN + 0）；`start`/`stop` 幂等；未显式 stop 析构也安全。`tests/tools/test_peak_sampler.py` 用真实子进程验证 `scripts/bench/peak_sampler.py` 的 CSV 五列与未知 pid 失败码；`tests/tools/test_resources.py`（3 例）锁 P1 采样竞态回归：`start`/`stop` 必须各留一次同步采样（`samples≥2` 且 `rss>0`），子进程退出后终采也不得把已有峰值抹成 0。
 - `tests/integration/test_server_metrics.py` / `test_server_admission.py`：进程级校验 TYPE/HELP 与 KPI 计数一致（含 K-8 RSS>0、峰值不低于当前值、VRAM unknown 语义）；8 并发打满预算 3 时回 3×200 + 5×429，429 带 `Retry-After: 1`，退避后重试 200。
 
 `tests/unit/runner_raii_test.cc`（4-G0-7）只在 `LLMOPT_ENABLE_LLAMA=ON` 时登记：反复构造/析构、非法模型两次 load 后 release、以及 `LLMOPT_TEST_MODEL` 提供真模型时的 load→tokenize→release→reload；在 WSL ASan 构建跑 `ctest -R runner_raii`，用于证明 C 句柄无泄漏。
 
 阶段 4 矩阵工具链的用例：
 
-- `tests/tools/test_matrix.py`（18 例）：JSON 配置必填/覆盖、§1.6 证据列（含显存三列与 `tok_accounting`）、真实 prompt token 口径（prefill + prefix hit，覆盖字符估算）、默认 donor=4 必须显式进 argv、短/长档必须显式声明 `kv_cache_type=f16`（防 manifest 只记默认值）、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`、压测窗口 K-4/K-5/显存/KV 水位峰值采样、比率列保留 6 位小数（防 K-4 被舍成 0）、CUDA0/Host 缓冲区解析与 `unknown/buffers_partial` 语义、GPU/KV 参数必须进 argv。
+- `tests/tools/test_matrix.py`（22 例）：JSON 配置必填/覆盖、§1.6 证据列（含显存三列与 `tok_accounting`）、真实 prompt token 口径（prefill + prefix hit，覆盖字符估算）、默认 donor=4 必须显式进 argv、短/长档必须显式声明 `kv_cache_type=f16`（防 manifest 只记默认值）、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`、压测窗口 K-4/K-5/显存/KV 水位峰值采样、比率列保留 6 位小数（防 K-4 被舍成 0）、CUDA0/Host 缓冲区解析与 `unknown/buffers_partial` 语义、GPU/KV 参数必须进 argv；P1-3 增 4 例：`output_lengths` 按序循环、`--batch-policy static` 显式进 argv、`shared_prefix_tokens` 透传、四类非法取值拒绝启动。
 - `tests/tools/test_capacity_check.py`（8 例）：只解析服务 `estimate/capacity-only` 行不补算、缺行留空、`--capacity-only/--model-profile/--n-gpu-layers` 必须进 argv、CSV 行数与 ngl 对齐、子进程超时保留 partial 行、`OSError` 启动失败占位、半行/垃圾行解析、失败行不丢早期行。
 - `tests/tools/test_watch_matrix.py`（8 例）：`watch_matrix.snapshot` 统计行/成功/失败/`(P,tier,round)` 分格，坏 JSON 行跳过不崩；目录不存在时 `rows=0`、`last_event_age_s=None`，渲染不抛异常；只有 CSV 没有 `repro_manifest.json` 时不判完成（回归：矩阵先写 CSV 再写 manifest）；脏字段不崩；`decide` 在超阈值/未超/年龄未知时不误报、只有 report 才退出。
 - `tests/unit/gguf_test.cc` 增 3 例：`q8_0` 按 1.0625 B/值、`f32` 按 4 B/值；容量档位只读声明字段并推出 262144 B/token；缺字段/坏 JSON 必须失败。
@@ -192,6 +192,8 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 - `tests/tools/test_peak_sampler.py`、`tests/tools/test_bench_*`：采样与 SSE 解析口径。
 - `tests/integration/test_server_matrix.py`：真 stub 服务跑 2 并发 × 2 档 × 1 轮；校验 CSV 列（从 `REPORT_FIELDS` 单一真源导入）、warmup 丢弃、manifest 哈希、RSS 峰值、`vram_peak_scope=unknown`、显存分项键、`.prom` 快照、`step_summary.csv`，并回调 `aggregate.py --check-metrics --check-deviation`。
 - `tests/integration/test_server_mixed.py`（4-G6）：长短 1:1 同轮，CSV 分组行各 3 条、长请求全部完成。
+- `tests/integration/test_server_queue_capacity.py`（P1 修复）：C=1 / Q=16 / 20 并发，至少 17×200 且至少 1×429（并行负载下不锁"恰好"，但"0 条 429"必失败）；每个 429 带 `Retry-After: 1`、`QUEUE_FULL` 且 message 含深度/容量 `/17`，`queue_full` 与准入拒绝计数等于 429 数。回归"线程数只给并发+3，队列容量 >3 时永远触发不到 429"。第二段 C=1 / Q=1 / 20 并发：handler 5 个 + 1 条正常等待之后，shed 位返回 503 `SERVICE_UNAVAILABLE`（带 `Retry-After: 1`），再超出 hard cap（线程 + 2×队列）的连接被传输层关闭，同时容量内仍有 429，事后 `/healthz` 仍 200；回归"超额请求堆在无界 job 队列里、只关连接不回 503"。同名 ctest 用例，不新增注册数。
+- `tests/integration/test_server_batch_policy.py`（P1 修复）：同一混长负载下两条长、一条短，static 的第三条长请求首帧约 4.2 s、continuous 约 1.4 s；锁"完成即补位"可被黑盒区分，也保证 `--batch-policy` 真的落到调度器。
 - `tests/integration/test_server_slow_client.py`（4-G0-2）：慢读客户端 + 快请求并发，`backpressure.csv` 记录快侧 ITL p99 与溢出计数。
 
 CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规模 4,500–25,000 行、范围无分布式/CUDA/训练/PD、测试全登记；`scripts/ci/check_code.py` 每次代码闸门自动调用三者。

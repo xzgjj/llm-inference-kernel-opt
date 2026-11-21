@@ -24,6 +24,7 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
               [--host 127.0.0.1] [--port 8080] \
               [--ctx-tokens 2048] [--max-concurrency 8] \
               [--max-num-batched-tokens 2048] [--queue-capacity 32] \
+              [--batch-policy continuous|static] \
               [--block-size 16] [--watermark-ratio 0.05] [--disable-prefix-cache] \
               [--chunk-size 128] \
               [--mode off|auto|force_on] [--safety-ratio 0.80] [--allow-force-on] \
@@ -47,7 +48,8 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 | `--ctx-tokens` | `LLMOPT_CTX_TOKENS` | `2048` | 128–131072 | 同时决定 KV 估算与上下文拒绝阈值 |
 | `--max-concurrency` | `LLMOPT_MAX_CONCURRENCY` | `8` | 1–64 | 连续批调度的运行序列上限，超出的请求进 waiting 队列 |
 | `--max-num-batched-tokens` | `LLMOPT_MAX_NUM_BATCHED_TOKENS` | `2048` | 1–8192，且 ≥ `max-concurrency` | 单步调度 token 预算；chunked prefill 后允许小于 `ctx-tokens`，长 prompt 按 chunk 推进 |
-| `--queue-capacity` | `LLMOPT_QUEUE_CAPACITY` | `32` | 1–1024 | waiting 队列上限，满即 429 |
+| `--queue-capacity` | `LLMOPT_QUEUE_CAPACITY` | `32` | 1–1024，且 `max-concurrency + queue-capacity + 3 ≤ 256` | waiting 队列上限；满即 429 `QUEUE_FULL`。上限与数据面线程预算绑定，避免"队列容量写了但永远触发不到" |
+| `--batch-policy` | `LLMOPT_BATCH_POLICY` | `continuous` | `continuous` / `static` | 批次策略。`continuous`=完成即补位（生产默认）；`static`=整批跑空才准入下一批，只用于隔离"槽位复用"收益的对照实验，生产环境不要设置 |
 | `--block-size` | `LLMOPT_BLOCK_SIZE` | `16` | 4–128 | KV 逻辑块 token 数，同时决定前缀命中粒度 |
 | `--watermark-ratio` | `LLMOPT_WATERMARK_RATIO` | `0.05` | 0–0.2 | 准入预留的空闲块比例，按块池总量折算 |
 | `--chunk-size` | `LLMOPT_CHUNK_SIZE` | `128` | 仅 `32`/`64`/`128`/`256` | chunked prefill 的单步宽度；末块才采样，中间块只推进 KV |
@@ -80,7 +82,7 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 
 阶段 3 起支持 chunked prefill，`ctx-tokens` 不再受单步预算限制；`chunk-size` 取四档，其他值启动即拒绝。调度顺序固定为：在跑 decode 保位 → 在跑 prefill 的下一 chunk → 预算内补新请求，合计 token 不超过 `max-num-batched-tokens`。
 
-并发口径：数据面 HTTP 线程池大小 = `max-concurrency + 3`；控制端点仍保留在数据面端口以兼容旧探针。配置 `--control-port>0` 后，额外起一个只绑 `127.0.0.1` 的控制面 listener，使用独立的 4 线程池，只提供 `/healthz`、`/readyz`、`/metrics`，数据面长流占满时不会饿死探针。一个连接由 cpp-httplib 串行处理，单连接并发恒为 1。入口准入预算为 `max-concurrency + queue-capacity`，超出的请求不占 handler。
+并发口径：数据面 HTTP 线程池大小 = `max-concurrency + queue-capacity + 3`。每个 running / waiting 请求都会一直占住一个 handler 线程直到整条响应回写完（SSE 也是同一线程），所以线程数必须覆盖准入预算 `max-concurrency + queue-capacity`；否则超出部分会卡在 accept 层，`QUEUE_FULL` 永远不会发出。额外 3 个线程留给 `healthz` / `readyz` / `metrics`，避免探针排在长请求后面。线程池的任务队列分两段：前 `queue-capacity` 条正常等待，随后 `queue-capacity` 条进入 shed 位，由 pre-routing 直接回 **503 `SERVICE_UNAVAILABLE` + `Retry-After: 1`**（不读业务 body、不占调度预算，`/healthz`、`/readyz`、`/metrics` 仍放行）；再超出“线程 + 2×队列”的极端连接才由 cpp-httplib 直接关闭，作为防止无界 backlog 的最后一道内存保护。调度准入仍保留 **429 `QUEUE_FULL`**：429 表示“排队位也满了”，503 表示“连接连排队位都没进”。控制端点仍保留在数据面端口以兼容旧探针；配置 `--control-port>0` 后，额外起一个只绑 `127.0.0.1` 的控制面 listener，使用独立的 4 线程池，只提供 `/healthz`、`/readyz`、`/metrics`，数据面长流占满时不会饿死探针。一个连接由 cpp-httplib 串行处理，单连接并发恒为 1。
 
 优先级固定：**CLI > `LLMOPT_*` > `--config` 文件 > 内置默认**。启动第一行打印生效配置，随后逐行打印 `config source: <键>=cli|env|file|default`，第三行打印预算与门控结论，便于复核。
 
@@ -313,6 +315,20 @@ $env:LLMOPT_ALLOW_STUB="1"
   --port 18080 --ctx-tokens 512 --mode off --log-level warn
 ```
 
+批次策略对照（只用于实验，生产保持默认 `continuous`）：
+
+```bash
+# 静态批基线：整批跑空才准入下一批，用来隔离"完成即补位"这一项收益
+./build-wsl/llmopt_server --model /root/models/qwen2.5-0.5b-q4.gguf \
+  --max-concurrency 4 --queue-capacity 8 --batch-policy static --port 18080
+
+# 连续批（默认）
+./build-wsl/llmopt_server --model /root/models/qwen2.5-0.5b-q4.gguf \
+  --max-concurrency 4 --queue-capacity 8 --batch-policy continuous --port 18081
+```
+
+`static` 与 `continuous` 的吞吐差异只在混长负载下显现；等长输出时两者应基本一致。
+
 流式调用：
 
 ```bash
@@ -399,6 +415,7 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 12. **已冻结（阶段 8 证据口径）**：`matrix_report.csv` 新增 `tok_accounting`，`total_tok_s` 的 prompt 部分必须用 `llmopt_prefill_tokens_total + llmopt_prefix_hit_tokens_total`，不得用字符数估算。
 13. **已冻结（阶段 12 S0）**：`--threads` 允许 0（=自动）到 256；`--n-gpu-layers` 必须 ≥0，负数报用法错误（退出码 2），"全层卸载"要显式填层数；`--config` 文件上限 16 MiB；`donor-slots`、`kv-cache-type` 两个 JSON 键生效。
 14. **阶段 12 S4 约定**：key 文件同一 `id` 允许多条 `sha256`（轮换期并存），配额必须一致，重复摘要拒绝加载；POSIX 下 SIGHUP 触发原子热加载，失败保留旧表并累加 `llmopt_api_keys_reload_failed_total`；Windows 无 SIGHUP，用 `--api-keys-reload-seconds <n>` 轮询（0=关闭）。token 日配额本阶段不做。
+15. **P1 修复约定（2026-11-22）**：`--batch-policy` 默认 `continuous`，`static` 仅供对照实验；数据面线程预算 `max-concurrency + queue-capacity + 3 ≤ 256` 启动即校验，超出报用法错误（退出码 2），保证 `QUEUE_FULL` 在入口可达。
 
 
 

@@ -56,14 +56,38 @@ def build_prompt_set(
     tiers: list[TierSpec],
     token_count: Callable[[str], int],
     reuse_each: int = 64,
+    shared_prefix_tokens: int = 0,
 ) -> list[dict]:
-    """按 tier 生成 prompt；每句累加后不超过 max_prompt_tokens。"""
+    """按 tier 生成 prompt；每句累加后不超过 max_prompt_tokens。
+
+    shared_prefix_tokens > 0 时，每条 prompt 共享同一段前缀（按档位上限预留最多 8 token
+    的独有尾巴），用于测量前缀缓存的净收益；0 保持历史口径（全部唯一文本）。
+    """
     rng = random.Random(seed)
     ordered = _sentence_sequence(rng)
     rows: list[dict] = []
     cursor = 0
     for tier in tiers:
+        prefix = ""
+        if shared_prefix_tokens > 0 and tier.max_prompt_tokens > 8:
+            prefix_cap = min(shared_prefix_tokens, tier.max_prompt_tokens - 8)
+            prefix = _build_prefix(ordered, prefix_cap, token_count)
         for index in range(tier.n):
+            if prefix:
+                # 共享前缀 + 每条唯一的短尾巴：前缀缓存能命中，样本又不是同一句。
+                sentence = f"样本{index:03d}。" + ordered[cursor % len(ordered)]
+                cursor += 1
+                text = prefix + _unique_tail(sentence, prefix, tier.max_prompt_tokens, token_count)
+                rows.append(
+                    {
+                        "prompt_id": f"{tier.name}-{index:03d}",
+                        "tier": tier.name,
+                        "text": text,
+                        "max_prompt_tokens": tier.max_prompt_tokens,
+                        "shared_prefix": True,
+                    }
+                )
+                continue
             parts: list[str] = []
             while True:
                 sentence = ordered[cursor % len(ordered)]
@@ -84,9 +108,35 @@ def build_prompt_set(
                     "tier": tier.name,
                     "text": "".join(parts),
                     "max_prompt_tokens": tier.max_prompt_tokens,
+                    "shared_prefix": False,
                 }
             )
     return rows
+
+
+def _build_prefix(ordered: list[str], cap: int, token_count: Callable[[str], int]) -> str:
+    """按固定顺序拼一段不超过 cap 的前缀；所有请求复用同一段文本。"""
+    parts: list[str] = []
+    for sentence in ordered:
+        candidate = "".join(parts) + sentence
+        if parts and token_count(candidate) > cap:
+            break
+        parts.append(sentence)
+        if token_count("".join(parts)) > cap:
+            break
+    text = "".join(parts)
+    while text and token_count(text) > cap:
+        text = text[:-1]
+    return text
+
+
+def _unique_tail(sentence: str, prefix: str, max_tokens: int,
+                 token_count: Callable[[str], int]) -> str:
+    """截出一段能塞进剩余预算的唯一尾巴；保证 prefix+tail 不超上限。"""
+    text = sentence
+    while text and token_count(prefix + text) > max_tokens:
+        text = text[:-1]
+    return text
 
 
 def prompt_set_hash(rows: list[dict]) -> str:

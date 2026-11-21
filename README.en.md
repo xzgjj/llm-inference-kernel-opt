@@ -25,7 +25,7 @@ Stages 0–11 are landed (stage 10 = real-backend nightly reliability, stage 11 
 
 Each item states the problem first, then the mechanism, then the measured number or boundary.
 
-1. **Continuous batching (pack requests together)** — fixes "one request at a time while the GPU waits". Requests are packed token-wise into one batch under the `max-num-batched-tokens` budget; overflow waits in a queue, and a full queue returns 429. Measured (8B fully resident): 77.1 tok/s at P1 vs 80.7 tok/s at P8 — **only 5% faster** — while ITL p99 rises from 23.3 ms to 171.3 ms. So "batching always raises throughput" does not hold on this machine: the limit is a single execution thread plus memory bandwidth, and the control plane itself uses 0.01–0.02% CPU.
+1. **Continuous batching (pack requests together)** — fixes "one request at a time while the GPU waits". Requests are packed token-wise into one batch under the `max-num-batched-tokens` budget; overflow waits in a queue, and a full queue returns 429. Measured (8B fully resident, uniform short decodes, single execution thread): 77.1 tok/s at P1 vs 80.7 tok/s at P8 — **only 5% faster** — while ITL p99 rises from 23.3 ms to 171.3 ms. So "batching always raises throughput" does not hold on this machine for this workload shape: the limit is a single execution thread plus memory bandwidth, and the control plane itself uses 0.01–0.02% CPU. Uniform lengths remove the "short request finishes, slot refills" effect; mixed-length, static-batch and prefix-toggle matrices are configured but not yet run — see the scope note in section 8.
 
 2. **Block-table KV management (paging for VRAM)** — fixes "KV grows without bound and does not get freed cleanly". KV is cut into fixed 16-token blocks with reference counts and copy-on-write; the block table alone decides allocation, and the backend merely consumes the addresses it is given. Measured: after a 30-minute soak, drain leaves `used=cached=0` and block-table reconciliation differences are 0.
 
@@ -132,7 +132,8 @@ Every service flag has an environment-variable counterpart. Precedence is **CLI 
 | `LLMOPT_CTX_TOKENS` | `2048` | Context limit, also used for KV estimation and overflow rejection |
 | `LLMOPT_MAX_CONCURRENCY` | `8` | Maximum concurrently running sequences; extra requests wait in the queue |
 | `LLMOPT_MAX_NUM_BATCHED_TOKENS` | `2048` | Per-step token budget; may be below `ctx-tokens` thanks to chunked prefill |
-| `LLMOPT_QUEUE_CAPACITY` | `32` | Waiting-queue limit; full returns 429 `QUEUE_FULL` |
+| `LLMOPT_QUEUE_CAPACITY` | `32` | Waiting-queue limit; full returns 429 `QUEUE_FULL`. Data-plane thread budget requires `max-concurrency + queue-capacity + 3 ≤ 256` |
+| `LLMOPT_BATCH_POLICY` | `continuous` | `continuous` refills a slot as soon as a sequence finishes; `static` waits for the whole batch to drain (benchmark baseline only) |
 | `LLMOPT_BLOCK_SIZE` | `16` | Tokens per logical KV block, also the prefix-match granularity |
 | `LLMOPT_CHUNK_SIZE` | `128` | Chunked-prefill step width; only 32 / 64 / 128 / 256 |
 | `LLMOPT_MODE` / `LLMOPT_SAFETY_RATIO` | `off` / `0.80` | Capacity-gating mode and soft budget ratio (0.80–0.95) |
@@ -200,6 +201,7 @@ Errors always take the shape `{"error":{"code":"QUEUE_FULL","message":"...","ret
 | Case | HTTP | code |
 | --- | --- | --- |
 | Queue full | 429 | `QUEUE_FULL` |
+| Transport backlog full | 503 | `SERVICE_UNAVAILABLE` |
 | Rate limited | 429 | `RATE_LIMITED` |
 | KV below watermark | 429 | `KV_BELOW_WATERMARK` |
 | Context overflow | 400 | `CONTEXT_OVERFLOW` |
@@ -245,6 +247,8 @@ Official 8B matrix (stage-12 S3 re-baseline: WSL Ubuntu 26.04, RTX 4060 Laptop 8
 | 8 | 320.6 | 171.3 | 80.7 | 1.05× | 0.0001 |
 
 **Verdict: with full residency the throughput gain of continuous batching is disproved** (P8/P1 = 1.05× vs the 1.3× criterion), at the cost of a 7.4× ITL p99 blow-up. Attribution: single execution thread (no step overlap) plus GPU memory bandwidth ceiling — scheduler step p50 is 4–8 µs and `sched_cpu_ratio` stays at 0.01–0.02%, so the control plane is not the bottleneck; 77–81 tok/s is close to this card's effective bandwidth. Throughput plateaus at P=4; beyond that, only queueing and tail latency grow. The older table (`ngl 24`, 13/37 layers on CPU, 1.61× at P=4) reflected a CPU-offload ceiling and is **void**; it is kept only as history. Evidence, per-tier VRAM breakdown and reproduction: `evidence/phase12/perf/README.md`.
+
+**Scope of this verdict**: the workload is uniform 32-token decodes, one prompt tier, P=1/2/4/8, with no static-batch baseline. It shows that raising concurrency from 1 to 8 no longer buys throughput and only costs tail latency; it does **not** show that continuous batching has no value — uniform lengths erase slot reuse, and without a static-batch baseline the 1.05× cannot be attributed specifically to refill. Mixed-length, static vs continuous, and prefix-cache on/off matrices are configured under `scripts/bench/matrix/phase12_s3_*.json`; do not cite a broader conclusion until they have been run.
 
 Limitations, stated plainly:
 

@@ -45,6 +45,9 @@ struct SchedulerConfig {
     std::string step_trace_path{};
     // 单步 Completion 回投超时；<=0 关闭。超时只把请求判失败，不强杀执行线程。
     std::int64_t completion_timeout_ns = 30'000'000'000LL;
+    // 批次策略：true=连续批（有空位立刻补，阶段 3 起默认）；false=静态批对照（一批跑空
+    // 才准入下一批，用于隔离"槽位复用"这一项收益，只应出现在对照实验里）。
+    bool continuous_batching = true;
 };
 
 // Chunked prefill 切块结果：n_tokens 为本步可算 token 数，is_last 标记末块需采样。

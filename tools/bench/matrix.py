@@ -106,6 +106,12 @@ class MatrixConfig:
     donor_slots: int = 4
     disable_prefix_cache: bool = False
     chunk_size: int = 128
+    # 混长负载：每行按顺序取一个输出长度；空列表表示所有请求用 max_tokens。
+    output_lengths: list[int] = field(default_factory=list)
+    # continuous=完成即补位；static=整批跑空才准入（只用于批次策略对照）。
+    batch_policy: str = "continuous"
+    # >0 时所有 prompt 共享同一段前缀，用于前缀缓存开/关的净收益对照。
+    shared_prefix_tokens: int = 0
     raw: dict[str, Any] = field(default_factory=dict)
 
     def config_hash(self) -> str:
@@ -136,6 +142,15 @@ def load_config(path: Path, overrides: dict[str, Any] | None = None) -> MatrixCo
     concurrency = [int(value) for value in _require(data, "concurrency")]
     if not concurrency or any(value < 1 for value in concurrency):
         raise SystemExit("concurrency 必须是正整数列表")
+    output_lengths = [int(value) for value in data.get("output_lengths", [])]
+    if output_lengths and any(value < 1 or value > 4096 for value in output_lengths):
+        raise SystemExit("output_lengths 必须在 1..4096")
+    batch_policy = str(data.get("batch_policy", "continuous"))
+    if batch_policy not in ("continuous", "static"):
+        raise SystemExit("batch_policy 只接受 continuous 或 static")
+    shared_prefix_tokens = int(data.get("shared_prefix_tokens", 0))
+    if shared_prefix_tokens < 0 or shared_prefix_tokens > 4096:
+        raise SystemExit("shared_prefix_tokens 必须在 0..4096")
     return MatrixConfig(
         server=Path(str(_require(data, "server"))),
         model=Path(str(_require(data, "model"))),
@@ -160,6 +175,9 @@ def load_config(path: Path, overrides: dict[str, Any] | None = None) -> MatrixCo
         donor_slots=int(data.get("donor_slots", 4)),
         disable_prefix_cache=bool(data.get("disable_prefix_cache", False)),
         chunk_size=int(data.get("chunk_size", 128)),
+        output_lengths=output_lengths,
+        batch_policy=batch_policy,
+        shared_prefix_tokens=shared_prefix_tokens,
         raw=data,
     )
 
@@ -168,10 +186,15 @@ def build_prompts(cfg: MatrixConfig) -> list[dict]:
     """token 计数用字符估算桩：只决定档位长度，不参与延迟统计。"""
     rows = prompts.build_prompt_set(
         cfg.seed, [Tier(tier.name, tier.max_prompt_tokens, tier.n) for tier in cfg.tiers],
-        prompts.char_token_count,
+        prompts.char_token_count, shared_prefix_tokens=cfg.shared_prefix_tokens,
     )
     for row in rows:
         row["n_prompt"] = prompts.char_token_count(row["text"])
+    for index, row in enumerate(rows):
+        if cfg.output_lengths:
+            row["max_tokens"] = cfg.output_lengths[index % len(cfg.output_lengths)]
+        else:
+            row["max_tokens"] = cfg.max_tokens
     return rows
 
 
@@ -193,6 +216,8 @@ def server_argv(cfg: MatrixConfig, concurrency: int, port: int,
         "--ctx-tokens", str(cfg.ctx_tokens),
         "--max-concurrency", str(concurrency),
         "--queue-capacity", str(cfg.queue_capacity),
+        # 始终显式写策略：manifest 不能靠"省略即默认"掩盖 static 对照。
+        "--batch-policy", cfg.batch_policy,
         "--max-num-batched-tokens", str(cfg.max_num_batched_tokens),
         "--chunk-size", str(cfg.chunk_size),
     ]
@@ -327,13 +352,14 @@ def _timeout_record(cfg: MatrixConfig, concurrency: int, row: dict, round_no: in
 
 
 def _run_batch(cfg: MatrixConfig, port: int, concurrency: int, rows: list[dict], round_no: int,
-               dropped: bool, max_tokens: int) -> list[dict]:
+               dropped: bool, max_tokens: int | None = None) -> list[dict]:
     workers = max(1, min(concurrency, len(rows)))
     # 单请求超时同时受档预算约束，避免一档拖过墙钟上限。
     request_timeout = min(cfg.request_timeout_s, cfg.tier_timeout_ms / 1000.0)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(run_one, cfg, port, concurrency, row, round_no, dropped, max_tokens,
+            executor.submit(run_one, cfg, port, concurrency, row, round_no, dropped,
+                            max_tokens if max_tokens is not None else int(row["max_tokens"]),
                             request_timeout): row
             for row in rows
         }
@@ -726,13 +752,11 @@ def _run_round(cfg: MatrixConfig, port: int, concurrency: int, prompt_rows: list
         long = [row for row in prompt_rows if row["tier"] == cfg.tiers[-1].name]
         count = min(len(short), len(long))
         batch = short[:count] + long[:count]
-        write_jsonl(out_path, _run_batch(cfg, port, concurrency, batch, round_no, False,
-                                        cfg.max_tokens))
+        write_jsonl(out_path, _run_batch(cfg, port, concurrency, batch, round_no, False))
         return
     for tier in cfg.tiers:
         pool = [dict(row) for row in prompt_rows if row["tier"] == tier.name]
-        write_jsonl(out_path, _run_batch(cfg, port, concurrency, pool, round_no, False,
-                                        cfg.max_tokens))
+        write_jsonl(out_path, _run_batch(cfg, port, concurrency, pool, round_no, False))
 
 
 def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
@@ -828,6 +852,9 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
         "rounds": cfg.repeats,
         "concurrency": cfg.concurrency,
         "tiers": [tier.__dict__ for tier in cfg.tiers],
+        "output_lengths": cfg.output_lengths,
+        "batch_policy": cfg.batch_policy,
+        "shared_prefix_tokens": cfg.shared_prefix_tokens,
         "prompt_set_hash": prompts.prompt_set_hash(prompt_rows),
         "thresholds": {"ttft_itl": TTFT_ITL_LIMIT, "throughput": THROUGHPUT_LIMIT},
         "argv": server_argv(cfg, cfg.concurrency[0], 0),

@@ -2,6 +2,8 @@
 
 **结论：在本机 A 档配置下，continuous batching 的吞吐收益被证伪（P8/P1 = 1.05×，判据要求 ≥1.3×），代价是 ITL p99 放大 7.4×。瓶颈不在控制面，而在"单执行线程 + GPU 显存带宽"这一后端上限。**
 
+**这条结论只覆盖：** 等长 32-token 短解码、单档 prompt、P=1/2/4/8、全驻留、单执行线程。它证明"并发从 1 拉到 8 不再涨吞吐"，不能推出"continuous batching 本身没有收益"——等长输出抹掉了"短请求先完成、槽位立刻复用"这一项，且没有静态批基线，1.05× 无法精确归因到补位机制。
+
 ## 配置
 
 | 项 | 值 |
@@ -11,7 +13,7 @@
 | 层分布 | `ngl=37`，37/37 层在 `CUDA0`；`token_embd` 留 CPU_Host（llama.cpp 限制） |
 | KV | `q8_0`；ctx 1024；`max-num-batched-tokens` 1024 |
 | 采样 | temperature 0、top_k 1 |
-| 负载 | 短档 prompt ≤64 token，`max_tokens=32`，每档 30 请求 × **5 轮**，warmup 3 |
+| 负载 | 短档 prompt ≤64 token，**等长** `max_tokens=32`，每档 30 请求 × **5 轮**，warmup 3 |
 | 并发 | P = 1 / 2 / 4 / 8 |
 | 显存 | model 3672 MiB + KV 382→918 MiB + compute 330 MiB（P8 峰值 4920 MiB buffers，设备 7242 MiB） |
 
@@ -53,3 +55,26 @@ python3 scripts/bench/matrix_runner.py \
 ## 已知噪声
 
 P2 吞吐低于 P1（轮间偏差 5.5%）、P4/P8 的 TTFT/ITL 轮间偏差 12–15%，说明单机 5 轮仍不足以压到 10% 以内。结论只做同环境相对比较：**吞吐平台 ≈80 tok/s 是稳定的，P2 的单点低于 P1 视为噪声，不作为结论**。
+
+## 下一组对照（配置已就绪，尚未执行）
+
+三组消融分别隔离一个变量，全部 5 轮、同机同模型：
+
+| 配置 | 隔离的变量 | 判据 |
+|---|---|---|
+| `phase12_s3_mixed.json` | 输出长度 [8,16,32,64,128,256] 循环，`continuous` | 混长下 P8/P1 是否越过 1.3× |
+| `phase12_s3_static.json` | 同负载、`batch_policy=static` | continuous 相对 static 的吞吐差，即"补位"净收益 |
+| `phase12_s3_prefix_on.json` / `phase12_s3_prefix_off.json` | 384-token 共享前缀，前缀缓存开/关 | P1 与 P8 下 TTFT / prefill token 的差 |
+
+```bash
+python3 scripts/bench/matrix_runner.py --config scripts/bench/matrix/phase12_s3_mixed.json \
+  --out evidence/phase12/perf-mixed --run-id s3-mixed
+python3 scripts/bench/matrix_runner.py --config scripts/bench/matrix/phase12_s3_static.json \
+  --out evidence/phase12/perf-static --run-id s3-static
+python3 scripts/bench/matrix_runner.py --config scripts/bench/matrix/phase12_s3_prefix_on.json \
+  --out evidence/phase12/perf-prefix-on --run-id s3-prefix-on
+python3 scripts/bench/matrix_runner.py --config scripts/bench/matrix/phase12_s3_prefix_off.json \
+  --out evidence/phase12/perf-prefix-off --run-id s3-prefix-off
+```
+
+在四组产物落盘之前，对外只能引用"等长短解码 + 全驻留"这一条边界内的结论。

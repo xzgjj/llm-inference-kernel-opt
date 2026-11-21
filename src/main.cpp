@@ -115,8 +115,9 @@ void print_config(const ServerConfig& cfg) {
     std::cout << "config: model=" << cfg.model_path << " host=" << cfg.host << " port=" << cfg.port
               << " ctx=" << cfg.ctx_tokens << " max_concurrency=" << cfg.max_concurrency
               << " batch_tokens=" << cfg.max_num_batched_tokens << " queue=" << cfg.queue_capacity
-              << " block=" << cfg.block_tokens << " chunk=" << cfg.chunk_size
-              << " aging=" << (cfg.fairness_aging ? 1 : 0) << " aging_ms=" << cfg.aging_threshold_ms
+              << " batch_policy=" << cfg.batch_policy << " block=" << cfg.block_tokens
+              << " chunk=" << cfg.chunk_size << " aging=" << (cfg.fairness_aging ? 1 : 0)
+              << " aging_ms=" << cfg.aging_threshold_ms
               << " preempt_cap=" << cfg.max_consecutive_preemptions
               << " watermark=" << cfg.watermark_ratio
               << " prefix_cache=" << (cfg.enable_prefix_cache ? 1 : 0)

@@ -40,6 +40,8 @@ struct ServerConfig {
     std::string preempt_trace_path;
     std::string step_trace_path; // 步级 JSONL；p99 只离线复算，不在线聚合
     std::int32_t queue_capacity = 32;
+    // continuous=完成即补位（默认）；static=整批跑空才准入，只用于批次策略对照实验。
+    std::string batch_policy = "continuous";
     std::int32_t block_tokens = 16;
     double watermark_ratio = 0.05;
     bool enable_prefix_cache = true;
