@@ -705,7 +705,7 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
         std::vector<CliArg> args;
         const ErrCode argv_code = parse_argv(argc, argv, args, message);
         if (argv_code != ErrCode::Ok) {
-            return argv_code;
+            return ErrCode::ConfigInvalid;
         }
         // 文件层先于 env：CLI 的 --config 决定读哪个文件；未给时接受 LLMOPT_CONFIG。
         std::string path = cli_config_path(args);
@@ -718,18 +718,18 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
         if (!path.empty()) {
             if (const ErrCode file_code = load_config_file(path, out, sources, message);
                 file_code != ErrCode::Ok) {
-                return file_code;
+                return ErrCode::ConfigInvalid;
             }
         }
         if (const ErrCode env_code = load_env(out, sources, message); env_code != ErrCode::Ok) {
-            return env_code;
+            return ErrCode::ConfigInvalid;
         }
         for (const CliArg& arg : args) {
             const ErrCode code = apply_arg(out, arg.key, arg.value);
             if (code != ErrCode::Ok) {
                 message = code == ErrCode::NotSupported ? "未知参数 " + arg.key
                                                         : "参数取值非法 " + arg.key;
-                return code;
+                return ErrCode::ConfigInvalid;
             }
             std::string canonical = canonical_config_key(arg.key);
             if (!canonical.empty()) {
@@ -738,10 +738,10 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
             }
         }
         const ErrCode validated = validate_config(out, message);
-        return validated;
+        return validated == ErrCode::Ok ? ErrCode::Ok : ErrCode::ConfigInvalid;
     } catch (const std::exception& exc) {
         message = std::string("配置解析异常: ") + exc.what();
-        return ErrCode::InvalidJson;
+        return ErrCode::ConfigInvalid;
     }
 }
 

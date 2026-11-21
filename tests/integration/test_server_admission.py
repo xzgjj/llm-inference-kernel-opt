@@ -31,8 +31,8 @@ def main() -> int:
                 server, model,
                 ["--ctx-tokens", "512", "--max-concurrency", "1", "--queue-capacity", "2",
                  "--chunk-size", "32", "--max-num-batched-tokens", "32", "--log-level", "warn"],
-                {"LLMOPT_TEST_STUB_DELAY_MS": "100"}) as port:
-            # 每步 100ms、16 token，验收请求占用槽位约 1.6s；给 8 个线程的连接建立留出
+                {"LLMOPT_TEST_STUB_DELAY_MS": "300"}) as port:
+            # 每步 300ms、8 token，验收请求占用槽位约 2.4s；给 8 个线程的连接建立留出
             # 足够窗口，避免并行跑 ctest 时“先到的已完成、后到的被放行”造成假失败。
             start = threading.Barrier(REQUEST_COUNT)
             results: list[tuple[int, bytes, dict]] = []
@@ -43,7 +43,7 @@ def main() -> int:
                 try:
                     outcome = kit.post(port, "/completion",
                                        {"prompt": f"admission-{index}", "stream": True,
-                                        "max_tokens": 16, "seed": index})
+                                        "max_tokens": 8, "seed": index})
                 except OSError as exc:  # 连接层失败同样是拒绝/错误，按原样记录
                     outcome = (0, str(exc).encode(), {})
                 with lock:

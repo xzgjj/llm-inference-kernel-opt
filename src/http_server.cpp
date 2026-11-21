@@ -132,21 +132,20 @@ std::string drain_sink(const std::shared_ptr<ResponseSink>& sink, const Inferenc
     return text;
 }
 
-// 流式 provider：按需取帧、逐帧写；sink 关闭后补 [DONE] 并显式结束 chunked 流。
+// 流式 provider：按需取帧、逐帧写；StopFilter 必须跨 provider 回调存活。
 bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequest& req,
                      const std::shared_ptr<ResponseSink>& sink, const std::shared_ptr<bool>& done,
-                     httplib::DataSink& data_sink) {
+                     const std::shared_ptr<StopFilter>& filter, httplib::DataSink& data_sink) {
     if (*done) {
         return false;
     }
-    StopFilter filter(req.stop);
     Delta delta;
     for (int index = 0; index < 32 && sink->pop_frame(delta, 20); ++index) {
         bool hit = false;
         Delta out = delta;
-        out.text = filter.feed(delta.text, &hit);
+        out.text = filter->feed(delta.text, &hit);
         if (delta.finish) {
-            out.text += filter.flush();
+            out.text += filter->flush();
         }
         if (hit) {
             out.finish = FinishReason::Stopped;
@@ -160,6 +159,10 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
         }
         if (hit || out.error) {
             if (hit) {
+                ctx->core->cancel(req.req_id);
+            }
+            // stop/错误同样是终止事件：先写 finish/error 帧，再补 [DONE]，不静默断流。
+            if (!write_frame(data_sink, render_done_frame())) {
                 ctx->core->cancel(req.req_id);
             }
             data_sink.done();
@@ -196,6 +199,9 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
     }
     if (!forced_id.empty()) {
         req.req_id = forced_id;
+    }
+    if (const ErrCode id_code = validate_request_id(req.req_id, message); id_code != ErrCode::Ok) {
+        return make_error(id_code, message);
     }
     if (chat) {
         code = ctx.runner->render_chat(req.messages, req.prompt);
@@ -240,6 +246,9 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
             return make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
                               "cap=" + std::to_string(ctx.core->admission_capacity()));
         }
+        if (code == ErrCode::InvalidJson) {
+            return make_error(ErrCode::InvalidJson, "id 已被活跃请求占用，请使用新的 id");
+        }
         return make_error(code, code == ErrCode::ResourceInsufficient ? "服务资源不足，请稍后重试"
                                                                       : "请求无法入队");
     }
@@ -260,10 +269,11 @@ void start_stream(const std::shared_ptr<AppContext>& ctx, const InferenceRequest
     response.set_header("Cache-Control", "no-cache");
     response.set_header("X-Accel-Buffering", "no");
     auto done = std::make_shared<bool>(false);
+    auto filter = std::make_shared<StopFilter>(req.stop);
     response.set_chunked_content_provider(
             "text/event-stream",
-            [ctx, req, sink, done](size_t, httplib::DataSink& data_sink) {
-                return stream_provider(ctx, req, sink, done, data_sink);
+            [ctx, req, sink, done, filter](size_t, httplib::DataSink& data_sink) {
+                return stream_provider(ctx, req, sink, done, filter, data_sink);
             },
             [ctx, req](bool success) {
                 if (!success) {

@@ -281,6 +281,7 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         metrics_.inc(MetricId::RequestsQueueFull);
         return ErrCode::QueueFull;
     }
+    bool id_reserved = false;
     try {
         auto group = std::make_shared<SequenceGroup>();
         group->req_id = req.req_id;
@@ -295,9 +296,18 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         group->seq.sampling = group->sampling;
         group->enqueued_ns = now_ns();
         group->last_progress_ns = group->enqueued_ns;
+        if (!reserve_request_id(group->req_id)) {
+            release_admission();
+            metrics_.inc(MetricId::RequestsError);
+            return ErrCode::InvalidJson;
+        }
+        id_reserved = true;
         Event event = make_event(EventKind::AddRequest, group->req_id);
         event.group = std::move(group);
         if (!mailbox_.push(std::move(event))) {
+            // event 已 move 走，无法再取 group；按入队前保存的 id 释放。
+            release_request_id(req.req_id);
+            id_reserved = false;
             release_admission();
             metrics_.inc(MetricId::AdmissionQueue);
             metrics_.inc(MetricId::RequestsQueueFull);
@@ -305,11 +315,18 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         }
         return ErrCode::Ok;
     } catch (const std::bad_alloc&) {
+        // 只有真正插进集合后才回滚；异常可能发生在 reserve 之前。
+        if (id_reserved) {
+            release_request_id(req.req_id);
+        }
         release_admission();
         metrics_.inc(MetricId::RequestsError);
         logger()->error("submit 内存分配失败");
         return ErrCode::ResourceInsufficient;
     } catch (const std::exception& exc) {
+        if (id_reserved) {
+            release_request_id(req.req_id);
+        }
         release_admission();
         metrics_.inc(MetricId::RequestsError);
         logger()->error("submit 异常: {}", exc.what());
@@ -355,6 +372,19 @@ bool SchedulerCore::try_reserve_admission() noexcept {
 
 void SchedulerCore::release_admission() noexcept {
     inflight_admissions_.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+bool SchedulerCore::reserve_request_id(const RequestId& req_id) {
+    if (req_id.empty()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(active_ids_mutex_);
+    return active_ids_.insert(req_id).second;
+}
+
+void SchedulerCore::release_request_id(const RequestId& req_id) {
+    std::lock_guard<std::mutex> lock(active_ids_mutex_);
+    active_ids_.erase(req_id);
 }
 
 // handle 的兜底拒绝单独成函数，避免单函数超出行数闸门（CI-COD-003）。
@@ -745,9 +775,14 @@ bool SchedulerCore::acquire_blocks(const std::shared_ptr<SequenceGroup>& group,
                           "tokens=" + std::to_string(total_tokens) +
                                   " capacity=" + std::to_string(kv_.block_capacity_tokens())));
     } else if (running_.empty()) {
-        // 没有可抢占、也没有可等待完成的序列：重试不会成功，按资源不足终态收尾。
+        // 无 victim 的 KV 不足是终态；临时低于 watermark 仍给客户端 429 重试语义。
+        const ErrCode code = alloc.reason == AllocFailReason::BelowWatermark
+                                     ? ErrCode::KvBelowWatermark
+                                     : ErrCode::KvInsufficient;
         finish(group, FinishReason::Error,
-               make_error(ErrCode::KvInsufficient, "KV 块不足且无可等待释放的序列",
+               make_error(code,
+                          code == ErrCode::KvBelowWatermark ? "KV 低于安全水位，请稍后重试"
+                                                            : "KV 块不足且无可等待释放的序列",
                           "free=" + std::to_string(kv_.num_free_blocks()) +
                                   " need=" + std::to_string(kv_.blocks_for_tokens(total_tokens))));
     }
@@ -756,6 +791,11 @@ bool SchedulerCore::acquire_blocks(const std::shared_ptr<SequenceGroup>& group,
 
 bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget) {
     Sequence& seq = group->seq;
+    // 外部 id 可在旧请求结束后复用；旧请求留下的同名前缀 donor 必须先丢，
+    // 否则后端 add_sequence 会把 donor 状态误判为“重复登记”，且前缀会指向自己。
+    if (kv_.release_donor(group->req_id)) {
+        reap_donors();
+    }
     const std::int32_t hit_tokens = apply_prefix_hit(group);
     const std::int32_t total_tokens = seq.prompt_len + seq.sampling.max_tokens;
     if (!acquire_blocks(group, total_tokens, hit_tokens)) {
@@ -884,6 +924,10 @@ bool SchedulerCore::append_decode(Batch& batch, const std::shared_ptr<SequenceGr
     if (seq.num_computed < context_tokens(seq) || seq.output_token_ids.empty()) {
         return false;
     }
+    // decode 只在预算允许时占位；调用 cannot 依赖配置校验兜底。
+    if (!budget.can_add(0, 1)) {
+        return false;
+    }
     CachedRequestData data;
     data.req_id = group->req_id;
     data.new_token_ids.push_back(seq.output_token_ids.back());
@@ -926,7 +970,6 @@ bool SchedulerCore::append_prefill_chunk(Batch& batch, const std::shared_ptr<Seq
             metrics_.inc(MetricId::ChunkDeferred);
             return false;
         }
-        budget.commit(0, slice.n_tokens);
     }
     if (slice.n_tokens <= 0) {
         metrics_.inc(MetricId::ChunkDeferred);
@@ -1093,9 +1136,9 @@ void SchedulerCore::apply_completion(const Completion& completion) {
     }
     pending_serials_.erase(it);
     pending_remaining_ -= 1;
-    auto group = find_running(completion.seq_id);
+    auto group = find_running_by_serial(completion.seq_serial);
     const bool batch_done = pending_remaining_ == 0;
-    if (!group || group->seq.id != completion.seq_serial) {
+    if (!group || group->req_id != completion.seq_id) {
         conclude_step(batch_done);
         return;
     }
@@ -1196,6 +1239,7 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
     if (seq.status == SeqStatus::Finished) {
         return;
     }
+    release_request_id(group->req_id);
     seq.finish = reason;
     seq.status = SeqStatus::Finished;
     if (!final_frame_pushed && group->sink) {
@@ -1273,6 +1317,16 @@ std::shared_ptr<SequenceGroup> SchedulerCore::find_running(const RequestId& req_
     return nullptr;
 }
 
+// Completion 以内部 serial 定位，避免外部 id 被复用时错投到同名新请求。
+std::shared_ptr<SequenceGroup> SchedulerCore::find_running_by_serial(std::int32_t serial) const {
+    for (const auto& group : running_) {
+        if (group->seq.id == serial) {
+            return group;
+        }
+    }
+    return nullptr;
+}
+
 RequestId SchedulerCore::find_live_donor(const PrefixHit& hit) const {
     if (hit.blocks.empty()) {
         return {};
@@ -1292,11 +1346,11 @@ RequestId SchedulerCore::find_live_donor(const PrefixHit& hit) const {
 }
 
 std::int32_t SchedulerCore::running_count() const noexcept {
-    return static_cast<std::int32_t>(running_.size());
+    return running_depth_.load(std::memory_order_relaxed);
 }
 
 std::int32_t SchedulerCore::waiting_count() const noexcept {
-    return static_cast<std::int32_t>(waiting_.size());
+    return waiting_depth_.load(std::memory_order_relaxed);
 }
 
 // 线程兜底：同一份 Error 分发给所有在飞与排队请求，客户端一定拿到终态。

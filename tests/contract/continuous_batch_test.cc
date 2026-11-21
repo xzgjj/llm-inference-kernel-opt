@@ -159,6 +159,35 @@ std::vector<Delta> drain(const std::shared_ptr<BoundedSink>& sink) {
 
 } // namespace
 
+TEST_CASE("后续 prefill chunk 只提交一次预算") {
+    CbHarness harness(1, 5, 64, 0.0, 2);
+    auto sink = harness.submit("req-budget", 4, 1);
+    harness.run_until_closed({sink});
+    const std::vector<Batch> batches = harness.runner->batches();
+    REQUIRE(batches.size() == 2);
+    CHECK(batches[0].total_tokens == 2);
+    CHECK(batches[1].total_tokens == 2);
+    harness.shutdown_flush();
+}
+
+TEST_CASE("活跃请求 ID 不得重复，结束后可复用且不遗留后端槽位") {
+    CbHarness harness(2, 64, 64);
+    auto first = harness.submit("req-dup", 2, 2);
+
+    InferenceRequest duplicate;
+    duplicate.req_id = "req-dup";
+    duplicate.sampling.max_tokens = 1;
+    duplicate.stream = true;
+    auto duplicate_sink = std::make_shared<BoundedSink>(16);
+    CHECK(harness.core.submit(duplicate, {100, 101}, duplicate_sink) == ErrCode::InvalidJson);
+
+    harness.run_until_closed({first});
+    auto reused = harness.submit("req-dup", 2, 2);
+    harness.run_until_closed({reused});
+    CHECK(harness.core.running_count() == 0);
+    harness.shutdown_flush();
+}
+
 TEST_CASE("同一 tick 到达的 4 条请求合成一个 prefill 批") {
     CbHarness harness(4, 64, 64);
     std::vector<std::shared_ptr<BoundedSink>> sinks;

@@ -133,18 +133,33 @@ TEST_CASE("超时映射 504 且可重试") {
 
 TEST_CASE("错误体映射状态码、名称与可重试性") {
     CHECK(http_status(ErrCode::InvalidJson) == 400);
-    CHECK(http_status(ErrCode::KvInsufficient) == 429);
+    CHECK(http_status(ErrCode::ConfigInvalid) == 400);
+    CHECK(http_status(ErrCode::KvInsufficient) == 507);
+    CHECK(http_status(ErrCode::KvBelowWatermark) == 429);
     CHECK(http_status(ErrCode::QueueFull) == 429);
     CHECK(http_status(ErrCode::ContextOverflow) == 400);
     CHECK(http_status(ErrCode::NotSupported) == 404);
     CHECK(http_status(ErrCode::UnsupportedField) == 400);
-    CHECK(std::string(error_code_name(ErrCode::UnsupportedField)) == "unsupported_field");
+    CHECK(std::string(error_code_name(ErrCode::UnsupportedField)) == "UNSUPPORTED_FIELD");
     CHECK_FALSE(retryable(ErrCode::UnsupportedField));
     CHECK(std::string(error_code_name(ErrCode::KvInsufficient)) == "KV_INSUFFICIENT");
+    CHECK_FALSE(retryable(ErrCode::KvInsufficient));
+    CHECK(retryable(ErrCode::KvBelowWatermark));
     CHECK(retryable(ErrCode::QueueFull));
     CHECK_FALSE(retryable(ErrCode::InvalidJson));
     const std::string body = render_error_body(ErrCode::QueueFull, "busy");
     CHECK(body.find("\"retryable\":true") != std::string::npos);
+}
+
+TEST_CASE("外部 Request ID 限制长度与字符集") {
+    InferenceRequest req;
+    std::string message;
+    CHECK(parse_body(R"({"prompt":"hi","id":"bad id"})", req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("id") != std::string::npos);
+    CHECK(parse_body(R"({"prompt":"hi","id":")" + std::string(65, 'a') + R"("})", req, message) ==
+          ErrCode::InvalidJson);
+    CHECK(validate_request_id("A-Z_0.9:", message) == ErrCode::Ok);
+    CHECK(validate_request_id(std::string(64, 'a'), message) == ErrCode::Ok);
 }
 
 TEST_CASE("chat 请求解析出消息列表且不要求 prompt") {

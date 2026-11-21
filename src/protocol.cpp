@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 namespace llmopt {
 namespace {
@@ -116,6 +117,9 @@ ErrCode parse_common(const json& body, InferenceRequest& out, std::string& messa
         out.req_id = body["id"].get<std::string>();
     } else {
         out.req_id = make_request_id();
+    }
+    if (const ErrCode id_code = validate_request_id(out.req_id, message); id_code != ErrCode::Ok) {
+        return id_code;
     }
     std::int64_t n = out.n;
     if (!read_int(body, "n", 1, 4, n)) {
@@ -231,6 +235,23 @@ std::string make_request_id() {
                   static_cast<unsigned long long>(now & 0xffffffffULL),
                   static_cast<unsigned long long>(seq & 0xffffULL));
     return std::string(buffer);
+}
+
+ErrCode validate_request_id(std::string_view id, std::string& message) {
+    if (id.empty() || id.size() > 64) {
+        message = "id 长度必须在 [1, 64]";
+        return ErrCode::InvalidJson;
+    }
+    for (const char ch : id) {
+        const bool allowed = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                             (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == ':' ||
+                             ch == '-';
+        if (!allowed) {
+            message = "id 仅允许 [A-Za-z0-9._:-]";
+            return ErrCode::InvalidJson;
+        }
+    }
+    return ErrCode::Ok;
 }
 
 ErrCode parse_body(const std::string& body, InferenceRequest& out, std::string& message) noexcept {

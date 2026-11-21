@@ -96,7 +96,7 @@ TEST_CASE("缺 model 返回用法级错误") {
     clear_env();
     ServerConfig cfg;
     std::string message;
-    CHECK(load({}, cfg, message) == ErrCode::PromptTooLong);
+    CHECK(load({}, cfg, message) == ErrCode::ConfigInvalid);
     CHECK(message.find("--model") != std::string::npos);
 }
 
@@ -116,33 +116,35 @@ TEST_CASE("CLI 覆盖环境变量，环境变量覆盖默认值") {
     clear_env();
 }
 
-TEST_CASE("未知参数与缺值都按 NotSupported 处理") {
+TEST_CASE("未知参数与缺值都按 ConfigInvalid 处理") {
     clear_env();
     ServerConfig cfg;
     std::string message;
-    CHECK(load({"--model", "m.gguf", "--config", "x.json"}, cfg, message) == ErrCode::NotSupported);
-    CHECK(load({"--model"}, cfg, message) == ErrCode::NotSupported);
-    CHECK(load({"--model", "m.gguf", "--port", "abc"}, cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--config", "x.json"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model"}, cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--port", "abc"}, cfg, message) == ErrCode::ConfigInvalid);
 }
 
 TEST_CASE("端口、上下文、并发与安全比例做范围校验") {
     clear_env();
     ServerConfig cfg;
     std::string message;
-    CHECK(load({"--model", "m.gguf", "--port", "0"}, cfg, message) == ErrCode::InvalidJson);
-    CHECK(load({"--model", "m.gguf", "--ctx-tokens", "64"}, cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf", "--port", "0"}, cfg, message) == ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--ctx-tokens", "64"}, cfg, message) ==
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--max-concurrency", "65"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--safety-ratio", "0.9"}, cfg, message) ==
-          ErrCode::InvalidJson);
-    CHECK(load({"--model", "m.gguf", "--mode", "nope"}, cfg, message) == ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--mode", "nope"}, cfg, message) == ErrCode::ConfigInvalid);
 }
 
 TEST_CASE("stub 后端必须显式放行") {
     clear_env();
     ServerConfig cfg;
     std::string message;
-    CHECK(load({"--model", "m.gguf", "--backend", "stub"}, cfg, message) == ErrCode::NotSupported);
+    CHECK(load({"--model", "m.gguf", "--backend", "stub"}, cfg, message) == ErrCode::ConfigInvalid);
     set_env("LLMOPT_ALLOW_STUB", "1");
     CHECK(load({"--model", "m.gguf", "--backend", "stub"}, cfg, message) == ErrCode::Ok);
     clear_env();
@@ -201,14 +203,14 @@ TEST_CASE("阶段 2 环境变量生效，越界取值被拒") {
     clear_env();
 
     CHECK(load({"--model", "m.gguf", "--max-num-batched-tokens", "0"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--max-concurrency", "8", "--max-num-batched-tokens", "4"},
-               cfg, message) == ErrCode::InvalidJson);
+               cfg, message) == ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--queue-capacity", "0"}, cfg, message) ==
-          ErrCode::InvalidJson);
-    CHECK(load({"--model", "m.gguf", "--block-size", "2"}, cfg, message) == ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
+    CHECK(load({"--model", "m.gguf", "--block-size", "2"}, cfg, message) == ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--watermark-ratio", "0.3"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
 }
 
 // 阶段 3 行为变更：chunked prefill 允许 max-num-batched-tokens < ctx-tokens；
@@ -228,7 +230,7 @@ TEST_CASE("chunk-size 只接受四档，预算可小于上下文") {
     for (const std::int32_t size : {0, 16, 48, 512, -1}) {
         CHECK_FALSE(is_valid_chunk_size(size));
         CHECK(load({"--model", "m.gguf", "--chunk-size", std::to_string(size)}, cfg, message) ==
-              ErrCode::InvalidJson);
+              ErrCode::ConfigInvalid);
     }
     // CLI 覆盖 env；env 单独生效时同样走四档校验。
     set_env("LLMOPT_CHUNK_SIZE", "32");
@@ -247,7 +249,7 @@ TEST_CASE("预算等于并发数可启动，低于并发数拒绝") {
                 "--ctx-tokens", "2048"},
                cfg, message) == ErrCode::Ok);
     CHECK(load({"--model", "m.gguf", "--max-concurrency", "8", "--max-num-batched-tokens", "7"},
-               cfg, message) == ErrCode::InvalidJson);
+               cfg, message) == ErrCode::ConfigInvalid);
 }
 
 TEST_CASE("阶段 3 抢占与公平性参数：无值开关、env 与范围校验") {
@@ -290,13 +292,13 @@ TEST_CASE("阶段 3 抢占与公平性参数：无值开关、env 与范围校�
     clear_env();
 
     CHECK(load({"--model", "m.gguf", "--aging-threshold-ms", "0"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--aging-threshold-ms", "3600001"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--max-consecutive-preemptions", "0"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--max-consecutive-preemptions", "33"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
 }
 
 // 回归：llama 纯 CPU 后端没有统一 KV stream，seq_cp 会跨 stream 复制并重置目标
@@ -372,12 +374,12 @@ TEST_CASE("配置文件未知键、越界与坏 JSON 一律拒绝") {
     const std::string broken = write_config("llmopt_broken.json", "{not json");
     ServerConfig cfg;
     std::string message;
-    CHECK(load({"--model", "m.gguf", "--config", unknown}, cfg, message) == ErrCode::NotSupported);
+    CHECK(load({"--model", "m.gguf", "--config", unknown}, cfg, message) == ErrCode::ConfigInvalid);
     CHECK(message.find("未知键") != std::string::npos);
     CHECK(load({"--model", "m.gguf", "--config", out_of_range}, cfg, message) ==
-          ErrCode::NotSupported);
+          ErrCode::ConfigInvalid);
     CHECK(message.find("越界") != std::string::npos);
-    CHECK(load({"--model", "m.gguf", "--config", broken}, cfg, message) == ErrCode::NotSupported);
+    CHECK(load({"--model", "m.gguf", "--config", broken}, cfg, message) == ErrCode::ConfigInvalid);
     for (const std::string& path : {unknown, out_of_range, broken}) {
         std::filesystem::remove(path);
     }
@@ -414,13 +416,13 @@ TEST_CASE("服务边界参数四层优先级与范围") {
     CHECK(std::string(source_of(sources, "drain-deadline-seconds")) == "cli");
 
     set_env("LLMOPT_RATE_LIMIT_BURST", "abc");
-    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::InvalidJson);
+    CHECK(load({"--model", "m.gguf"}, cfg, message) == ErrCode::ConfigInvalid);
     clear_env();
     CHECK(load({"--model", "m.gguf", "--drain-deadline-seconds", "0"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--rate-limit-burst", "0"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--step-trace-rate", "65"}, cfg, message) ==
-          ErrCode::InvalidJson);
+          ErrCode::ConfigInvalid);
     std::filesystem::remove(file);
 }

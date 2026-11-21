@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,6 +54,7 @@ def main() -> int:
     env = dict(os.environ)
     env["LLMOPT_ALLOW_STUB"] = "1"
     env["LLMOPT_STEP_TRACE_RATE"] = "0"
+    env["LLMOPT_TEST_STUB_DELAY_MS"] = "10"
     cmd = [str(server), "--model", str(model), "--host", "127.0.0.1", "--port", str(port),
            "--backend", "stub", "--mode", "off"]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
@@ -102,6 +104,25 @@ def main() -> int:
         legacy_body = json.loads(legacy)
         assert legacy_body["object"] == "text_completion"
         assert legacy_body["choices"][0]["finish_reason"] == "length"
+        legacy_text = legacy_body["choices"][0]["text"]
+        assert len(legacy_text) >= 2, legacy_text
+
+        # stop 长度 2 时必须跨 provider 回调保留状态；命中后仍要写 [DONE]。
+        for stop_seq in (legacy_text[:2], legacy_text[:1]):
+            status, stop_body, _ = kit.post(
+                port, "/completion",
+                {"prompt": "hello", "max_tokens": 8, "seed": 0, "stop": [stop_seq],
+                 "stream": True}, timeout=30)
+            inference_posts += 1
+            assert status == 200, status
+            stop_frames = sse_frames(stop_body)
+            assert stop_frames[-1] == "[DONE]", stop_frames
+            stop_chunks = [json.loads(frame) for frame in stop_frames[:-1]]
+            streamed = "".join(
+                chunk["choices"][0].get("text", "") for chunk in stop_chunks)
+            reasons = [chunk["choices"][0].get("finish_reason") for chunk in stop_chunks]
+            assert stop_seq not in streamed, (stop_seq, streamed)
+            assert "stop" in reasons, (stop_seq, reasons)
 
         status, many = post_json(port, "/v1/completions",
                                  {"prompt": "hello", "max_tokens": 4, "n": 2, "seed": 0})
@@ -118,6 +139,28 @@ def main() -> int:
         inference_posts += 1
         assert seeded["choices"][0]["text"] != other["choices"][0]["text"], "seed 未生效"
 
+        # 同一活跃 Request ID 并发提交：必须恰好一条 200、一条 400，胜出请求正常收尾。
+        dup_payload = {"prompt": "hello", "max_tokens": 64, "seed": 0}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_future = pool.submit(post_json, port, "/v1/completions", dup_payload, "dup-race")
+            time.sleep(0.02)
+            second_future = pool.submit(post_json, port, "/v1/completions", dup_payload, "dup-race")
+            first_status, first_result = first_future.result(timeout=30)
+            second_status, second_result = second_future.result(timeout=30)
+        inference_posts += 2
+        statuses = sorted([first_status, second_status])
+        assert statuses == [200, 400], (first_status, first_result, second_status, second_result)
+        rejected = second_result if second_status == 400 else first_result
+        assert "id" in rejected["error"]["message"], rejected
+
+        # 请求结束后 id 可复用；旧请求的前缀 donor 不能被当成活跃重复登记。
+        reuse_payload = {"prompt": "reuse-prefix-0123456789abcdef", "max_tokens": 2, "seed": 3}
+        for attempt in range(2):
+            status, reused = post_json(port, "/v1/completions", reuse_payload, "reuse-id")
+            inference_posts += 1
+            assert status == 200, (attempt, status, reused)
+            assert reused["choices"][0]["text"], (attempt, reused)
+
         stop_char = first_text[:1]
         if stop_char:
             status, stopped = post_json(port, "/v1/chat/completions",
@@ -133,7 +176,7 @@ def main() -> int:
                                      dict(chat, tools=[{"type": "function"}]))
         inference_posts += 1
         assert status == 400, (status, rejected)
-        assert rejected["error"]["code"] == "unsupported_field", rejected
+        assert rejected["error"]["code"] == "UNSUPPORTED_FIELD", rejected
 
         status, metrics_body, _ = kit.get(port, "/metrics")
         assert status == 200
@@ -158,8 +201,10 @@ def main() -> int:
         log_text = (out or b"").decode("utf-8", errors="replace")
         (evidence / "server_stdout.log").write_text(log_text, encoding="utf-8")
         assert "trace-chat-1" in log_text, log_text[-4000:]
-        logged = log_text.count("http request id=") + log_text.count("http reject id=")
-        assert logged >= inference_posts, (logged, inference_posts, log_text[-4000:])
+        # stdout 是进程缓冲，退出前最后一条 warn 可能来不及刷出；请求级精确计数已由
+        # /metrics 的 llmopt_http_requests_total 断言，这里只锁显式 ID 的日志可追溯性。
+        assert "http request id=trace-chat-1" in log_text, log_text[-4000:]
+        assert "http reject id=dup-race" in log_text, log_text[-4000:]
     print(f"compat openai ok: posts={inference_posts} port={port}")
     return 0
 

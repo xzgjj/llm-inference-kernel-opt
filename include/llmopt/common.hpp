@@ -31,6 +31,8 @@ enum class ErrCode : std::uint8_t {
     Unavailable,
     RateLimited,
     Unauthorized,
+    ConfigInvalid,
+    KvBelowWatermark,
 };
 
 // 错误载体：跨层携带 code + 面向调用方的 message + 面向运维的 detail。

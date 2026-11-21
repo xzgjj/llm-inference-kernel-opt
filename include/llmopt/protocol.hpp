@@ -6,6 +6,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace llmopt {
@@ -19,6 +20,9 @@ ErrCode parse_chat_body(const std::string& body, InferenceRequest& out,
 
 // 请求缺省时生成唯一 id；格式 req-<12 hex>，不依赖随机源。
 std::string make_request_id();
+
+// 外部 Request ID 的协议边界：1–64 字节，仅 [A-Za-z0-9._:-]，禁止空白与控制字符。
+ErrCode validate_request_id(std::string_view id, std::string& message);
 
 // 增量帧与终止帧；字节序列见 SPEC-1 C-02。chat 入口输出 delta.content。
 std::string render_frame(const InferenceRequest& req, const Delta& delta);

@@ -56,9 +56,12 @@ public:
         return ErrCode::Ok;
     }
 
-    // 登记序列并重置 n_past；同一 req_id 重复登记视为覆盖。
+    // 登记序列并重置 n_past；重复 req_id 直接拒绝，禁止覆盖已有状态。
     ErrCode add_sequence(const Sequence& seq) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (states_.find(seq.group_id) != states_.end()) {
+            return ErrCode::InvalidJson;
+        }
         StubState state;
         state.seed = seq.sampling.seed >= 0 ? static_cast<std::uint64_t>(seq.sampling.seed)
                                             : hash_tokens(seq.prompt_token_ids);

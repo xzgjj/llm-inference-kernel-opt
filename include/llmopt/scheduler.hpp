@@ -20,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace llmopt {
@@ -291,6 +292,9 @@ private:
     // 准入预留：先占坑再投递，避免突发并发同时看到旧镜像而集体越界。
     bool try_reserve_admission() noexcept;
     void release_admission() noexcept;
+    // 外部 Request ID 只在 submit/finish 冷路径加锁；同一活跃 ID 不得二次入队。
+    bool reserve_request_id(const RequestId& req_id);
+    void release_request_id(const RequestId& req_id);
     bool admit(const std::shared_ptr<SequenceGroup>& group, TokenBudget& budget);
     std::int32_t apply_prefix_hit(const std::shared_ptr<SequenceGroup>& group);
     bool acquire_blocks(const std::shared_ptr<SequenceGroup>& group, std::int32_t total_tokens,
@@ -316,6 +320,7 @@ private:
     void reap_donors();
     void reconcile(const Sequence& seq);
     std::shared_ptr<SequenceGroup> find_running(const RequestId& req_id) const;
+    std::shared_ptr<SequenceGroup> find_running_by_serial(std::int32_t serial) const;
     RequestId find_live_donor(const PrefixHit& hit) const;
 
     ModelRunner& runner_;
@@ -345,6 +350,9 @@ private:
     std::atomic<std::int32_t> running_depth_{0};
     // 已受理、尚未被 Core 处理的在飞提交数；准入预留的唯一原子锚点。
     std::atomic<std::int32_t> inflight_admissions_{0};
+    // 活跃外部 ID 集合：仅在 submit/finish 冷路径访问，防止重复 id 覆盖 runner 槽位。
+    std::mutex active_ids_mutex_;
+    std::unordered_set<RequestId> active_ids_;
     std::int64_t started_ns_ = 0;
     std::int32_t running_peak_ = 0;
     std::int32_t batch_size_peak_ = 0;

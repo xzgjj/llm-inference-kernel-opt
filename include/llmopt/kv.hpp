@@ -72,6 +72,10 @@ public:
     std::int32_t attach_prefix(Sequence& seq, const PrefixHit& hit);
     // 完全释放序列：逐块 ref--，归零回空闲链。
     void free(Sequence& seq);
+    // 序列释放后真正能回到空闲链的块数；共享块只减引用，不计入。
+    std::int32_t releasable_blocks(const Sequence& seq) const;
+    // 按外部请求 id 丢弃同名前缀 donor；返回是否命中，调用方随后 reap 后端状态。
+    bool release_donor(const RequestId& donor);
     // 结束序列时留置满块内容：返回保留 token 数（0 表示未留置），seq.block_table 清空。
     std::int32_t retain(Sequence& seq);
     // 一步写出后确认哈希可用，避免未算完的块被命中。

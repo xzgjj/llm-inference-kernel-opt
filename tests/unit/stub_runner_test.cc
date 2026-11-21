@@ -78,6 +78,8 @@ TEST_CASE("同种子同 prompt 输出逐 token 可复现") {
     other.group_id = seq.group_id;
     other.sampling.seed = 8;
     other.prompt_token_ids = seq.prompt_token_ids;
+    CHECK(again->add_sequence(other) == ErrCode::InvalidJson);
+    again->release_sequence(seq.group_id, 0);
     REQUIRE(again->add_sequence(other) == ErrCode::Ok);
     CHECK(first_token(again->decode_step(prefill_batch("req-det", {256 + 104, 256 + 105}))) !=
           first);

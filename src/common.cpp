@@ -10,16 +10,19 @@ int http_status(ErrCode code) noexcept {
     case ErrCode::InvalidJson:
     case ErrCode::PromptTooLong:
     case ErrCode::ContextOverflow:
+    case ErrCode::ConfigInvalid:
         return 400;
     case ErrCode::Unauthorized:
         return 401;
     case ErrCode::ModelNotLoaded:
     case ErrCode::Unavailable:
         return 503;
-    case ErrCode::KvInsufficient:
+    case ErrCode::KvBelowWatermark:
     case ErrCode::QueueFull:
     case ErrCode::RateLimited:
         return 429;
+    case ErrCode::KvInsufficient:
+        return 507;
     case ErrCode::Cancelled:
         return 499;
     case ErrCode::ExecutionFailed:
@@ -63,13 +66,17 @@ const char* error_code_name(ErrCode code) noexcept {
     case ErrCode::Timeout:
         return "TIMEOUT";
     case ErrCode::UnsupportedField:
-        return "unsupported_field";
+        return "UNSUPPORTED_FIELD";
     case ErrCode::Unavailable:
         return "SERVICE_UNAVAILABLE";
     case ErrCode::RateLimited:
         return "RATE_LIMITED";
     case ErrCode::Unauthorized:
         return "UNAUTHORIZED";
+    case ErrCode::ConfigInvalid:
+        return "CONFIG_INVALID";
+    case ErrCode::KvBelowWatermark:
+        return "KV_BELOW_WATERMARK";
     }
     return "EXECUTION_FAILED";
 }
@@ -93,7 +100,7 @@ const char* finish_reason_name(FinishReason reason) noexcept {
 }
 
 bool retryable(ErrCode code) noexcept {
-    return code == ErrCode::ModelNotLoaded || code == ErrCode::KvInsufficient ||
+    return code == ErrCode::ModelNotLoaded || code == ErrCode::KvBelowWatermark ||
            code == ErrCode::QueueFull || code == ErrCode::Timeout || code == ErrCode::Unavailable ||
            code == ErrCode::RateLimited;
 }

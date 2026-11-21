@@ -134,6 +134,23 @@ PreemptDecision try_preempt(const std::vector<SequenceGroup*>& groups, std::int3
                             KVBlockManager& kv, const VictimPolicy& policy,
                             const FairnessState& fairness) {
     PreemptDecision decision;
+    // 先做无副作用可行性预判：禁止先清空 running 再发现仍然不够。
+    std::int32_t max_releasable = kv.num_free_blocks();
+    for (SequenceGroup* group : groups) {
+        if (group == nullptr || group->seq.status != SeqStatus::Running ||
+            group->seq.block_table.empty()) {
+            continue;
+        }
+        if (fairness.aging_enabled && group->last_progress_ns > 0 &&
+            fairness.now_ns - group->last_progress_ns >= fairness.aging_threshold_ns) {
+            continue;
+        }
+        max_releasable += kv.releasable_blocks(group->seq);
+    }
+    if (max_releasable < need_blocks) {
+        decision.retry_ok = false;
+        return decision;
+    }
     while (kv.num_free_blocks() < need_blocks) {
         const std::vector<RequestId> selected =
                 policy.select(groups, fairness, &decision.aging_exempt);

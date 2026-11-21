@@ -243,6 +243,25 @@ void KVBlockManager::free(Sequence& seq) {
     seq.block_table.clear();
 }
 
+std::int32_t KVBlockManager::releasable_blocks(const Sequence& seq) const {
+    std::int32_t count = 0;
+    for (const BlockRef& ref : seq.block_table) {
+        const BlockState& block = blocks_[static_cast<std::size_t>(ref.block_id)];
+        if (block.ref_cnt == 1) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+bool KVBlockManager::release_donor(const RequestId& donor) {
+    if (donors_.find(donor) == donors_.end()) {
+        return false;
+    }
+    evict_donor(donor);
+    return true;
+}
+
 std::int32_t KVBlockManager::retain(Sequence& seq) {
     if (!config_.enable_prefix_cache) {
         free(seq);

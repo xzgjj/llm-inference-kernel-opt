@@ -61,6 +61,10 @@ TEST_CASE("真模型 load->tokenize->release->reload") {
     CHECK(runner->tokenize("hello", ids) == ErrCode::Ok);
     CHECK_FALSE(ids.empty());
     runner->release();
+    std::vector<std::int32_t> after_release;
+    CHECK(runner->tokenize("hello", after_release) == ErrCode::ModelNotLoaded);
+    CHECK(runner->detokenize(1).empty());
+    CHECK_FALSE(runner->is_eos(1));
     REQUIRE(runner->load_model(config) == ErrCode::Ok);
     runner->release();
 }

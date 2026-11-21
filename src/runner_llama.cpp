@@ -105,8 +105,11 @@ public:
                             std::filesystem::path(config.model_path).filename().string());
             return ErrCode::ModelNotLoaded;
         }
-        vocab_ = llama_model_get_vocab(model_.get());
-        n_vocab_ = static_cast<std::int32_t>(llama_vocab_n_tokens(vocab_));
+        {
+            std::lock_guard<std::mutex> vocab_lock(vocab_mutex_);
+            vocab_ = llama_model_get_vocab(model_.get());
+            n_vocab_ = static_cast<std::int32_t>(llama_vocab_n_tokens(vocab_));
+        }
         // 模板随 GGUF 走：读不到就留空，render_chat 回退通用拼接。
         chat_template_.clear();
         const int32_t tmpl_len =
@@ -131,6 +134,11 @@ public:
         cparams.n_threads_batch = threads;
         ctx_.reset(llama_init_from_model(model_.get(), cparams));
         if (!ctx_) {
+            {
+                std::lock_guard<std::mutex> vocab_lock(vocab_mutex_);
+                vocab_ = nullptr;
+                n_vocab_ = 0;
+            }
             model_.reset();
             last_error_ = make_error(ErrCode::ModelNotLoaded, "上下文创建失败（显存/内存不足）",
                                      "op=init_context n_ctx=" + std::to_string(cparams.n_ctx) +
@@ -156,6 +164,11 @@ public:
     // 为序列分配 llama seq 槽并建独立采样链；prompt 全量喂给惩罚统计。
     ErrCode add_sequence(const Sequence& seq) override {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (states_.find(seq.group_id) != states_.end()) {
+            last_error_ = make_error(ErrCode::InvalidJson, "请求 id 已被后端序列占用",
+                                     "op=add_sequence req=" + seq.group_id);
+            return ErrCode::InvalidJson;
+        }
         if (slots_.empty()) {
             last_error_ = make_error(ErrCode::ResourceInsufficient, "后端序列槽位耗尽",
                                      "op=add_sequence active=" + std::to_string(states_.size()));
@@ -257,9 +270,12 @@ public:
         states_.erase(it);
     }
 
-    // 全量释放：按创建反序 reset 句柄；后端初始化是进程级的，不在此处 free。
+    // 全量释放：先断开 vocab 视图，再按创建反序 reset 句柄；后端初始化是进程级的，不在此处 free。
     void release() override {
         std::lock_guard<std::mutex> lock(mutex_);
+        std::lock_guard<std::mutex> vocab_lock(vocab_mutex_);
+        vocab_ = nullptr;
+        n_vocab_ = 0;
         states_.clear();
         slots_.clear();
         batch_.reset();
@@ -269,6 +285,7 @@ public:
 
     // 分词：add_special=true 与 llama-server 默认一致；负返回值表示需要更大缓冲。
     ErrCode tokenize(const std::string& text, std::vector<std::int32_t>& ids) override {
+        std::lock_guard<std::mutex> lock(vocab_mutex_);
         if (!vocab_) {
             return ErrCode::ModelNotLoaded;
         }
@@ -290,6 +307,7 @@ public:
 
     // 反分词：负返回值给出所需字节数，扩容后重取。
     std::string detokenize(std::int32_t token_id) override {
+        std::lock_guard<std::mutex> lock(vocab_mutex_);
         if (!vocab_) {
             return {};
         }
@@ -310,6 +328,7 @@ public:
 
     // EOS 判定交给词表，避免把 </s> 当普通文本继续生成。
     bool is_eos(std::int32_t token_id) const override {
+        std::lock_guard<std::mutex> lock(vocab_mutex_);
         return vocab_ ? token_id == llama_vocab_eos(vocab_) : false;
     }
 
@@ -482,6 +501,7 @@ private:
     std::string chat_template_;
     Error last_error_;
     mutable std::mutex mutex_;
+    mutable std::mutex vocab_mutex_;
     std::vector<std::int32_t> slots_;
     std::map<RequestId, LlamaSeqState> states_;
 };
