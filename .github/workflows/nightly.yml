@@ -83,3 +83,27 @@ jobs:
           name: soak-report
           path: build/evidence/soak_report.json
           if-no-files-found: warn
+
+  # 阶段 12 S5：发布镜像构建 + 容器冒烟五项（healthz/readyz/非流式/SSE/断连取消/drain）。
+  packaging-smoke:
+    name: packaging-smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build release image
+        run: docker build -f scripts/release/Dockerfile -t llmopt:s5 .
+      - name: image size
+        run: docker images --format '{{.Repository}}:{{.Tag}} {{.Size}}' llmopt:s5
+      - name: docker smoke (5 checks + drain)
+        run: bash scripts/release/docker_smoke.sh
+      - name: upload smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-smoke-evidence
+          path: evidence/phase12/packaging/docker_smoke.json
+          if-no-files-found: warn

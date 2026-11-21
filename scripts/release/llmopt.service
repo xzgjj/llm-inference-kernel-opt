@@ -9,7 +9,14 @@ Wants=network-online.target
 Type=simple
 User=llmopt
 Group=llmopt
+# 崩溃 dump 与相对日志路径以工作目录为锚点；安装时先
+#   install -d -o llmopt -g llmopt /var/lib/llmopt /var/log/llmopt
+WorkingDirectory=/var/lib/llmopt
 EnvironmentFile=-/etc/llmopt/llmopt.env
+# 日志约定：进程内 spdlog 20MB×5 轮转；部署层兜底见
+# scripts/release/logrotate/llmopt（/var/log/llmopt）。崩溃 dump 落到
+# 日志目录同级 ../crash/（阶段 12 S5）。本机配置项暂未暴露 log-dir CLI/env，
+# 目录约定以部署文档为准，此处不改写 ExecStart。
 ExecStart=/usr/local/bin/llmopt_server --config /etc/llmopt/config.json
 # SIGTERM 走 Draining：在飞请求收尾后退出 0，超 drain-deadline-seconds 强制停止。
 KillSignal=SIGTERM

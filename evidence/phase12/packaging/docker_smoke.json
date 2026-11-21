@@ -1,0 +1,66 @@
+{
+  "image": "llmopt:s5",
+  "image_id": "a1cbae6cb394",
+  "host": "Windows Desktop, Docker Desktop 29.2.1 (linux/x86_64)",
+  "captured_at": "2026-11-21 23:38 +08:00",
+  "build_command": "docker build -f scripts/release/Dockerfile -t llmopt:s5 .",
+  "image_size": {
+    "bytes": 83014988,
+    "docker_display": "83MB",
+    "miB": 79.17,
+    "limit_miB": 250,
+    "within_limit": true
+  },
+  "runtime": {
+    "user": "llmopt",
+    "exposed_ports": ["8080", "8081"],
+    "app_contents": ["/app/llmopt_server", "/app/logs", "/app/models"],
+    "clean_assertions": [
+      "test ! -d /app/build -> NO_BUILD_DIR",
+      "test ! -d /app/src",
+      "test ! -d /app/include",
+      "test ! -d /app/tests",
+      "test ! -d /app/evidence",
+      "test ! -d /app/keys",
+      "no /app/llmopt.log"
+    ]
+  },
+  "items": [
+    {
+      "name": "healthz",
+      "status": "PASS",
+      "evidence": "GET http://127.0.0.1:18080/healthz -> HTTP 200, body {\"status\":\"ready\"}"
+    },
+    {
+      "name": "readyz",
+      "status": "PASS",
+      "evidence": "GET http://127.0.0.1:18080/readyz -> HTTP 200, body {\"status\":\"ready\"} 含 ready"
+    },
+    {
+      "name": "completions_nonstream",
+      "status": "PASS",
+      "evidence": "POST /v1/completions {\"prompt\":\"smoke-nonstream\",\"max_tokens\":4} -> HTTP 200; body 含 \"object\":\"text_completion\"; choices[0].finish_reason=length text=V{Bg; id=req-0b419c470001; usage completion_tokens=4 prompt_tokens=15"
+    },
+    {
+      "name": "completions_sse",
+      "status": "PASS",
+      "evidence": "POST /v1/completions {\"prompt\":\"smoke-sse2\",\"max_tokens\":4,\"stream\":true} -> 5 行 'data: ' 帧（4 个 token chunk + data: [DONE]）；首帧 object=text_completion"
+    },
+    {
+      "name": "disconnect_cancel",
+      "status": "PASS",
+      "evidence": "裸 socket POST /v1/completions(max_tokens=600) 后 SO_LINGER 置 0 硬断开 RST；metrics llmopt_requests_total{status=\"cancelled\"} 0 -> 1，首次轮询(0.25s)即 +1；容器日志 code=REQUEST_CANCELLED id=req-1ef9a6070001。备注：CLI 未暴露 --disconnect-poll-ms（探测该 flag rc=1: 配置错误: 未知参数 --disconnect-poll-ms），但内置 500ms is_connection_closed 轮询已生效；取消指标实际序列名为 llmopt_requests_total{status=\"cancelled\"}，非 llmopt_requests_cancelled_total。"
+    },
+    {
+      "name": "drain_stop",
+      "status": "PASS",
+      "evidence": "docker stop --time 40 llmopt-smoke -> stop rc=0; docker inspect State.ExitCode=0（SIGTERM drain 收敛退出 0）"
+    }
+  ],
+  "summary": {"PASS": 6, "SKIP": 0, "FAIL": 0},
+  "notes": [
+    "stub 后端启动需 LLMOPT_ALLOW_STUB=1；容器内 LLMOPT_TEST_STUB_DELAY_MS=50 固定每步延迟 50ms。",
+    "控制面 8081 进程内绑定 loopback，EXPOSE 仅作部署声明。",
+    "断连取消以指标 +1 与 REQUEST_CANCELLED 日志为证据；CLI 轮询开关缺失属未暴露参数，不影响内置取消路径。"
+  ]
+}

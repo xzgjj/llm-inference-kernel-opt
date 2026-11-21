@@ -1,0 +1,84 @@
+阶段 12 S5 — crash handler 本机实测证据
+==========================================
+
+环境
+----
+- 主机：Windows（DESKTOP-GN8DB6B），PowerShell 7.6.4，分支 10，未 commit/push。
+- 编译器：C:\msys64\ucrt64\bin\g++.exe (Rev4, Built by MSYS2 project) 16.2.0，C++20。
+- 编译方式：独立编译，不依赖 CMake、不依赖 llmopt_core（不链 spdlog）；
+  LLMOPT_VERSION 由 CMake 的 llmopt_warnings 接口 normally 注入，
+  独立编译时以 -D 显式等价传入。
+- 源码：include/llmopt/crash.hpp、src/crash.cpp；fixture：tests/tools/crash_fixture.cc
+  （已登记 CTest：`crash_dump_test`，0.36 s PASS；本文件是登记前的独立编译实测记录）。
+
+编译命令（实跑）
+----------------
+& C:\msys64\ucrt64\bin\g++.exe -std=c++20 -Wall -Wextra '-DLLMOPT_VERSION="0.12.0"' `
+  -I include src/crash.cpp tests/tools/crash_fixture.cc `
+  -o build-b/crash_fixture.exe -ldbghelp
+结果：compile_rc=0，无 warning/error。
+
+注入步骤
+--------
+前置：清空 logs/crash/；fixture 内 install_crash_handler("logs/server")，
+dump 落 logs/crash/（日志目录父目录 logs 的同级 crash/），随后 raise(SIGSEGV)。
+
+连续注入 3 次（每次独立进程），实跑输出：
+
+=== injection 1 ===
+[crash] handler installed; dump dir=logs/crash
+[fixture] handler installed, raising SIGSEGV
+exit=3
+=== injection 2 ===
+[crash] handler installed; dump dir=logs/crash
+[fixture] handler installed, raising SIGSEGV
+exit=3
+=== injection 3 ===
+[crash] handler installed; dump dir=logs/crash
+[fixture] handler installed, raising SIGSEGV
+exit=3
+
+断言结果
+--------
+1) dump 文件出现且字段齐全。最新一份 dump 头部（crash-20261121-230849-57172.txt，11154 字节）：
+
+   signal=SIGSEGV pid=57172 dump=logs/crash/crash-20261121-230849-57172.txt
+   version=0.12.0 llama_revision=unknown
+   shutdown_state=not-tracked-by-crash-handler
+   ---- stack trace ----
+     #00 0x7ff7c1041910
+     #01 0x7ff7c1042007
+     #02 0x7fff31b92139 raise+0x1d9
+     #03 0x7ff7c1042547
+     #04 0x7ff7c1041157
+     #05 0x7fff3310dda7 BaseThreadInitThunk+0x17
+     #06 0x7fff34499c5c RtlUserThreadStart+0x2c
+   ---- recent log tail (last 100 lines) ----
+
+   - 含 SIGSEGV、pid=、version=0.12.0 行；栈帧给出地址，
+     raise / BaseThreadInitThunk / RtlUserThreadStart 由 DbgHelp 解析出符号名，
+     其余帧无 PDB 时保留地址（最小可用方案，符合设计）。
+   - 日志尾部段读取 logs/server/llmopt.log 末尾；dump 共 111 行。
+
+2) 退出码语义：3 次均 exit=3。
+   对照基线：未装 handler 的裸程序 `raise(SIGSEGV)`（build-b/baseline_segv.cc）
+   在同一 MinGW ucrt64 CRT 下退出码同样为 3。
+   结论：exit=3 是 ucrt64 CRT 对 raise() 投递 SIGSEGV 的默认处置映射；
+   handler 落盘后 signal(SIG_DFL)+raise(sig) 重新投递，未改变该默认语义。
+   注意：0xC0000005 (-1073741819) 是真实硬件/结构化访问违例（AV）的 NTSTATUS；
+   raise() 经 CRT 信号层投递，不产生 SEH AV，因此本机观察不到该码。
+   Linux 下默认处置以信号终止（core dump），退出码语义由 shell 报告为信号；
+   本机无 POSIX 环境，backtrace()/backtrace_symbols_fd 路径未实跑。
+
+3) 保留份数：3 次注入后 logs/crash/ 仅余 2 份（最旧一份被 prune 删除）：
+
+   crash-20261121-230849-27032.txt  11154 字节
+   crash-20261121-230849-57172.txt  11154 字节
+
+未验证 / 限制
+------------
+- Linux（backtrace/backtrace_symbols_fd、dirent 目录扫描、unlink）分支未在本机实跑，
+  仅做了平台条件编译；需 Linux CI/容器复测。
+- 独立 fixture 未链 spdlog；日志尾部读取走的是 open/read 裸路径，未经过 logger。
+- shutdown_state 字段当前为 not-tracked-by-crash-handler：handler 未接入主流程的
+  关停标志；后续主 Agent 接线时可补原子标志写入。

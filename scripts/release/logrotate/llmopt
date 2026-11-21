@@ -1,0 +1,24 @@
+# 阶段 12 S5：部署层日志轮转兜底。
+#
+# 说明：进程内 spdlog 的 rotating_file_sink 已经做 20MB × 5 轮转
+# （见 src/log.cpp）；本 logrotate 配置只作为部署层兜底，覆盖进程内
+# 轮转失效、日志被外部重定向等场景。
+#
+# copytruncate：复制后截断原文件，不改名、不换 fd，避免进程持有旧
+# 文件描述符导致日志写到已改名的旧文件上；代价是复制瞬间有极短窗口
+# 可能丢少量日志，与本服务 warn 以上即时 flush 的口径相容。
+#
+# 安装：cp scripts/release/logrotate/llmopt /etc/logrotate.d/llmopt
+# （属主 llmopt:llmopt，与 systemd Unit 的 User=llmopt 一致）。
+
+/var/log/llmopt/*.log {
+    size 20M
+    rotate 5
+    copytruncate
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0644 llmopt llmopt
+    su llmopt llmopt
+}

@@ -1,0 +1,4 @@
+llmopt:s5  docker display=83MB  Size=83014988 bytes (79.17 MiB)  limit=250 MiB  within_limit=true
+image id=a1cbae6cb394  User=llmopt  ExposedPorts=8080/tcp,8081/tcp
+build: docker build -f scripts/release/Dockerfile -t llmopt:s5 .
+measured: docker images --format '{{.Size}}' llmopt:s5 ; docker inspect llmopt:s5 --format '{{.Size}}'

@@ -1,0 +1,42 @@
+# 阶段 12 S5：Docker 构建上下文裁剪。
+# 原则：build/ 等本机构建产物、脏数据、文档与测试不进上下文；
+# third_party/_deps 不随上下文拷贝，builder 阶段由 FetchContent 重新拉取依赖。
+
+# ---- 本机构建产物（容器内重新 cmake/build）----
+build/
+build-*/
+*.exe
+*.a
+*.obj
+*.o
+
+# ---- VCS / 本地运行态与证据 ----
+.git/
+.githooks/
+logs/
+evidence/
+models/
+*.gguf
+
+# ---- 第三方依赖缓存：只带 -src 源码，用 FETCHCONTENT_SOURCE_DIR_* 离线复用；
+#      -build/-subbuild 是本机构建产物，必须排除。clean clone 无 _deps 时容器内联网拉取。
+third_party/_deps/*-build/
+third_party/_deps/*-subbuild/
+vendor/
+
+# ---- 发布镜像不需要的源码目录、文档、基准与工具 ----
+tests/
+docs/
+bench/
+tools/
+ci/
+scripts/bench/
+scripts/ci/
+
+# ---- 运行产物杂项 ----
+*.log
+*.csv
+notes.txt
+diff.md
+implementation_plan.md
+implementation-notes.md

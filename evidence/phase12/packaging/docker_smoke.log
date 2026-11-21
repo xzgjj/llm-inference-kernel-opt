@@ -1,0 +1,75 @@
+[smoke] building image llmopt:s5
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 3.48kB 0.0s done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/ubuntu:24.04
+#2 DONE 0.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 989B 0.1s done
+#3 DONE 0.1s
+
+#4 [internal] load build context
+#4 DONE 0.0s
+
+#5 [builder 1/9] FROM docker.io/library/ubuntu:24.04
+#5 DONE 0.0s
+
+#4 [internal] load build context
+#4 transferring context: 53.93kB 5.1s
+#4 transferring context: 109.68kB 10.1s
+#4 transferring context: 168.19kB 15.1s
+#4 transferring context: 215.01kB 20.2s
+#4 transferring context: 280.63kB 25.3s
+#4 transferring context: 329.49kB 30.3s
+#4 transferring context: 369.67kB 34.0s done
+#4 DONE 34.0s
+
+#6 [runtime 4/5] WORKDIR /app
+#6 CACHED
+
+#7 [runtime 3/5] RUN useradd --system --uid 10001 --home /app --shell /usr/sbin/nologin llmopt     && mkdir -p /app/models /app/logs     && chown -R llmopt:llmopt /app
+#7 CACHED
+
+#8 [builder 4/9] COPY CMakeLists.txt ./
+#8 CACHED
+
+#9 [builder 8/9] COPY third_party ./third_party
+#9 CACHED
+
+#10 [runtime 2/5] RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";'         > /etc/apt/apt.conf.d/80-retries     && sed -i "s|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g;             s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g"         /etc/apt/sources.list.d/ubuntu.sources     && apt-get update -qq && apt-get install -y --no-install-recommends         libstdc++6 libgcc-s1 ca-certificates     && rm -rf /var/lib/apt/lists/*
+#10 CACHED
+
+#11 [builder 5/9] COPY cmake ./cmake
+#11 CACHED
+
+#12 [builder 9/9] RUN set -eux;     extra="";     for pair in httplib-src:HTTPLIB nlohmann_json-src:NLOHMANN_JSON spdlog-src:SPDLOG; do         d="${pair%%:*}"; n="${pair##*:}";         if [ -d "/src/third_party/_deps/$d" ]; then             extra="$extra -DFETCHCONTENT_SOURCE_DIR_$n=/src/third_party/_deps/$d";         fi;     done;     cmake -S . -B /src/build -G Ninja         -DCMAKE_BUILD_TYPE=Release         -DLLMOPT_ENABLE_LLAMA=OFF         -DLLMOPT_BUILD_TESTS=OFF         $extra     && cmake --build /src/build --parallel --target llmopt_server
+#12 CACHED
+
+#13 [builder 2/9] RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "30";'         > /etc/apt/apt.conf.d/80-retries     && sed -i "s|http://archive.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g;             s|http://security.ubuntu.com/ubuntu|http://mirrors.aliyun.com/ubuntu|g"         /etc/apt/sources.list.d/ubuntu.sources     && apt-get update -qq && apt-get install -y --no-install-recommends         build-essential cmake ninja-build git ca-certificates     && rm -rf /var/lib/apt/lists/*
+#13 CACHED
+
+#14 [builder 3/9] WORKDIR /src
+#14 CACHED
+
+#15 [builder 6/9] COPY include ./include
+#15 CACHED
+
+#16 [builder 7/9] COPY src ./src
+#16 CACHED
+
+#17 [runtime 5/5] COPY --from=builder /src/build/llmopt_server /app/llmopt_server
+#17 CACHED
+
+#18 exporting to image
+#18 exporting layers done
+#18 writing image sha256:a1cbae6cb39422b8ba77c15908a5ecbee8673ad001370fc2a6618c478b523596 done
+#18 naming to docker.io/library/llmopt:s5 done
+#18 DONE 0.0s
+[smoke] starting container on port 18080
+1578e09ff77d75dbfce14884f96261892f0c87802ac3cf5c4461a893d9babde6
+{"PASS": 6, "SKIP": 0, "FAIL": 0}
+[smoke] evidence -> /mnt/d/c++_myproject/llm-inference-kernel-opt/evidence/phase12/packaging/docker_smoke.json
