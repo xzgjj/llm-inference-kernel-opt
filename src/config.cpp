@@ -5,13 +5,19 @@
 #include "nlohmann/json.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
+#include <set>
 #include <string>
 #include <vector>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 namespace llmopt {
 namespace {
@@ -56,6 +62,7 @@ constexpr FieldSpec kFields[] = {
         {"request-deadline-seconds", false},
         {"completion-timeout-ms", false},
         {"api-key", false},
+        {"api-keys-file", false},
         {"step-trace-rate", false},
         {"control-port", false},
         {"tls-cert", false},
@@ -94,6 +101,7 @@ constexpr const char* kConfigKeys[] = {
         "request-deadline-seconds",
         "completion-timeout-ms",
         "api-key",
+        "api-keys-file",
         "step-trace-rate",
         "control-port",
         "tls-cert",
@@ -283,6 +291,8 @@ ErrCode apply_service_arg(ServerConfig& cfg, const std::string& key, const std::
         return parse_int(value, cfg.completion_timeout_ms) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--api-key") {
         cfg.api_key = value;
+    } else if (key == "--api-keys-file") {
+        cfg.api_keys_file = value;
     } else if (key == "--step-trace-rate") {
         return parse_int(value, cfg.step_trace_rate) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--control-port") {
@@ -453,6 +463,195 @@ ErrCode validate_backend_knobs(const ServerConfig& cfg, std::string& message) {
     return ErrCode::Ok;
 }
 
+bool is_sha256_hex(const std::string& text) {
+    if (text.size() != 64) {
+        return false;
+    }
+    for (char ch : text) {
+        if (!std::isxdigit(static_cast<unsigned char>(ch))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool has_unknown_keys(const json& object, std::initializer_list<const char*> allowed) {
+    for (auto it = object.begin(); it != object.end(); ++it) {
+        bool known = false;
+        for (const char* key : allowed) {
+            if (it.key() == key) {
+                known = true;
+                break;
+            }
+        }
+        if (!known) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::int32_t tenant_kv_limit(const ServerConfig& cfg) {
+    const std::int32_t block = std::max<std::int32_t>(cfg.block_tokens, 1);
+    return std::max<std::int32_t>(cfg.ctx_tokens * cfg.max_concurrency / block, 1);
+}
+
+ErrCode parse_quota_int(const json& node, const char* key, std::int32_t& out,
+                        std::string& message) {
+    if (!node.contains(key)) {
+        return ErrCode::Ok;
+    }
+    if (!node[key].is_number_integer()) {
+        message = std::string("api-keys 配额字段必须是整数: ") + key;
+        return ErrCode::ConfigInvalid;
+    }
+    out = node[key].get<std::int32_t>();
+    return ErrCode::Ok;
+}
+
+ErrCode parse_tenant_quota(const json& node, const ServerConfig& cfg, TenantQuota& quota,
+                           std::string& message) {
+    quota.max_concurrency = cfg.max_concurrency;
+    quota.queue_capacity = cfg.queue_capacity;
+    quota.rate_limit_rps = 0.0;
+    quota.rate_limit_burst = 1;
+    quota.kv_blocks = 0;
+    if (node.is_null()) {
+        return ErrCode::Ok;
+    }
+    if (!node.is_object() ||
+        has_unknown_keys(node, {"max_concurrency", "queue_capacity", "rate_limit_rps",
+                                "rate_limit_burst", "kv_blocks"})) {
+        message = "api-keys 配额对象含未知字段或类型非法";
+        return ErrCode::ConfigInvalid;
+    }
+    ErrCode code = parse_quota_int(node, "max_concurrency", quota.max_concurrency, message);
+    if (code == ErrCode::Ok) {
+        code = parse_quota_int(node, "queue_capacity", quota.queue_capacity, message);
+    }
+    if (code == ErrCode::Ok) {
+        code = parse_quota_int(node, "rate_limit_burst", quota.rate_limit_burst, message);
+    }
+    if (code == ErrCode::Ok) {
+        code = parse_quota_int(node, "kv_blocks", quota.kv_blocks, message);
+    }
+    if (code != ErrCode::Ok) {
+        return code;
+    }
+    if (node.contains("rate_limit_rps")) {
+        if (!node["rate_limit_rps"].is_number()) {
+            message = "api-keys 配额字段必须是数字: rate_limit_rps";
+            return ErrCode::ConfigInvalid;
+        }
+        quota.rate_limit_rps = node["rate_limit_rps"].get<double>();
+    }
+    if (quota.max_concurrency < 1 || quota.max_concurrency > cfg.max_concurrency) {
+        message = "api-keys max_concurrency 必须在 1..全局 max-concurrency";
+        return ErrCode::ConfigInvalid;
+    }
+    if (quota.queue_capacity < 0 || quota.queue_capacity > cfg.queue_capacity) {
+        message = "api-keys queue_capacity 必须在 0..全局 queue-capacity";
+        return ErrCode::ConfigInvalid;
+    }
+    if (quota.rate_limit_rps < 0.0 || quota.rate_limit_rps > 1'000'000.0) {
+        message = "api-keys rate_limit_rps 必须在 0..1000000";
+        return ErrCode::ConfigInvalid;
+    }
+    if (quota.rate_limit_burst < 1 || quota.rate_limit_burst > 1024) {
+        message = "api-keys rate_limit_burst 必须在 1..1024";
+        return ErrCode::ConfigInvalid;
+    }
+    if (quota.kv_blocks < 0 || quota.kv_blocks > tenant_kv_limit(cfg)) {
+        message = "api-keys kv_blocks 必须在 0..全局 KV 块数";
+        return ErrCode::ConfigInvalid;
+    }
+    return ErrCode::Ok;
+}
+
+ErrCode parse_api_key_entry(const json& item, const ServerConfig& cfg, ApiKeyEntry& entry,
+                            std::string& message) {
+    if (!item.is_object() || has_unknown_keys(item, {"id", "sha256", "quota"})) {
+        message = "api-keys 条目必须是只含 id/sha256/quota 的对象";
+        return ErrCode::ConfigInvalid;
+    }
+    if (!item.contains("id") || !item["id"].is_string() || !item.contains("sha256") ||
+        !item["sha256"].is_string()) {
+        message = "api-keys 条目缺少字符串 id/sha256";
+        return ErrCode::ConfigInvalid;
+    }
+    entry.id = item["id"].get<std::string>();
+    if (!is_valid_tenant_id(entry.id)) {
+        message = "api-keys id 只允许 [a-z0-9-]，长度 1..32";
+        return ErrCode::ConfigInvalid;
+    }
+    entry.sha256 = item["sha256"].get<std::string>();
+    std::transform(entry.sha256.begin(), entry.sha256.end(), entry.sha256.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (!is_sha256_hex(entry.sha256)) {
+        message = "api-keys sha256 必须是 64 位十六进制";
+        return ErrCode::ConfigInvalid;
+    }
+    return parse_tenant_quota(item.contains("quota") ? item["quota"] : json(nullptr), cfg,
+                              entry.quota, message);
+}
+
+} // namespace
+
+// 静态 key 文件：只接受 version/keys；key 只以 sha256 落盘，不解析明文。
+ErrCode load_api_keys_file(const std::string& path, ServerConfig& cfg, std::string& message) {
+#ifndef _WIN32
+    struct stat st{};
+    if (::stat(path.c_str(), &st) != 0) {
+        message = "无法读取 api-keys 文件 " + path;
+        return ErrCode::ConfigInvalid;
+    }
+    if ((st.st_mode & 077) != 0) {
+        message = "api-keys 文件权限必须为 0600：" + path;
+        return ErrCode::ConfigInvalid;
+    }
+#endif
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        message = "无法读取 api-keys 文件 " + path;
+        return ErrCode::ConfigInvalid;
+    }
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const json parsed = json::parse(text, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object() ||
+        has_unknown_keys(parsed, {"version", "keys"})) {
+        message = "api-keys 文件必须是只含 version/keys 的 JSON 对象";
+        return ErrCode::ConfigInvalid;
+    }
+    if (!parsed.contains("version") || !parsed["version"].is_number_integer() ||
+        parsed["version"].get<std::int32_t>() != 1) {
+        message = "api-keys 文件 version 必须为 1";
+        return ErrCode::ConfigInvalid;
+    }
+    if (!parsed.contains("keys") || !parsed["keys"].is_array() || parsed["keys"].empty()) {
+        message = "api-keys 文件 keys 必须是非空数组";
+        return ErrCode::ConfigInvalid;
+    }
+    std::set<std::string> ids;
+    std::set<std::string> digests;
+    std::vector<ApiKeyEntry> entries;
+    for (const json& item : parsed["keys"]) {
+        ApiKeyEntry entry;
+        const ErrCode code = parse_api_key_entry(item, cfg, entry, message);
+        if (code != ErrCode::Ok) {
+            return code;
+        }
+        if (!ids.insert(entry.id).second || !digests.insert(entry.sha256).second) {
+            message = "api-keys id/sha256 不能重复";
+            return ErrCode::ConfigInvalid;
+        }
+        entries.push_back(std::move(entry));
+    }
+    cfg.api_keys = std::move(entries);
+    return ErrCode::Ok;
+}
+
+namespace {
+
 ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
     ErrCode rc = validate_model_entry(cfg, message);
     if (rc != ErrCode::Ok) {
@@ -497,6 +696,7 @@ ErrCode load_env_strings(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sour
             {"LLMOPT_PREEMPT_TRACE", "preempt-trace", &cfg.preempt_trace_path},
             {"LLMOPT_STEP_TRACE", "step-trace", &cfg.step_trace_path},
             {"LLMOPT_API_KEY", "api-key", &cfg.api_key},
+            {"LLMOPT_API_KEYS_FILE", "api-keys-file", &cfg.api_keys_file},
             {"LLMOPT_TLS_CERT", "tls-cert", &cfg.tls_cert_path},
             {"LLMOPT_TLS_KEY", "tls-key", &cfg.tls_key_path},
     };
@@ -849,6 +1049,22 @@ ErrCode load_config(int argc, char** argv, ServerConfig& out, std::string& messa
                               ConfigSource::Cli);
             }
         }
+        if (!out.api_keys_file.empty()) {
+            if (!out.api_key.empty()) {
+                message = "--api-key 与 --api-keys-file 不能同时设置";
+                return ErrCode::ConfigInvalid;
+            }
+            const ErrCode key_code = load_api_keys_file(out.api_keys_file, out, message);
+            if (key_code != ErrCode::Ok) {
+                return ErrCode::ConfigInvalid;
+            }
+        } else if (!out.api_key.empty()) {
+            ApiKeyEntry legacy;
+            legacy.id = "default";
+            legacy.sha256 = sha256_hex(out.api_key);
+            legacy.quota = make_default_tenant_quota(out);
+            out.api_keys.push_back(std::move(legacy));
+        }
         const ErrCode validated = validate_config(out, message);
         return validated == ErrCode::Ok ? ErrCode::Ok : ErrCode::ConfigInvalid;
     } catch (const std::exception& exc) {
@@ -869,6 +1085,14 @@ std::int32_t donor_slots_for(const ServerConfig& cfg) noexcept {
 }
 
 } // namespace
+
+TenantQuota make_default_tenant_quota(const ServerConfig& cfg) {
+    TenantQuota quota;
+    quota.max_concurrency = cfg.max_concurrency;
+    quota.queue_capacity = cfg.queue_capacity;
+    quota.kv_blocks = 0;
+    return quota;
+}
 
 SchedulerConfig make_scheduler_config(const ServerConfig& cfg, std::int32_t concurrency,
                                       bool prefix_cache) {

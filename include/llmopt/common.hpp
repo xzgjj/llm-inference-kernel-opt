@@ -36,6 +36,7 @@ enum class ErrCode : std::uint8_t {
     ConfigInvalid,
     KvBelowWatermark,
     PayloadTooLarge,
+    QuotaExceeded,
 };
 
 // 错误载体：跨层携带 code + 面向调用方的 message + 面向运维的 detail。
@@ -104,6 +105,15 @@ struct ChatMessage {
     std::string content;
 };
 
+// 租户配额：0 表示不额外限制，沿用全局预算；非 0 时是全局上限下的子上限。
+struct TenantQuota {
+    std::int32_t max_concurrency = 0;
+    std::int32_t queue_capacity = 0;
+    double rate_limit_rps = 0.0;
+    std::int32_t rate_limit_burst = 1;
+    std::int32_t kv_blocks = 0;
+};
+
 // C-01
 struct InferenceRequest {
     RequestId req_id;
@@ -115,6 +125,8 @@ struct InferenceRequest {
     std::int32_t n = 1;                // 返回候选条数；>1 仅支持非流式
     std::vector<ChatMessage> messages; // chat 入口保存原始消息，供模板渲染
     std::vector<std::string> stop;     // 命中即截断并按 stop 收尾
+    std::string tenant = "default";
+    TenantQuota tenant_quota;
 };
 
 // C-02

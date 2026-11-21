@@ -7,6 +7,7 @@
 #include "llmopt/kv.hpp"
 #include "llmopt/runner.hpp"
 #include "llmopt/scheduler.hpp"
+#include "llmopt/tenant.hpp"
 
 #include <cstdint>
 #include <string>
@@ -65,7 +66,10 @@ struct ServerConfig {
     std::int32_t request_deadline_seconds = 120;
     // 单步 Completion 回投超时；0=关闭。默认 30s，只影响“执行线程不回投”的故障路径。
     std::int32_t completion_timeout_ms = 30'000;
-    std::string api_key;              // 空=不鉴权；不写日志、不打印
+    std::string api_key; // 空=不鉴权；不写日志、不打印
+    // 阶段 11：静态 key 文件（只存 sha256）；与 api_key 互斥，加载后统一走 api_keys。
+    std::string api_keys_file;
+    std::vector<ApiKeyEntry> api_keys;
     std::int32_t step_trace_rate = 0; // 1/N 采样；0=关
     // 控制面隔离：>0 时在 loopback 上另起一个独立线程池的 /healthz /readyz /metrics。
     // 0 保持旧行为（控制端点仍挂在数据面端口，兼容现有客户端）。
@@ -94,6 +98,8 @@ std::string canonical_config_key(const std::string& key);
 [[nodiscard]] ModelConfig make_model_config(const ServerConfig& cfg, std::int32_t concurrency);
 [[nodiscard]] KVConfig make_kv_config(const ServerConfig& cfg, std::int32_t concurrency,
                                       bool prefix_cache);
+// 未配置 key 文件/单 token 时的默认租户配额：沿用全局预算，KV 不额外设限。
+[[nodiscard]] TenantQuota make_default_tenant_quota(const ServerConfig& cfg);
 
 } // namespace llmopt
 

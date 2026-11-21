@@ -7,6 +7,7 @@
 #include "llmopt/rate_limit.hpp"
 #include "llmopt/server.hpp"
 #include "llmopt/service.hpp"
+#include "llmopt/tenant.hpp"
 #include "spdlog/spdlog.h"
 
 #include <algorithm>
@@ -18,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace llmopt {
@@ -32,6 +34,9 @@ struct AppContext {
     GateResult gate;
     ServiceController service;
     std::unique_ptr<RateLimiter> limiter;
+    TenantQuota default_quota;
+    std::unique_ptr<TenantMetrics> tenant_metrics;
+    std::unordered_map<std::string, std::unique_ptr<RateLimiter>> tenant_limiters;
     std::atomic<bool> stopping{false};
     std::atomic<bool> drain_requested{false};
     std::atomic<bool> listen_done{false};
@@ -160,6 +165,20 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
     if (*done) {
         return false;
     }
+    auto record_ok = [&ctx, &req]() {
+        if (!req.tenant.empty()) {
+            ctx->tenant_metrics->inc_request(req.tenant, "ok");
+        }
+    };
+    auto record_error = [&ctx, &req](const Error* error) {
+        if (req.tenant.empty()) {
+            return;
+        }
+        ctx->tenant_metrics->inc_request(req.tenant, "error");
+        if (error != nullptr && error->code == ErrCode::QuotaExceeded) {
+            ctx->tenant_metrics->inc_rejected(req.tenant, "quota");
+        }
+    };
     Delta delta;
     for (int index = 0; index < 32 && sink->pop_frame(delta, 20); ++index) {
         bool hit = false;
@@ -174,6 +193,7 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
         if (!out.text.empty() || out.finish || out.error) {
             if (!write_frame(data_sink, render_frame(req, out))) {
                 ctx->core->cancel(req.req_id);
+                record_error(out.error ? &*out.error : nullptr);
                 *done = true;
                 return false;
             }
@@ -188,6 +208,11 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
             }
             data_sink.done();
             *done = true;
+            if (out.error) {
+                record_error(&*out.error);
+            } else {
+                record_ok();
+            }
             return false;
         }
     }
@@ -199,6 +224,7 @@ bool stream_provider(const std::shared_ptr<AppContext>& ctx, const InferenceRequ
     }
     data_sink.done();
     *done = true;
+    record_ok();
     return false;
 }
 
@@ -320,20 +346,39 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
                        httplib::Response& response, bool chat) {
     bool responded = false;
     std::vector<std::string> submitted;
+    std::string tenant;
     try {
         ctx->metrics->inc(MetricId::HttpRequests);
-        // D6-2：配置了 api-key 才校验；/healthz、/readyz、/metrics 走独立路由，不受影响。
-        if (!bearer_allowed(request.get_header_value("Authorization"), ctx->config->api_key)) {
+        // D6-2/阶段 11：按静态 key 解析 tenant；未知 key 不进入限流与队列。
+        const AuthDecision auth = resolve_bearer(request.get_header_value("Authorization"),
+                                                 ctx->config->api_keys, ctx->default_quota);
+        if (!auth.ok) {
             logger()->warn("http unauthorized path={}", request.path);
             response.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");
             send_error(response, make_error(ErrCode::Unauthorized, "缺少或无效的 Bearer token"));
             return;
         }
+        tenant = auth.tenant;
+        ctx->tenant_metrics->inc_request(tenant, "accepted");
         // 限流先于解析：超额请求既不建 sink 也不占调度预算（C-15）。
         if (ctx->limiter && !ctx->limiter->try_acquire()) {
             ctx->metrics->inc(MetricId::RateLimitedTotal);
             logger()->warn("http rate limited path={} rps={}", request.path, ctx->limiter->rps());
+            ctx->tenant_metrics->inc_request(tenant, "error");
+            ctx->tenant_metrics->inc_rejected(tenant, "rate_limit");
             send_error(response, make_error(ErrCode::RateLimited, "请求超过限流速率，请退避重试"));
+            return;
+        }
+        const auto tenant_limiter = ctx->tenant_limiters.find(auth.tenant);
+        if (tenant_limiter != ctx->tenant_limiters.end() &&
+            !tenant_limiter->second->try_acquire()) {
+            ctx->metrics->inc(MetricId::RateLimitedTotal);
+            logger()->warn("http tenant rate limited path={} tenant={} rps={}", request.path,
+                           auth.tenant, tenant_limiter->second->rps());
+            ctx->tenant_metrics->inc_request(tenant, "error");
+            ctx->tenant_metrics->inc_rejected(tenant, "rate_limit");
+            send_error(response,
+                       make_error(ErrCode::RateLimited, "租户请求超过限流速率，请退避重试"));
             return;
         }
         std::string request_id;
@@ -341,6 +386,8 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
             request_id = request.get_header_value("X-Request-Id");
         }
         InferenceRequest base;
+        base.tenant = auth.tenant;
+        base.tenant_quota = auth.quota;
         std::shared_ptr<ResponseSink> sink;
         int prompt_tokens = 0;
         const Error submit_error =
@@ -348,6 +395,9 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
         if (!submit_error.ok()) {
             logger()->warn("http reject id={} code={} path={}", base.req_id,
                            error_code_name(submit_error.code), request.path);
+            ctx->tenant_metrics->inc_request(tenant, "error");
+            ctx->tenant_metrics->inc_rejected(
+                    tenant, submit_error.code == ErrCode::QueueFull ? "queue" : "quota");
             send_error(response, submit_error);
             return;
         }
@@ -385,6 +435,9 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
                 }
                 logger()->warn("http reject id={} code={} path={}", extra.req_id,
                                error_code_name(error.code), request.path);
+                ctx->tenant_metrics->inc_request(tenant, "error");
+                ctx->tenant_metrics->inc_rejected(
+                        tenant, error.code == ErrCode::QueueFull ? "queue" : "quota");
                 send_error(response, error);
                 return;
             }
@@ -419,10 +472,17 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
         if (!first_error.ok()) {
             logger()->warn("http failed id={} code={} path={}", base.req_id,
                            error_code_name(first_error.code), request.path);
+            ctx->tenant_metrics->inc_request(tenant, "error");
+            if (first_error.code == ErrCode::QuotaExceeded) {
+                ctx->tenant_metrics->inc_rejected(tenant, "quota");
+            } else if (first_error.code == ErrCode::QueueFull) {
+                ctx->tenant_metrics->inc_rejected(tenant, "queue");
+            }
             send_error(response, first_error);
             return;
         }
         response.status = 200;
+        ctx->tenant_metrics->inc_request(tenant, "ok");
         response.set_content(render_body(base, texts, finishes, prompt_tokens, gen_tokens),
                              "application/json; charset=utf-8");
         logger()->info("http done id={} finish={} choices={} path={}", base.req_id,
@@ -431,6 +491,9 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
         responded = true;
     } catch (const std::exception& exc) {
         logger()->error("inference handler 异常: {}", exc.what());
+        if (!tenant.empty()) {
+            ctx->tenant_metrics->inc_request(tenant, "error");
+        }
         for (const std::string& id : submitted) {
             ctx->core->cancel(id);
         }
@@ -439,6 +502,9 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
         }
     } catch (...) {
         logger()->error("inference handler 未知异常");
+        if (!tenant.empty()) {
+            ctx->tenant_metrics->inc_request(tenant, "error");
+        }
         for (const std::string& id : submitted) {
             ctx->core->cancel(id);
         }
@@ -469,7 +535,9 @@ void register_control_routes(httplib::Server& server, const std::shared_ptr<AppC
                         "application/json; charset=utf-8");
     });
     server.Get("/metrics", [ctx](const httplib::Request&, httplib::Response& res) {
-        res.set_content(ctx->metrics->render(), "text/plain; version=0.0.4");
+        res.set_content(ctx->metrics->render() +
+                                ctx->tenant_metrics->render(ctx->core->tenant_stats()),
+                        "text/plain; version=0.0.4");
     });
 }
 
@@ -506,6 +574,22 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     ctx->metrics = &metrics;
     ctx->core = &core;
     ctx->gate = gate;
+    ctx->default_quota = make_default_tenant_quota(config);
+    std::vector<std::string> tenant_ids;
+    for (const ApiKeyEntry& entry : config.api_keys) {
+        tenant_ids.push_back(entry.id);
+    }
+    if (tenant_ids.empty()) {
+        tenant_ids.push_back("default");
+    }
+    ctx->tenant_metrics = std::make_unique<TenantMetrics>(tenant_ids);
+    for (const ApiKeyEntry& entry : config.api_keys) {
+        if (entry.quota.rate_limit_rps > 0.0) {
+            ctx->tenant_limiters.emplace(
+                    entry.id, std::make_unique<RateLimiter>(entry.quota.rate_limit_rps,
+                                                            entry.quota.rate_limit_burst));
+        }
+    }
     if (config.rate_limit_rps > 0.0) {
         ctx->limiter =
                 std::make_unique<RateLimiter>(config.rate_limit_rps, config.rate_limit_burst);

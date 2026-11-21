@@ -123,13 +123,31 @@ def raw_sse_cancel(base: str) -> bool:
 
 
 def wait_cancel_metric(base: str, before: float, timeout: float) -> tuple[bool, str]:
+    expected = before + 1.0
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         status, text = http_text(base, "/metrics", timeout=5)
-        if status == 200 and metric_value(text, 'llmopt_requests_total{status="cancelled"}') > before:
-            return True, ""
+        if status == 200:
+            observed = metric_value(text, 'llmopt_requests_total{status="cancelled"}')
+            if observed == expected:
+                return True, ""
+            if observed > expected:
+                return False, f"cancelled 指标多计：期望 {expected}，实际 {observed}"
         time.sleep(0.25)
-    return False, "cancelled 指标未增长"
+    return False, "cancelled 指标未按预期 +1"
+
+
+def wait_kv_zero(base: str, timeout: float) -> tuple[bool, float]:
+    deadline = time.monotonic() + timeout
+    last = -1.0
+    while time.monotonic() < deadline:
+        status, text = http_text(base, "/metrics", timeout=5)
+        if status == 200:
+            last = metric_value(text, "llmopt_kv_used_blocks")
+            if last == 0.0:
+                return True, last
+        time.sleep(0.1)
+    return False, last
 
 
 def file_sha256(path: Path) -> str:
@@ -149,15 +167,19 @@ def main() -> int:
     parser.add_argument("--threads", type=int, default=2)
     parser.add_argument("--ngl", type=int, default=0)
     parser.add_argument("--ctx", type=int, default=512)
+    parser.add_argument("--expect-sha256", default="", help="固定模型哈希；提供时启动前校验，不匹配直接失败")
     parser.add_argument("--evidence", default="")
     args = parser.parse_args()
 
     model = Path(args.model)
     if not model.is_file():
         return fail(f"模型不存在: {model}")
+    model_sha256 = file_sha256(model)
+    if args.expect_sha256 and model_sha256 != args.expect_sha256.lower():
+        return fail(f"模型 sha256 不匹配：期望 {args.expect_sha256}，实际 {model_sha256}")
 
     base = f"http://127.0.0.1:{args.port}"
-    log_path = Path(tempfile.gettempdir()) / "llmopt-nightly-real.log"
+    log_path = Path(tempfile.gettempdir()) / f"llmopt-nightly-real-{args.port}.log"
     with log_path.open("w", encoding="utf-8") as log:
         process = subprocess.Popen(
             [args.server, "--model", str(model), "--host", "127.0.0.1", "--port", str(args.port),
@@ -207,15 +229,18 @@ def main() -> int:
             status, completion_after = http_json(base, "/completion", {"prompt": "hello", "max_tokens": 2, "seed": 1})
             checks["post_cancel_healthy"] = status == 200 and bool(completion_after.get("choices"))
 
+            checks["kv_released"], kv_used_after = wait_kv_zero(base, 5.0)
+
             evidence = {
                 "checks": checks,
                 "metrics": {
                     "cancelled_before": cancelled_before,
                     "cancelled_after": metric_value(metrics_after, 'llmopt_requests_total{status="cancelled"}'),
-                    "kv_used_blocks": metric_value(metrics_after, "llmopt_kv_used_blocks"),
+                    "kv_used_blocks": kv_used_after,
                 },
                 "model": str(model),
-                "model_sha256": file_sha256(model),
+                "model_sha256": model_sha256,
+                "expect_sha256": args.expect_sha256,
                 "port": args.port,
             }
             if args.evidence:

@@ -223,6 +223,7 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 
 - `tests/unit/auth_test.cc`（`unit_auth`，3 例）：空 token 放行；`Bearer` 前缀、大小写、长度、尾随空格严格匹配；`secure_equals` 长度不同即失败。
 - `tests/integration/test_auth.py`（`auth_test`）：配置 `--api-key secret-token` 后无 header/错误 token 均 401 `UNAUTHORIZED` + `WWW-Authenticate: Bearer`，正确 token 的 chat 200；`/healthz`、`/readyz`、`/metrics` 仍 200，`/v1/models` 无 token 401。
+- `tests/integration/test_tenant_keys.py`（登记名 `tenant_keys_test`）：三租户静态 key 文件下，无 token/错 token 401；A 首次 200、立即重试 429 `RATE_LIMITED`；B 200；B 再来一条流式请求以 `[DONE]` 收尾并计 `ok`；C 长 prompt 429 `QUOTA_EXCEEDED`；`/metrics` 断言 `llmopt_tenant_requests_total{tenant,status}`、`llmopt_tenant_quota_rejected_total{tenant,reason}` 与 `llmopt_tenant_kv_used_blocks{tenant}` 存在且标签只含配置内 id。
 
 阶段 6 的 Linux/云主机复测（本机 Windows 无法执行的项）：
 
@@ -268,9 +269,20 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `completion_watchdog_test`：慢回投 runner（1.2 s）注入，请求 1 s 内收到 `EXECUTION_FAILED`；迟到 Completion 后 KV 归零；shutdown <5 s。
 - 非 TLS 构建仍注册控制面/证书失败用例；TLS 握手用例只在 TLS 构建出现，避免默认 Windows/MSVC 无 OpenSSL 时误报。
 - TLS CI 作业：`.github/workflows/ci.yml` 的 `tls` 作业用 `-DLLMOPT_ENABLE_TLS=ON` 编译并跑 TLS/控制面/证书失败三条，编译失败即红灯。
-- 真后端 nightly：`real-backend` 作业固定 llama.cpp `b12557` + 官方 Qwen2.5-0.5B Q4_K_M（sha256 `74a4da8c...`），CPU 构建后跑 `tests/e2e/nightly_real_backend.py`；断言 healthz/readyz、非流式 usage、SSE `[DONE]`/choices、断开后 cancelled 指标增长、`/metrics` 系列存在，并验证取消后服务仍可用、KV 回零。
+- 真后端 nightly：`real-backend` 作业固定 llama.cpp `b12557` + 官方 Qwen2.5-0.5B Q4_K_M（sha256 `74a4da8c...`），CPU 构建后跑 `tests/e2e/nightly_real_backend.py --expect-sha256 <固定值>`；脚本启动前校验哈希，不匹配直接失败。断言 healthz/readyz、非流式 usage、SSE `[DONE]`/choices、断开后 cancelled 指标恰好 +1、`/metrics` 系列存在，并验证取消后服务仍可用、KV 回零。
+
+阶段 11 的静态 key、租户配额与 KV 域隔离（2026-11-21）：
+
+- `unit_sha256`（3 例）：NIST 标准向量、空串/长串、分批与一次性摘要一致。
+- `unit_auth` +7 例：`resolve_bearer` 空表回落 `default`、前缀/大小写敏感、未知 key、命中后 tenant/quota 透传；`is_valid_tenant_id` 字符集与长度边界。
+- `unit_config` 扩到 24 例：api-keys 文件 `version/keys`、缺失/重复 id/重复 sha/坏 hex/越界配额、`--api-key` 互斥、POSIX 0600；新增跨语言硬编码 SHA 解析用例（233 断言）。
+- `unit_kv` +13 例：租户标记随 acquire/release 清理、`used_blocks_for` 含留置缓存、`evict_cached_for` 只回收本租户、跨租户同前缀零命中。
+- `contract_tenant`（3 例）：单租户 live 超限立即 `QUOTA_EXCEEDED` 且不拖累其他租户；running 满的租户让位；单请求 KV 超配额终态拒绝且块数归零；`tenant_stats()` 的 live/running/queued 快照。
+- `tenant_keys_test`（integration）：三租户 key 文件 401/200/429、A 限流、C KV 配额、`llmopt_tenant_*` 标签白名单。
+- Windows 本机复跑：`ctest -L fast` **191/191**（128 unit / 47 contract / 16 integration），全量 **192 注册**。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
+
 
 ## 8 维护
 

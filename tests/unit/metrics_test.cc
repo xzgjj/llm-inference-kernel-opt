@@ -179,3 +179,41 @@ TEST_CASE("reset_counters 保留 gauge，reset_all 清零") {
     metrics.reset_all();
     CHECK(metrics.get(llmopt::MetricId::QueueDepth) == 0);
 }
+
+TEST_CASE("TenantMetrics 只渲染配置内租户，计数与配额拒绝按标签区分") {
+    llmopt::TenantMetrics metrics({"tenant-a", "tenant-b"});
+    CHECK(metrics.render({}).find("tenant=\"tenant-a\"") != std::string::npos);
+    CHECK(metrics.render({}).find("tenant=\"tenant-z\"") == std::string::npos);
+
+    metrics.inc_request("tenant-a", "accepted");
+    metrics.inc_request("tenant-a", "ok");
+    metrics.inc_request("tenant-a", "error");
+    metrics.inc_rejected("tenant-a", "rate_limit");
+    metrics.inc_rejected("tenant-b", "queue");
+    metrics.inc_rejected("tenant-b", "quota");
+    // 未知租户/未知标签不新增基数，也不写坏数据。
+    metrics.inc_request("tenant-z", "ok");
+    metrics.inc_rejected("tenant-b", "unknown");
+    std::vector<llmopt::TenantStat> stats;
+    stats.push_back({"tenant-a", 1, 1, 0, 2});
+    stats.push_back({"tenant-b", 3, 1, 2, 4});
+    const std::string text = metrics.render(stats);
+    CHECK(text.find("llmopt_tenant_requests_total{tenant=\"tenant-a\",status=\"accepted\"} 1") !=
+          std::string::npos);
+    CHECK(text.find("llmopt_tenant_requests_total{tenant=\"tenant-a\",status=\"ok\"} 1") !=
+          std::string::npos);
+    CHECK(text.find("llmopt_tenant_requests_total{tenant=\"tenant-a\",status=\"error\"} 1") !=
+          std::string::npos);
+    CHECK(text.find("llmopt_tenant_quota_rejected_total{tenant=\"tenant-a\",reason=\"rate_limit\"} "
+                    "1") != std::string::npos);
+    CHECK(text.find("llmopt_tenant_quota_rejected_total{tenant=\"tenant-b\",reason=\"queue\"} 1") !=
+          std::string::npos);
+    CHECK(text.find("llmopt_tenant_quota_rejected_total{tenant=\"tenant-b\",reason=\"quota\"} 1") !=
+          std::string::npos);
+    CHECK(text.find("llmopt_tenant_inflight{tenant=\"tenant-b\"} 3") != std::string::npos);
+    CHECK(text.find("llmopt_tenant_queue_depth{tenant=\"tenant-b\"} 2") != std::string::npos);
+    CHECK(text.find("llmopt_tenant_kv_used_blocks{tenant=\"tenant-a\"} 2") != std::string::npos);
+    CHECK(text.find("tenant=\"tenant-z\"") == std::string::npos);
+    CHECK(text.find("reason=\"unknown\"") == std::string::npos);
+    CHECK(text.find("# TYPE llmopt_tenant_inflight gauge") != std::string::npos);
+}

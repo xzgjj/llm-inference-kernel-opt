@@ -117,7 +117,9 @@ struct PreemptHarness {
 
     // prompt 长度 = token 数；seed 固定后，抢占前后可逐 token 比对。
     std::shared_ptr<BoundedSink> submit(const std::string& id, std::int32_t prompt_tokens,
-                                        std::int32_t max_tokens, std::int32_t seed = 7) {
+                                        std::int32_t max_tokens, std::int32_t seed = 7,
+                                        const std::string& tenant = "default",
+                                        const TenantQuota& quota = {}) {
         std::vector<std::int32_t> prompt;
         prompt.reserve(static_cast<std::size_t>(prompt_tokens));
         for (std::int32_t index = 0; index < prompt_tokens; ++index) {
@@ -128,6 +130,8 @@ struct PreemptHarness {
         request.sampling.max_tokens = max_tokens;
         request.sampling.seed = seed;
         request.stream = true;
+        request.tenant = tenant;
+        request.tenant_quota = quota;
         auto sink = std::make_shared<BoundedSink>(128);
         REQUIRE(core.submit(request, std::move(prompt), sink) == ErrCode::Ok);
         return sink;

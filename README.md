@@ -19,7 +19,7 @@
 
 仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 CUDA kernel；本项目不做自定义算子，也不做分布式与训练。规模限定在单机、单进程、0.5B–27B 量化模型，本机实测档为 Qwen3-8B Q4_K_M。
 
-当前阶段 0–8 与阶段 9 的 TLS/控制面隔离、Completion watchdog 已落地：`ctest -L fast` 175 条全绿，全量 177 注册、2 条需真服务/真模型用例跳过；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
+当前阶段 0–11 已落地（阶段 10 为真后端 nightly 可靠性收口，阶段 11 为静态 key + 租户配额 + KV 域隔离）：`ctest -L fast` 191 条全绿，全量 192 注册；Linux/WSL 侧真实 llama.cpp 后端以 Qwen3-8B Q4_K_M（L1 证据档）跑通非流式与流式推理，Qwen2.5-0.5B 退居 CI 冒烟档。它可以作为学习 continuous batching 的可运行参考实现，也可以当作 llama.cpp 之上的最小 OpenAI 兼容服务骨架。
 
 
 
@@ -32,7 +32,7 @@
 5. **抢占与恢复**：显存/块不足时按代价模型选 victim，重算恢复；支持等待老化豁免、同请求连续抢占上限，抢占事件可写 CSV 回溯。
 6. **最小 OpenAI 兼容面**：`/v1/completions`、`/completion`、`/v1/chat/completions`、`/v1/models`；流式走 SSE，逐 token 下发，以 `data: [DONE]` 收尾。
 7. **容量门控**：启动前探测 RAM / GPU 空闲显存，按 `required ≤ free × safety_ratio` 给出 `ELIGIBLE / DEGRADED / BLOCKED` 三态，`off / auto / force_on` 三档决策，默认 `off`；`n_gpu_layers` 小于层数时按**显存/内存双池**分别判据（8B 在 8GB 卡上靠它才起得来）。
-8. **可运维性**：CLI > env > JSON 配置 > 默认 四层优先级；`/healthz`、`/readyz`；SIGTERM 排空；令牌桶限流；可选单 token Bearer 鉴权；Prometheus 文本指标（仅 counter/gauge）。
+8. **可运维性**：CLI > env > JSON 配置 > 默认 四层优先级；`/healthz`、`/readyz`；SIGTERM 排空；令牌桶限流；静态 key 文件鉴权与每租户并发/队列/限流/KV 配额（阶段 11）；Prometheus 文本指标（仅 counter/gauge，含 `llmopt_tenant_*` 租户标签）。
 9. **实验与证据链**：`tools/bench` 负责请求生成、SSE 采集、聚合与绘图，结果按 `phaseN/runs/<run_id>/` 归档，CSV / JSONL / 日志可复现。
 
 
@@ -143,7 +143,8 @@ cmake --build build --parallel
 | `LLMOPT_CHUNK_SIZE` | `128` | chunked prefill 单步宽度，仅 32 / 64 / 128 / 256 |
 | `LLMOPT_MODE` / `LLMOPT_SAFETY_RATIO` | `off` / `0.80` | 容量门控模式与软预算系数 |
 | `LLMOPT_BACKEND` | `llama` | `llama` 或 `stub`；stub 需 `LLMOPT_ALLOW_STUB=1` |
-| `LLMOPT_API_KEY` | 空 | 单 token Bearer 鉴权，空表示不鉴权，日志与启动摘要只打印 set/unset |
+| `LLMOPT_API_KEY` | 空 | 单 token Bearer 鉴权，空表示不鉴权，日志与启动摘要只打印 set/unset；与 `LLMOPT_API_KEYS_FILE` 互斥 |
+| `LLMOPT_API_KEYS_FILE` | 空 | 阶段 11 静态 key 文件路径；JSON 只存 SHA-256 与租户配额，POSIX 权限必须 0600 |
 | `LLMOPT_RATE_LIMIT_RPS` | `0` | 全局令牌桶速率，0 关闭；超额 429 `RATE_LIMITED` + `Retry-After: 1` |
 | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | SIGTERM 后在飞请求的排空上限 |
 | `LLMOPT_REQUEST_DEADLINE_SECONDS` | `120` | 请求级总时限，从入队起算；流式/非流式共享 |
@@ -213,6 +214,7 @@ Chat 端点只支持纯文本 `system / user / assistant`；`tools`、`tool_choi
 | --- | --- | --- |
 | 队列满 | 429 | `QUEUE_FULL` |
 | 限流 | 429 | `RATE_LIMITED` |
+| 租户配额满 | 429 | `QUOTA_EXCEEDED` |
 | KV 低于水位 | 429 | `KV_BELOW_WATERMARK` |
 | 上下文溢出 | 400 | `CONTEXT_OVERFLOW` |
 | 鉴权失败 | 401 | `UNAUTHORIZED` |
@@ -223,6 +225,7 @@ Chat 端点只支持纯文本 `system / user / assistant`；`tools`、`tool_choi
 curl -s http://127.0.0.1:8080/healthz   # 存活，始终 200，body 带 starting|ready|draining|stopped
 curl -s http://127.0.0.1:8080/readyz    # 就绪，仅 ready 返回 200，其余 503
 curl -s http://127.0.0.1:8080/metrics | grep llmopt_requests_total
+curl -s http://127.0.0.1:8080/metrics | grep 'llmopt_tenant_.*tenant="tenant-a"'
 ```
 
 进程退出码：0 正常、1 启动失败、2 用法错误、3 资源不足、4 门控拒绝。
@@ -246,7 +249,7 @@ python scripts/spec5/recompute_spec5.py \
 
 ## 当前水平与局限
 
-已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog；阶段 5 只做预研判据，不落实现。WSL `ctest -L fast` 175 条全绿、全量 177 注册 0 失败（2 条需真服务/真模型用例跳过）；真服务 e2e 10 项另行通过。
+已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额；阶段 5 只做预研判据，不落实现。Windows 本机 `ctest -L fast` 191 条全绿（128 unit / 47 contract / 16 integration），全量 192 注册；真服务 e2e 10 项另行通过。
 
 官方 8B 矩阵（WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q4_K_M，每档 30 请求 × 32 token × 2 轮，`ngl 24 / threads 0`，真实 token 口径）：
 
@@ -263,7 +266,7 @@ python scripts/spec5/recompute_spec5.py \
 - 单机单进程，实测覆盖 0.5B–8B 量化模型；27B 档只做容量与抢占验证，不出吞吐结论。
 - 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主，本机没有 Docker 与 SIGTERM 语义。
 - llama.cpp 的 `llama_batch` 没有 slot 字段，cell 由内部 `find_slot` 选择且无公开 getter，块表与 cell 的对账依赖内部头文件，属于**源码耦合点**，升级 llama.cpp 必须复核。
-- 兼容面是最小集：不做多租户、配额、WebUI、OpenAI 全量字段；鉴权只有一个 Bearer token。
+- 兼容面是最小集：阶段 11 已支持静态 key 文件 → 租户 + 并发/队列/限流/KV 配额；token 日配额、热加载与管理 API 仍未做。鉴权仍是进程内静态文件，公网多租户应前置网关。
 - 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
 - 阶段 9 增加 Completion watchdog（`--completion-timeout-ms`，默认 30 s）：执行线程不回投时先回 500，迟到回投后再释放 KV；永久挂死仍需 runner 级进程隔离。
 - nightly 增加 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。

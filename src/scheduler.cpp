@@ -281,10 +281,18 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         metrics_.inc(MetricId::RequestsQueueFull);
         return ErrCode::QueueFull;
     }
+    if (!reserve_tenant_live(req.tenant, req.tenant_quota)) {
+        release_admission();
+        logger()->warn("tenant quota rejected tenant={} req={}", req.tenant, req.req_id);
+        return ErrCode::QuotaExceeded;
+    }
     bool id_reserved = false;
     try {
         auto group = std::make_shared<SequenceGroup>();
         group->req_id = req.req_id;
+        group->tenant = req.tenant;
+        group->quota = req.tenant_quota;
+        group->tenant_live_reserved = true;
         group->prompt_ids = std::move(prompt_ids);
         group->sampling = req.sampling;
         group->stream = req.stream;
@@ -292,12 +300,14 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         group->seq.id = g_seq_id.fetch_add(1, std::memory_order_relaxed);
         group->backend_id = "seq-" + std::to_string(group->seq.id);
         group->seq.backend_id = group->backend_id;
+        group->seq.tenant = req.tenant;
         group->seq.prompt_len = static_cast<std::int32_t>(group->prompt_ids.size());
         group->seq.prompt_token_ids = group->prompt_ids;
         group->seq.sampling = group->sampling;
         group->enqueued_ns = now_ns();
         group->last_progress_ns = group->enqueued_ns;
         if (!reserve_request_id(group->req_id)) {
+            release_tenant_live(req.tenant);
             release_admission();
             metrics_.inc(MetricId::RequestsError);
             return ErrCode::InvalidJson;
@@ -309,6 +319,7 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
             // event 已 move 走，无法再取 group；按入队前保存的 id 释放。
             release_request_id(req.req_id);
             id_reserved = false;
+            release_tenant_live(req.tenant);
             release_admission();
             metrics_.inc(MetricId::AdmissionQueue);
             metrics_.inc(MetricId::RequestsQueueFull);
@@ -320,6 +331,7 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         if (id_reserved) {
             release_request_id(req.req_id);
         }
+        release_tenant_live(req.tenant);
         release_admission();
         metrics_.inc(MetricId::RequestsError);
         logger()->error("submit 内存分配失败");
@@ -328,6 +340,7 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         if (id_reserved) {
             release_request_id(req.req_id);
         }
+        release_tenant_live(req.tenant);
         release_admission();
         metrics_.inc(MetricId::RequestsError);
         logger()->error("submit 异常: {}", exc.what());
@@ -385,6 +398,61 @@ bool SchedulerCore::try_reserve_admission() noexcept {
 
 void SchedulerCore::release_admission() noexcept {
     inflight_admissions_.fetch_sub(1, std::memory_order_acq_rel);
+}
+
+std::int32_t tenant_capacity(const SchedulerConfig& config, const TenantQuota& quota) noexcept {
+    const std::int32_t max_concurrency =
+            quota.max_concurrency > 0 ? quota.max_concurrency : config.max_concurrency;
+    const std::int32_t queue_capacity =
+            quota.queue_capacity > 0 ? quota.queue_capacity : config.queue_capacity;
+    return max_concurrency + queue_capacity;
+}
+
+bool SchedulerCore::reserve_tenant_live(const std::string& tenant, const TenantQuota& quota) {
+    const std::int32_t capacity = tenant_capacity(config_, quota);
+    std::lock_guard<std::mutex> lock(tenant_mutex_);
+    auto& slot = tenant_counters_[tenant];
+    if (!slot) {
+        slot = std::make_shared<TenantCounter>();
+    }
+    if (slot->live.load(std::memory_order_relaxed) >= capacity) {
+        return false;
+    }
+    slot->live.fetch_add(1, std::memory_order_acq_rel);
+    return true;
+}
+
+void SchedulerCore::release_tenant_live(const std::string& tenant) noexcept {
+    std::lock_guard<std::mutex> lock(tenant_mutex_);
+    auto it = tenant_counters_.find(tenant);
+    if (it == tenant_counters_.end()) {
+        return;
+    }
+    if (it->second->live.load(std::memory_order_relaxed) > 0) {
+        it->second->live.fetch_sub(1, std::memory_order_acq_rel);
+    }
+}
+
+bool SchedulerCore::tenant_slot_available(const std::string& tenant,
+                                          const TenantQuota& quota) const {
+    const std::int32_t max_concurrency =
+            quota.max_concurrency > 0 ? quota.max_concurrency : config_.max_concurrency;
+    std::lock_guard<std::mutex> lock(tenant_mutex_);
+    auto it = tenant_running_.find(tenant);
+    return it == tenant_running_.end() || it->second < max_concurrency;
+}
+
+void SchedulerCore::tenant_running_acquire(const std::string& tenant) {
+    std::lock_guard<std::mutex> lock(tenant_mutex_);
+    ++tenant_running_[tenant];
+}
+
+void SchedulerCore::tenant_running_release(const std::string& tenant) {
+    std::lock_guard<std::mutex> lock(tenant_mutex_);
+    auto it = tenant_running_.find(tenant);
+    if (it != tenant_running_.end() && it->second > 0) {
+        --it->second;
+    }
 }
 
 bool SchedulerCore::reserve_request_id(const RequestId& req_id) {
@@ -567,10 +635,14 @@ void SchedulerCore::admit_waiting(TokenBudget& budget) {
         }
         std::size_t index = waiting_.size();
         for (std::size_t i = 0; i < waiting_.size(); ++i) {
-            if (!(preempted_this_pump_ && waiting_[i]->consecutive_preemptions > 0)) {
-                index = i;
-                break;
+            if (preempted_this_pump_ && waiting_[i]->consecutive_preemptions > 0) {
+                continue;
             }
+            if (!tenant_slot_available(waiting_[i]->tenant, waiting_[i]->quota)) {
+                continue;
+            }
+            index = i;
+            break;
         }
         if (index >= waiting_.size()) {
             break;
@@ -829,6 +901,39 @@ std::int32_t SchedulerCore::apply_prefix_hit(const std::shared_ptr<SequenceGroup
 bool SchedulerCore::acquire_blocks(const std::shared_ptr<SequenceGroup>& group,
                                    std::int32_t total_tokens, std::int32_t hit_tokens) {
     Sequence& seq = group->seq;
+    const auto drop_prefix = [&]() {
+        if (!seq.block_table.empty()) {
+            kv_.free(seq);
+            seq.num_computed = 0;
+        }
+        group->prefix_source.clear();
+        group->prefix_tokens = 0;
+        group->prefix_applied = false;
+    };
+    if (group->quota.kv_blocks > 0) {
+        const std::int32_t needed = kv_.blocks_for_tokens(total_tokens);
+        const std::int32_t additional = std::max<std::int32_t>(
+                needed - static_cast<std::int32_t>(seq.block_table.size()), 0);
+        if (additional > group->quota.kv_blocks) {
+            drop_prefix();
+            finish(group, FinishReason::Error,
+                   make_error(ErrCode::QuotaExceeded, "单请求所需 KV 块超过租户配额",
+                              "need=" + std::to_string(additional) +
+                                      " quota=" + std::to_string(group->quota.kv_blocks)));
+            return false;
+        }
+        std::int32_t used = kv_.used_blocks_for(group->tenant);
+        if (used + additional > group->quota.kv_blocks) {
+            // 先回收本租户可驱逐的缓存，避免自己的缓存把配额占死。
+            kv_.evict_cached_for(group->tenant);
+            reap_donors();
+            used = kv_.used_blocks_for(group->tenant);
+        }
+        if (used + additional > group->quota.kv_blocks) {
+            drop_prefix();
+            return false;
+        }
+    }
     AllocResult alloc = kv_.acquire(seq, total_tokens, 0, true);
     if (!alloc.ok() && hit_tokens > 0) {
         kv_.free(seq);
@@ -911,6 +1016,8 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
     group->admit_order = ++admit_seq_;
     group->last_progress_ns = now_ns();
     group->has_reserved_slice = false;
+    group->tenant_running_slot = true;
+    tenant_running_acquire(group->tenant);
     seq.status = SeqStatus::Running;
     running_.push_back(group);
     // 序列槽与本步首个 chunk 的 token 预算一起记账；append_prefills 消费预留切片。
@@ -943,6 +1050,10 @@ void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTri
         ++group->consecutive_preemptions;
         ++group->preemptions_total;
         preempted_this_pump_ = true;
+        if (group->tenant_running_slot) {
+            group->tenant_running_slot = false;
+            tenant_running_release(group->tenant);
+        }
         running_.erase(std::remove(running_.begin(), running_.end(), group), running_.end());
 
         const std::int32_t released = index < decision.released_per_victim.size()
@@ -1327,6 +1438,14 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
     if (seq.status == SeqStatus::Finished) {
         return;
     }
+    if (group->tenant_running_slot) {
+        group->tenant_running_slot = false;
+        tenant_running_release(group->tenant);
+    }
+    if (group->tenant_live_reserved) {
+        group->tenant_live_reserved = false;
+        release_tenant_live(group->tenant);
+    }
     release_request_id(group->req_id);
     seq.finish = reason;
     seq.status = SeqStatus::Finished;
@@ -1449,6 +1568,29 @@ std::int32_t SchedulerCore::running_count() const noexcept {
 
 std::int32_t SchedulerCore::waiting_count() const noexcept {
     return waiting_depth_.load(std::memory_order_relaxed);
+}
+
+std::vector<TenantStat> SchedulerCore::tenant_stats() const {
+    std::vector<TenantStat> stats;
+    {
+        std::lock_guard<std::mutex> lock(tenant_mutex_);
+        stats.reserve(tenant_counters_.size());
+        for (const auto& [tenant, counter] : tenant_counters_) {
+            TenantStat stat;
+            stat.tenant = tenant;
+            stat.live = counter->live.load(std::memory_order_relaxed);
+            auto running = tenant_running_.find(tenant);
+            if (running != tenant_running_.end()) {
+                stat.running = running->second;
+            }
+            stat.queued = stat.live > stat.running ? stat.live - stat.running : 0;
+            stats.push_back(std::move(stat));
+        }
+    }
+    for (TenantStat& stat : stats) {
+        stat.kv_used = kv_.used_blocks_for(stat.tenant);
+    }
+    return stats;
 }
 
 // 线程兜底：同一份 Error 分发给所有在飞与排队请求，客户端一定拿到终态。

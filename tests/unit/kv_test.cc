@@ -219,3 +219,50 @@ TEST_CASE("容量换算按 block_tokens × num_blocks，越界请求返回 Conte
     const AllocResult overflow = kv.acquire(seq, 161);
     CHECK(overflow.reason == AllocFailReason::ContextOverflow);
 }
+
+TEST_CASE("同前缀跨租户不命中，同租户仍命中") {
+    KVBlockManager kv(KVConfig{4, 8, 0.0, true, 2});
+    Sequence first;
+    init_sequence(first, 13, 8);
+    first.tenant = "tenant-a";
+    REQUIRE(kv.acquire(first, 8, 0, true).ok());
+    kv.mark_written(first, 8);
+    REQUIRE(kv.retain(first) == 8);
+
+    Sequence other;
+    init_sequence(other, 14, 8);
+    other.tenant = "tenant-b";
+    CHECK(kv.lookup_prefix(other).hit_tokens == 0);
+
+    Sequence same;
+    init_sequence(same, 15, 8);
+    same.tenant = "tenant-a";
+    const PrefixHit hit = kv.lookup_prefix(same);
+    REQUIRE(hit.hit_tokens == 4);
+    CHECK(kv.attach_prefix(same, hit) == 4);
+    kv.free(same);
+    kv.flush_cache();
+    std::string why;
+    CHECK(kv.check_invariants(why));
+}
+
+TEST_CASE("租户占块含留置缓存，可定向回收本租户缓存") {
+    KVBlockManager kv(KVConfig{4, 8, 0.0, true, 2});
+    Sequence first;
+    init_sequence(first, 16, 8);
+    first.tenant = "tenant-a";
+    REQUIRE(kv.acquire(first, 8, 0, true).ok());
+    kv.mark_written(first, 8);
+    REQUIRE(kv.retain(first) == 8);
+    CHECK(kv.used_blocks_for("tenant-a") == 2);
+    CHECK(kv.used_blocks_for("tenant-b") == 0);
+
+    kv.evict_cached_for("tenant-a");
+    CHECK(kv.used_blocks_for("tenant-a") == 0);
+    CHECK(kv.num_free_blocks() == kv.num_total_blocks());
+    const std::vector<RequestId> dropped = kv.take_dropped_donors();
+    REQUIRE(dropped.size() == 1);
+    CHECK(dropped.front() == "req-16");
+    std::string why;
+    CHECK(kv.check_invariants(why));
+}

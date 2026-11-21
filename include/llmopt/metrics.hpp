@@ -6,8 +6,10 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace llmopt {
@@ -123,6 +125,40 @@ struct MetricsSnapshot {
 namespace metrics {
 using Labels = std::vector<std::pair<std::string, std::string>>;
 }
+
+// 租户在线指标：行在启动时按配置 id 预建，之后只做原子加减，标签基数不随请求增长。
+struct TenantStat {
+    std::string tenant;
+    std::int32_t live = 0;
+    std::int32_t running = 0;
+    std::int32_t queued = 0;
+    std::int32_t kv_used = 0;
+};
+
+class TenantMetrics {
+public:
+    explicit TenantMetrics(const std::vector<std::string>& tenants);
+
+    // status: accepted/ok/error；reason: rate_limit/queue/quota。
+    void inc_request(const std::string& tenant, const char* status) noexcept;
+    void inc_rejected(const std::string& tenant, const char* reason) noexcept;
+    [[nodiscard]] std::string render(const std::vector<TenantStat>& stats) const;
+
+private:
+    struct Row {
+        std::atomic<std::uint64_t> accepted{0};
+        std::atomic<std::uint64_t> ok{0};
+        std::atomic<std::uint64_t> error{0};
+        std::atomic<std::uint64_t> rejected_rate_limit{0};
+        std::atomic<std::uint64_t> rejected_queue{0};
+        std::atomic<std::uint64_t> rejected_quota{0};
+    };
+
+    [[nodiscard]] std::string render_counters() const;
+    [[nodiscard]] std::string render_gauges(const std::vector<TenantStat>& stats) const;
+
+    std::unordered_map<std::string, std::unique_ptr<Row>> rows_;
+};
 
 // 指标写侧接口：引擎热路径用 MetricId 快路径，字符串 API 留给冷路径与测试。
 class IMetricsSink {

@@ -4,6 +4,8 @@
 
 #ifdef _WIN32
 #include <stdlib.h>
+#else
+#include <sys/stat.h>
 #endif
 
 #include "llmopt/config.hpp"
@@ -59,8 +61,10 @@ void clear_env() {
                             "LLMOPT_RATE_LIMIT_RPS",
                             "LLMOPT_RATE_LIMIT_BURST",
                             "LLMOPT_DRAIN_DEADLINE_SECONDS",
+                            "LLMOPT_REQUEST_DEADLINE_SECONDS",
                             "LLMOPT_COMPLETION_TIMEOUT_MS",
                             "LLMOPT_API_KEY",
+                            "LLMOPT_API_KEYS_FILE",
                             "LLMOPT_STEP_TRACE_RATE",
                             "LLMOPT_CONTROL_PORT",
                             "LLMOPT_TLS_CERT",
@@ -570,5 +574,113 @@ TEST_CASE("completion-timeout-ms 默认、CLI/env 与边界") {
           ErrCode::ConfigInvalid);
     CHECK(load({"--model", "m.gguf", "--completion-timeout-ms", "abc"}, cfg, message) ==
           ErrCode::ConfigInvalid);
+    clear_env();
+}
+
+namespace {
+
+void chmod_0600(const std::string& path) {
+#ifndef _WIN32
+    (void)::chmod(path.c_str(), 0600);
+#else
+    (void)path;
+#endif
+}
+
+std::vector<std::string> key_args(const std::string& path) {
+    return {"--model", "m.gguf", "--backend", "stub", "--api-keys-file", path};
+}
+
+} // namespace
+
+TEST_CASE("api-keys 文件：sha256、配额与默认继承") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    const std::string path = write_config(
+            "llmopt_api_keys_valid.json",
+            R"({"version":1,"keys":[
+                {"id":"tenant-a","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                 "quota":{"max_concurrency":2,"queue_capacity":3,"rate_limit_rps":1.5,"rate_limit_burst":2,"kv_blocks":8}},
+                {"id":"tenant-b","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]})");
+    chmod_0600(path);
+    ServerConfig cfg;
+    std::string message;
+    REQUIRE(load(key_args(path), cfg, message) == ErrCode::Ok);
+    REQUIRE(cfg.api_keys.size() == 2);
+    CHECK_EQ(cfg.api_keys[0].id, "tenant-a");
+    CHECK_EQ(cfg.api_keys[0].quota.max_concurrency, 2);
+    CHECK_EQ(cfg.api_keys[0].quota.queue_capacity, 3);
+    CHECK_EQ(cfg.api_keys[0].quota.kv_blocks, 8);
+    CHECK_EQ(cfg.api_keys[1].id, "tenant-b");
+    CHECK_EQ(cfg.api_keys[1].quota.max_concurrency, cfg.max_concurrency);
+    std::filesystem::remove(path);
+    clear_env();
+}
+
+TEST_CASE("api-keys 文件：坏 JSON、重复 id 与与单 key 互斥") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    ServerConfig cfg;
+    std::string message;
+
+    const std::string bad = write_config("llmopt_api_keys_bad.json", "{not-json");
+    chmod_0600(bad);
+    CHECK(load(key_args(bad), cfg, message) == ErrCode::ConfigInvalid);
+
+    const std::string dup = write_config(
+            "llmopt_api_keys_dup.json",
+            R"({"version":1,"keys":[
+                {"id":"tenant-a","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                {"id":"tenant-a","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}]})");
+    chmod_0600(dup);
+    CHECK(load(key_args(dup), cfg, message) == ErrCode::ConfigInvalid);
+
+    CHECK(load({"--model", "m.gguf", "--backend", "stub", "--api-key", "legacy",
+                "--api-keys-file", dup},
+               cfg, message) == ErrCode::ConfigInvalid);
+    std::filesystem::remove(bad);
+    std::filesystem::remove(dup);
+    clear_env();
+}
+
+TEST_CASE("api-keys 文件中的 sha256 可直接解析为租户") {
+    clear_env();
+    set_env("LLMOPT_ALLOW_STUB", "1");
+    const std::string path = write_config(
+            "llmopt_api_keys_resolve.json",
+            R"({"version":1,"keys":[
+                {"id":"tenant-a",
+                 "sha256":"3d3133c6e9b0220392a81a0b8bda5f91872ae26e244401cc7ac4d9616fd533f3",
+                 "quota":{"max_concurrency":1,"queue_capacity":1,"rate_limit_rps":0.5,"rate_limit_burst":1,"kv_blocks":0}},
+                {"id":"tenant-b",
+                 "sha256":"1a256545f370bc6ba136a7eebbdb5b137bf172ea46a4ff3baafae875d42ae3e9",
+                 "quota":{"max_concurrency":2,"queue_capacity":2}},
+                {"id":"tenant-c",
+                 "sha256":"a6021411d5cf9f982940ba6d4ec37147e6b6798692417ea2fa47c36fbcc63b74",
+                 "quota":{"max_concurrency":1,"queue_capacity":0,"kv_blocks":1}}]})");
+    chmod_0600(path);
+    ServerConfig cfg;
+    std::string message;
+    REQUIRE(load(key_args(path), cfg, message) == ErrCode::Ok);
+    TenantQuota fallback;
+    const std::string key = "lk_" + std::string(32, 'a');
+    const AuthDecision decision = resolve_bearer("Bearer " + key, cfg.api_keys, fallback);
+    CHECK(decision.ok);
+    CHECK_EQ(decision.tenant, "tenant-a");
+    CHECK_EQ(decision.quota.max_concurrency, 1);
+    std::filesystem::remove(path);
+    clear_env();
+}
+
+TEST_CASE("单 api-key 仍可用，落库前转成 default 租户的 sha256") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    REQUIRE(load({"--model", "m.gguf", "--api-key", "legacy-secret"}, cfg, message) ==
+            ErrCode::Ok);
+    REQUIRE(cfg.api_keys.size() == 1);
+    CHECK_EQ(cfg.api_keys[0].id, "default");
+    CHECK_EQ(cfg.api_keys[0].sha256.size(), 64U);
+    CHECK_EQ(cfg.api_key, "legacy-secret");
     clear_env();
 }

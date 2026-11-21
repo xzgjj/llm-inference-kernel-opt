@@ -30,6 +30,7 @@ struct Sequence {
     std::vector<std::int32_t> output_token_ids;
     std::vector<BlockRef> block_table;
     SamplingParams sampling;
+    std::string tenant = "default"; // 前缀哈希域与 KV 计费都按它隔离
     std::atomic<bool> cancel_requested{false};
 };
 

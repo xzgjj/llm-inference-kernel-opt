@@ -30,7 +30,8 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
               [--threads 0] [--n-gpu-layers 0] [--backend llama|stub] \
               [--rate-limit-rps 0] [--rate-limit-burst 32] \
               [--drain-deadline-seconds 30] [--request-deadline-seconds 120] \
-              [--completion-timeout-ms 30000] [--api-key ""] [--step-trace-rate 0] \
+              [--completion-timeout-ms 30000] [--api-key ""] [--api-keys-file ""] \
+              [--step-trace-rate 0] \
               [--control-port 0] [--tls-cert ""] [--tls-key ""] \
               [--log-level info|debug|warn]
 ```
@@ -70,7 +71,8 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 | `--drain-deadline-seconds` | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | 1–300 | SIGTERM 排空上限；超时强制停止 |
 | `--request-deadline-seconds` | `LLMOPT_REQUEST_DEADLINE_SECONDS` | `120` | 1–3600 | 请求级总时限，从入队起算；流式/非流式共享，到期由 Scheduler 以 `TIMEOUT` 收尾 |
 | `--completion-timeout-ms` | `LLMOPT_COMPLETION_TIMEOUT_MS` | `30000` | 0–86400000 | 单步 Completion 回投超时；超时先回 `EXECUTION_FAILED`，迟到回投后再释放 KV；0=关闭 |
-| `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值 |
+| `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值；与 `--api-keys-file` 互斥 |
+| `--api-keys-file` | `LLMOPT_API_KEYS_FILE` | 空 | JSON 路径 | 阶段 11 静态 key 文件：`version:1` + `keys[]`（`id`/`sha256`/`quota`）；key 只存 SHA-256，不存明文；Linux 权限必须 0600 |
 | `--step-trace-rate` | `LLMOPT_STEP_TRACE_RATE` | `0` | 0–64 | 每步 trace 1/N 采样；0=关（行为在 7-5 接入） |
 | `--control-port` | `LLMOPT_CONTROL_PORT` | `0` | 0–65535，且不得等于 `--port` | `>0` 时在 `127.0.0.1` 另起独立控制面 listener（独立 4 线程池），只提供 `/healthz`、`/readyz`、`/metrics`；`0` 保持旧行为 |
 | `--tls-cert` | `LLMOPT_TLS_CERT` | 空 | PEM 证书链路径 | 与 `--tls-key` 必须成对；需 `-DLLMOPT_ENABLE_TLS=ON` 构建，否则启动退出 3 |
@@ -84,7 +86,7 @@ llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capac
 
 `--model` 默认必填；只有 `--capacity-only` + `--model-profile` 同时出现时允许缺省。此时 `estimate: ...` 的 `kv` 已按 `--kv-cache-type` 折算（f16=2 B、q8_0≈1.0625 B、f32=4 B），不再按 f16 高估 2 倍。
 
-配置文件键与 CLI 同名，允许 kebab-case 或 snake_case（`ctx-tokens` / `ctx_tokens` 等价）；未知键、类型不符、越界与坏 JSON 一律退出 2，不静默取默认。`api-key` 可来自文件或 env，但启动摘要只打印 `set/unset`。
+配置文件键与 CLI 同名，允许 kebab-case 或 snake_case（`ctx-tokens` / `ctx_tokens` 等价）；未知键、类型不符、越界与坏 JSON 一律退出 2，不静默取默认。`api-key` 可来自文件或 env，但启动摘要只打印 `set/unset`。`api-keys-file` 同样支持文件/env，启动摘要只打印来源，不打印路径内容与 key。
 
 被拒绝的参数：
 
@@ -188,9 +190,14 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | `UnsupportedField` | 400 | `UNSUPPORTED_FIELD` | 否 |
 | `Unavailable` | 503 | `SERVICE_UNAVAILABLE` | 是 |
 | `RateLimited` | 429 | `RATE_LIMITED` | 是 |
+| `QuotaExceeded` | 429 | `QUOTA_EXCEEDED` | 是 |
 | `Unauthorized` | 401 | `UNAUTHORIZED` | 否 |
 
 鉴权语义（D6-2，默认关）：配置 `--api-key` 后，`/v1/completions`、`/v1/chat/completions`、`/v1/models` 必须带 `Authorization: Bearer <api-key>`；缺失或错误回 401 `UNAUTHORIZED` + `WWW-Authenticate: Bearer`。`/healthz`、`/readyz`、`/metrics` 不校验，供探针与 Prometheus 抓取。
+
+多租户鉴权（阶段 11）：`--api-keys-file` 指向只含 `version`/`keys` 的 JSON。每个条目为 `{"id":"tenant-a","sha256":"<64 hex>","quota":{...}}`，`id` 限 `[a-z0-9-]{1,32}`，`sha256` 是客户端 key 的 SHA-256，**文件不存明文 key**。客户端仍用 `Authorization: Bearer <key>`，服务端算摘要后定长比较。文件权限（POSIX）必须是 0600，否则启动退出 3；Windows 跳过权限检查。`--api-key` 是单租户 `default` 的简写，二者不能同时设置；旧 `--api-key` 启动时等价于一条 `id=default` 的 SHA-256 条目。
+
+租户配额字段：`max_concurrency`（1..全局并发）、`queue_capacity`（0..全局队列）、`rate_limit_rps`（0..1e6）、`rate_limit_burst`（1..1024）、`kv_blocks`（0..全局块数，0=不限）。`max_concurrency + queue_capacity` 构成该租户的 live 准入上限，超限立即 429 `QUOTA_EXCEEDED`；`kv_blocks` 是该租户可占用的 KV 块总量，单请求需求超限直接终态拒绝，缓存可先回收本租户留置块。未知 key 401；租户限流 429 `RATE_LIMITED`；全局队列满 429 `QUEUE_FULL`。日志只写 `tenant=<id>`，不写 key 或摘要。
 
 TLS 语义（阶段 9）：`--tls-cert/--tls-key` 同时设置时，数据面以 `https` 提供服务；需 `-DLLMOPT_ENABLE_TLS=ON` 构建，默认构建配置证书会在启动时退出 3。证书/私钥无效、不可读同样退出 3。控制面仍为 loopback 明文，跨机控制面由前置代理终止 TLS。
 
@@ -253,7 +260,7 @@ TLS 语义（阶段 9）：`--tls-cert/--tls-key` 同时设置时，数据面以
 | `LLMOPT_ALLOW_STUB=1` | 允许 stub 后端，供测试与 CI | 未设置即拒绝 |
 | `LLMOPT_LLAMA_ROOT` | CMake 查 llama.cpp 头/库的根 | `/root/llm-src/llama.cpp` |
 
-- 默认只绑 `127.0.0.1`；`--api-key` 提供单 token Bearer（默认关，空值不校验），不做多租户/配额。阶段 9 起可选用进程内 TLS；公网/多租户仍建议反向代理承担 TLS、mTLS 与更强认证。
+- 默认只绑 `127.0.0.1`；`--api-key` 提供单 token Bearer，`--api-keys-file` 提供多 key/租户与每 key 配额（默认关，空值不校验）。阶段 9 起可选用进程内 TLS；公网仍建议反向代理承担 TLS、mTLS 与更强认证。
 - 请求体上限 4 MB；读超时 5 s；写超时 120 s；单请求非流式排空上限 120 s。
 - 队列容量 32，满即 429；等待中的请求只占分词后的 token 数组，不占 KV。
 - 控制面独立端口只绑 loopback；不要把 `--control-port` 暴露到公网，除非前置代理做了访问控制。

@@ -122,7 +122,7 @@ CI 的职责是把**可判定**的部分变成机器红灯，把**不可判定**
 | CI-COD-006 | 悬空 TODO | 自动 | 只允许 `TODO(owner):` 形式，无主 TODO 计入失败 | `script:check_code.py:todos` | 无 |
 | CI-LLM-001 | 真实后端可编译 | 自动 | `runner_llama.cpp` 在固定版本 llama.cpp 头文件下零警告编译通过 | `workflow:llama-compile` | 找不到固定版本时失败并留痕，不静默跳过 |
 | CI-TLS-001 | TLS 可选构建与握手 | 自动 | `-DLLMOPT_ENABLE_TLS=ON` 零警告构建；`integration_server_tls`、`integration_server_control_isolation`、`integration_server_tls_config_error` 通过 | `workflow:tls` | 无 |
-| CI-REAL-001 | 真后端模型固定 | 自动 | nightly 下载官方 Qwen2.5-0.5B Q4_K_M，sha256 必须匹配 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`（491,400,032 bytes） | `workflow:real-backend` | 无 |
+| CI-REAL-001 | 真后端模型固定 | 自动 | nightly 下载官方 Qwen2.5-0.5B Q4_K_M，sha256 必须匹配 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`（491,400,032 bytes） | `script:tests/e2e/nightly_real_backend.py --expect-sha256` + `workflow:real-backend` | 无 |
 | CI-REAL-002 | 真后端五项运行时 | 自动 | `healthz/readyz`、非流式、SSE、断连取消、`/metrics` 全部通过；失败不跳过 | `script:tests/e2e/nightly_real_backend.py` + `workflow:real-backend` | 无 |
 
 编译器版本：`build-clang` 用 runner 预装的 clang（当前 21.1.8），不锁旧版本。此前 `spdlog 1.14.1` 内嵌的 fmt 10.2 在 clang ≥19 会以 `call to consteval function ... is not a constant expression` 硬报错，导致全量构建失败；根因在依赖侧而不是编译器侧，故把 spdlog 升到 1.17.0（内嵌 fmt 11），冻结表同步更新，编译器不再需要降级。第三方头噪声单独豁免、不外扩：doctest 2.4.11 在 clang 下无条件 `#include <ciso646>`，libstdc++ 15 对该头抛 `#warning`，故 clang 作业加 `-Wno-error=#warnings`（仅降级该类，其余仍 error）。两处工具侧豁免同样单独记录、不外扩：`modernize-use-scoped-lock` 在 clang-tidy 21.1.6 上段错误（上游 `diagOnSingleLock` 崩溃，与本项目代码无关），已从 `.clang-tidy` 关闭并留 TODO；sanitizer 作业在 RelWithDebInfo 下对 libstdc++ `<regex>` 的 `maybe-uninitialized` 假阳性只降级为告警。

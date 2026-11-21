@@ -40,6 +40,7 @@ endif()
 add_library(llmopt_core STATIC
     src/common.cpp
     src/protocol.cpp
+    src/sha256.cpp
     src/config.cpp
     src/kv.cpp
     src/preempt.cpp

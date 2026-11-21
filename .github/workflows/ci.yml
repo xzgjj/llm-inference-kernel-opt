@@ -289,12 +289,26 @@ jobs:
           mkdir -p /tmp/models
           curl -fSL --retry 3 --retry-delay 5 -o /tmp/models/qwen2.5-0.5b-q4_k_m.gguf "$MODEL_URL"
           echo "${MODEL_SHA256}  /tmp/models/qwen2.5-0.5b-q4_k_m.gguf" | sha256sum -c -
+      - name: reject wrong model sha256
+        run: |
+          set +e
+          python tests/e2e/nightly_real_backend.py \
+            --server build-real/llmopt_server \
+            --model /tmp/models/qwen2.5-0.5b-q4_k_m.gguf \
+            --expect-sha256 0000000000000000000000000000000000000000000000000000000000000000 \
+            --port 18081
+          rc=$?
+          set -e
+          if [ "$rc" -ne 1 ]; then
+            echo "expected sha256 mismatch to exit 1, got $rc"; exit 1
+          fi
       - name: five-part runtime checks
         run: |
           mkdir -p build/ci-reports
           python tests/e2e/nightly_real_backend.py \
             --server build-real/llmopt_server \
             --model /tmp/models/qwen2.5-0.5b-q4_k_m.gguf \
+            --expect-sha256 "$MODEL_SHA256" \
             --port 18080 \
             --evidence build/ci-reports/real-backend.json
       - name: upload evidence
@@ -304,6 +318,6 @@ jobs:
           name: real-backend-evidence
           path: |
             build/ci-reports/real-backend.json
-            /tmp/llmopt-nightly-real.log
+            /tmp/llmopt-nightly-real-18080.log
           if-no-files-found: warn
           retention-days: 30

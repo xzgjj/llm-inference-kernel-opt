@@ -20,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -112,6 +113,11 @@ struct SequenceGroup {
     std::int64_t last_token_ns = 0;
     // Completion 超时已向客户端推过错误：保持运行态等执行线程回投，避免提前释放 KV。
     bool completion_timed_out = false;
+    // 阶段 11：租户身份与配额；live 覆盖 running+waiting+尚未被 Core 取走的提交。
+    std::string tenant = "default";
+    TenantQuota quota;
+    bool tenant_live_reserved = false;
+    bool tenant_running_slot = false;
 };
 
 // 已生成 token 已写入 KV 的长度：prompt 之后只差“最后一个已采样、尚未回填”的 token。
@@ -283,6 +289,8 @@ public:
 
     std::int32_t running_count() const noexcept;
     std::int32_t waiting_count() const noexcept;
+    // /metrics 抓取：tenant 计数快照；kv_used 逐个租户扫描块表。
+    [[nodiscard]] std::vector<TenantStat> tenant_stats() const;
 
 private:
     enum class DeliverResult : std::uint8_t { Continue, Finished, Failed };
@@ -304,6 +312,13 @@ private:
     // 准入预留：先占坑再投递，避免突发并发同时看到旧镜像而集体越界。
     bool try_reserve_admission() noexcept;
     void release_admission() noexcept;
+    // 租户 live 计数跨 HTTP/Core 线程：一把短锁保护 map，计数本身在原子里做加减。
+    bool reserve_tenant_live(const std::string& tenant, const TenantQuota& quota);
+    void release_tenant_live(const std::string& tenant) noexcept;
+    [[nodiscard]] bool tenant_slot_available(const std::string& tenant,
+                                             const TenantQuota& quota) const;
+    void tenant_running_acquire(const std::string& tenant);
+    void tenant_running_release(const std::string& tenant);
     // 外部 Request ID 只在 submit/finish 冷路径加锁；同一活跃 ID 不得二次入队。
     bool reserve_request_id(const RequestId& req_id);
     void release_request_id(const RequestId& req_id);
@@ -369,6 +384,13 @@ private:
     // 活跃外部 ID 集合：仅在 submit/finish 冷路径访问，只判协议层重复，不参与后端槽位键。
     std::mutex active_ids_mutex_;
     std::unordered_set<RequestId> active_ids_;
+    struct TenantCounter {
+        std::atomic<std::int32_t> live{0};
+    };
+    mutable std::mutex tenant_mutex_;
+    std::unordered_map<std::string, std::shared_ptr<TenantCounter>> tenant_counters_;
+    // Core 线程私有的 running 计数；admit/finish 是唯一写点。
+    std::unordered_map<std::string, std::int32_t> tenant_running_;
     std::int64_t started_ns_ = 0;
     std::int32_t running_peak_ = 0;
     // KV 占用峰值：Core 线程私有，仅随 publish_kv_usage() 的快照刷新；新增收尾出口须走该路径，

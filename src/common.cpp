@@ -20,6 +20,7 @@ int http_status(ErrCode code) noexcept {
     case ErrCode::KvBelowWatermark:
     case ErrCode::QueueFull:
     case ErrCode::RateLimited:
+    case ErrCode::QuotaExceeded:
         return 429;
     case ErrCode::KvInsufficient:
         return 507;
@@ -73,6 +74,8 @@ const char* error_code_name(ErrCode code) noexcept {
         return "SERVICE_UNAVAILABLE";
     case ErrCode::RateLimited:
         return "RATE_LIMITED";
+    case ErrCode::QuotaExceeded:
+        return "QUOTA_EXCEEDED";
     case ErrCode::Unauthorized:
         return "UNAUTHORIZED";
     case ErrCode::ConfigInvalid:
@@ -106,7 +109,7 @@ const char* finish_reason_name(FinishReason reason) noexcept {
 bool retryable(ErrCode code) noexcept {
     return code == ErrCode::ModelNotLoaded || code == ErrCode::KvBelowWatermark ||
            code == ErrCode::QueueFull || code == ErrCode::Timeout || code == ErrCode::Unavailable ||
-           code == ErrCode::RateLimited;
+           code == ErrCode::RateLimited || code == ErrCode::QuotaExceeded;
 }
 
 } // namespace llmopt

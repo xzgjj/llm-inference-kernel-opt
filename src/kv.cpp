@@ -12,6 +12,16 @@ constexpr std::uint64_t kHashPrime = 1099511628211ULL;
 // 末尾标识：让空 parent 与真实哈希区分开。
 constexpr std::uint64_t kHashSalt = 0x9E3779B97F4A7C15ULL;
 
+// 前缀哈希域分离：同 prompt 在不同租户得到不同链，跨租户永不命中。
+std::uint64_t tenant_salt(const std::string& tenant) noexcept {
+    std::uint64_t value = 0xcbf29ce484222325ULL;
+    for (char ch : tenant) {
+        value ^= static_cast<std::uint64_t>(static_cast<unsigned char>(ch));
+        value *= kHashPrime;
+    }
+    return value;
+}
+
 } // namespace
 
 KVBlockManager::KVBlockManager(KVConfig config) : config_(config) {
@@ -42,9 +52,13 @@ std::int32_t KVBlockManager::blocks_for(std::int32_t tokens) const noexcept {
 
 std::uint64_t KVBlockManager::chain_hash(std::uint64_t parent,
                                          const std::vector<std::int32_t>& tokens,
-                                         std::int32_t index) const noexcept {
+                                         std::int32_t index,
+                                         const std::string& tenant) const noexcept {
     const std::int32_t begin = index * config_.block_tokens;
     std::uint64_t value = parent * kHashPrime ^ kHashSalt;
+    if (!tenant.empty()) {
+        value ^= tenant_salt(tenant) * kHashPrime;
+    }
     for (std::int32_t offset = 0; offset < config_.block_tokens; ++offset) {
         value ^= static_cast<std::uint64_t>(tokens[static_cast<std::size_t>(begin) +
                                                    static_cast<std::size_t>(offset)]) +
@@ -91,6 +105,7 @@ void KVBlockManager::release_block(std::int32_t id) {
     ref_total_ -= 1;
     if (block.ref_cnt == 0) {
         block.owner.clear();
+        block.tenant.clear();
         forget_hash(id);
         push_free(id);
     }
@@ -166,6 +181,7 @@ AllocResult KVBlockManager::acquire(Sequence& seq, std::int32_t n_tokens, std::i
         block.hash = 0;
         block.verified = false;
         block.owner.clear();
+        block.tenant = seq.tenant;
         ref_total_ += 1;
         seq.block_table.push_back(BlockRef{id});
         result.added.push_back(BlockRef{id});
@@ -183,7 +199,7 @@ AllocResult KVBlockManager::acquire(Sequence& seq, std::int32_t n_tokens, std::i
                                              seq.block_table[static_cast<std::size_t>(index - 1)]
                                                      .block_id)]
                                      .hash;
-        register_hash(id, chain_hash(parent, seq.prompt_token_ids, index));
+        register_hash(id, chain_hash(parent, seq.prompt_token_ids, index, seq.tenant));
     }
     return result;
 }
@@ -196,13 +212,14 @@ PrefixHit KVBlockManager::lookup_prefix(const Sequence& seq) const {
     const std::int32_t max_blocks = (seq.prompt_len - 1) / config_.block_tokens;
     std::uint64_t parent = 0;
     for (std::int32_t index = 0; index < max_blocks; ++index) {
-        const std::uint64_t hash = chain_hash(parent, seq.prompt_token_ids, index);
+        const std::uint64_t hash = chain_hash(parent, seq.prompt_token_ids, index, seq.tenant);
         auto it = hash_index_.find(hash);
         if (it == hash_index_.end()) {
             break;
         }
         const BlockState& block = blocks_[static_cast<std::size_t>(it->second)];
-        if (block.hash != hash || !block.verified || block.ref_cnt <= 0) {
+        if (block.hash != hash || !block.verified || block.ref_cnt <= 0 ||
+            block.tenant != seq.tenant) {
             break;
         }
         if (hit.blocks.empty() && !block.owner.empty()) {
@@ -221,7 +238,7 @@ std::int32_t KVBlockManager::attach_prefix(Sequence& seq, const PrefixHit& hit) 
     }
     for (const BlockRef& ref : hit.blocks) {
         BlockState& block = blocks_[static_cast<std::size_t>(ref.block_id)];
-        if (!block.verified || block.ref_cnt <= 0) {
+        if (!block.verified || block.ref_cnt <= 0 || block.tenant != seq.tenant) {
             return 0;
         }
         block.ref_cnt += 1;
@@ -320,6 +337,28 @@ std::vector<BackendId> KVBlockManager::take_dropped_donors() {
     std::vector<BackendId> out;
     out.swap(dropped_);
     return out;
+}
+
+std::int32_t KVBlockManager::used_blocks_for(const std::string& tenant) const {
+    std::int32_t used = 0;
+    for (const BlockState& block : blocks_) {
+        if (block.ref_cnt > 0 && block.tenant == tenant) {
+            ++used;
+        }
+    }
+    return used;
+}
+
+void KVBlockManager::evict_cached_for(const std::string& tenant) {
+    std::vector<BackendId> victims;
+    for (const auto& [donor, ids] : donors_) {
+        if (!ids.empty() && blocks_[static_cast<std::size_t>(ids.front())].tenant == tenant) {
+            victims.push_back(donor);
+        }
+    }
+    for (const BackendId& donor : victims) {
+        evict_donor(donor);
+    }
 }
 
 std::int32_t KVBlockManager::num_free_blocks() const noexcept {

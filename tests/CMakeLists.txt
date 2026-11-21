@@ -32,6 +32,7 @@ endfunction()
 # nightly_real_backend.py 由 CI real-backend 作业直接调用（需真模型与 LLAMA 构建），
 # 不进 CTest 注册表，避免无模型环境把 nightly 用例误当默认测试。
 llmopt_add_doctest(unit_protocol "unit;fast;hermetic" SOURCES unit/protocol_test.cc)
+llmopt_add_doctest(unit_sha256 "unit;fast;hermetic" SOURCES unit/sha256_test.cc)
 llmopt_add_doctest(unit_config "unit;fast;hermetic" SOURCES unit/config_test.cc)
 llmopt_add_doctest(unit_kv "unit;fast;hermetic" SOURCES unit/kv_test.cc)
 llmopt_add_doctest(unit_gate "unit;fast;hermetic" SOURCES unit/gate_test.cc)
@@ -55,6 +56,7 @@ llmopt_add_doctest(preempt_test "contract;fast;hermetic" SOURCES contract/preemp
 llmopt_add_doctest(state_test "contract;fast;hermetic" SOURCES contract/state_test.cc)
 llmopt_add_doctest(lifecycle_test "contract;fast;hermetic" SOURCES contract/lifecycle_test.cc)
 llmopt_add_doctest(admission_test "contract;fast;hermetic" SOURCES contract/admission_test.cc)
+llmopt_add_doctest(contract_tenant "contract;fast;hermetic" SOURCES contract/tenant_test.cc)
 llmopt_add_doctest(completion_watchdog_test "contract;fast;hermetic"
                    SOURCES contract/watchdog_test.cc)
 # 阶段 5：C-P5-01…03 预留值对象只证明默认值等价 v0，不接入热路径。
@@ -128,6 +130,15 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(auth_test PROPERTIES
                          LABELS "integration;fast;hermetic")
     set_tests_properties(auth_test PROPERTIES TIMEOUT 120)
+
+    # 阶段 11：静态 key → tenant；每 key 限流与 KV 配额独立。
+    add_test(NAME tenant_keys_test
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_tenant_keys.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(tenant_keys_test PROPERTIES
+                         LABELS "integration;fast;hermetic")
+    set_tests_properties(tenant_keys_test PROPERTIES TIMEOUT 120)
 
     # 6-G4：令牌桶超额 429 + Retry-After，回填后恢复。
     add_test(NAME backpressure_test

@@ -444,4 +444,124 @@ std::string MetricsRegistry::render() const {
     return expose_text();
 }
 
+TenantMetrics::TenantMetrics(const std::vector<std::string>& tenants) {
+    for (const std::string& tenant : tenants) {
+        rows_.emplace(tenant, std::make_unique<Row>());
+    }
+}
+
+void TenantMetrics::inc_request(const std::string& tenant, const char* status) noexcept {
+    auto it = rows_.find(tenant);
+    if (it == rows_.end()) {
+        return;
+    }
+    std::atomic<std::uint64_t>* counter = nullptr;
+    if (std::strcmp(status, "accepted") == 0) {
+        counter = &it->second->accepted;
+    } else if (std::strcmp(status, "ok") == 0) {
+        counter = &it->second->ok;
+    } else if (std::strcmp(status, "error") == 0) {
+        counter = &it->second->error;
+    }
+    if (counter != nullptr) {
+        counter->fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void TenantMetrics::inc_rejected(const std::string& tenant, const char* reason) noexcept {
+    auto it = rows_.find(tenant);
+    if (it == rows_.end()) {
+        return;
+    }
+    std::atomic<std::uint64_t>* counter = nullptr;
+    if (std::strcmp(reason, "rate_limit") == 0) {
+        counter = &it->second->rejected_rate_limit;
+    } else if (std::strcmp(reason, "queue") == 0) {
+        counter = &it->second->rejected_queue;
+    } else if (std::strcmp(reason, "quota") == 0) {
+        counter = &it->second->rejected_quota;
+    }
+    if (counter != nullptr) {
+        counter->fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+std::string TenantMetrics::render_counters() const {
+    std::string out;
+    out += "# HELP llmopt_tenant_requests_total 租户请求总数，status 取 accepted/ok/error\n";
+    out += "# TYPE llmopt_tenant_requests_total counter\n";
+    for (const auto& [tenant, row] : rows_) {
+        char line[256];
+        std::snprintf(
+                line, sizeof(line),
+                "llmopt_tenant_requests_total{tenant=\"%s\",status=\"accepted\"} %llu\n",
+                tenant.c_str(),
+                static_cast<unsigned long long>(row->accepted.load(std::memory_order_relaxed)));
+        out += line;
+        std::snprintf(line, sizeof(line),
+                      "llmopt_tenant_requests_total{tenant=\"%s\",status=\"ok\"} %llu\n",
+                      tenant.c_str(),
+                      static_cast<unsigned long long>(row->ok.load(std::memory_order_relaxed)));
+        out += line;
+        std::snprintf(line, sizeof(line),
+                      "llmopt_tenant_requests_total{tenant=\"%s\",status=\"error\"} %llu\n",
+                      tenant.c_str(),
+                      static_cast<unsigned long long>(row->error.load(std::memory_order_relaxed)));
+        out += line;
+    }
+    out += "# HELP llmopt_tenant_quota_rejected_total 租户配额拒绝总数，reason 取 "
+           "rate_limit/queue/quota\n";
+    out += "# TYPE llmopt_tenant_quota_rejected_total counter\n";
+    for (const auto& [tenant, row] : rows_) {
+        char line[256];
+        std::snprintf(
+                line, sizeof(line),
+                "llmopt_tenant_quota_rejected_total{tenant=\"%s\",reason=\"rate_limit\"} %llu\n",
+                tenant.c_str(),
+                static_cast<unsigned long long>(
+                        row->rejected_rate_limit.load(std::memory_order_relaxed)));
+        out += line;
+        std::snprintf(line, sizeof(line),
+                      "llmopt_tenant_quota_rejected_total{tenant=\"%s\",reason=\"queue\"} %llu\n",
+                      tenant.c_str(),
+                      static_cast<unsigned long long>(
+                              row->rejected_queue.load(std::memory_order_relaxed)));
+        out += line;
+        std::snprintf(line, sizeof(line),
+                      "llmopt_tenant_quota_rejected_total{tenant=\"%s\",reason=\"quota\"} %llu\n",
+                      tenant.c_str(),
+                      static_cast<unsigned long long>(
+                              row->rejected_quota.load(std::memory_order_relaxed)));
+        out += line;
+    }
+    return out;
+}
+
+std::string TenantMetrics::render_gauges(const std::vector<TenantStat>& stats) const {
+    std::string out;
+    out += "# HELP llmopt_tenant_inflight 租户已准入且未结束的请求数\n";
+    out += "# TYPE llmopt_tenant_inflight gauge\n";
+    out += "# HELP llmopt_tenant_queue_depth 租户已准入但尚未运行的请求数\n";
+    out += "# TYPE llmopt_tenant_queue_depth gauge\n";
+    out += "# HELP llmopt_tenant_kv_used_blocks 租户占用的 KV 块数（含本租户留置缓存）\n";
+    out += "# TYPE llmopt_tenant_kv_used_blocks gauge\n";
+    for (const TenantStat& stat : stats) {
+        char line[256];
+        std::snprintf(line, sizeof(line), "llmopt_tenant_inflight{tenant=\"%s\"} %d\n",
+                      stat.tenant.c_str(), stat.live);
+        out += line;
+        std::snprintf(line, sizeof(line), "llmopt_tenant_queue_depth{tenant=\"%s\"} %d\n",
+                      stat.tenant.c_str(), stat.queued);
+        out += line;
+        std::snprintf(line, sizeof(line), "llmopt_tenant_kv_used_blocks{tenant=\"%s\"} %d\n",
+                      stat.tenant.c_str(), stat.kv_used);
+        out += line;
+    }
+    return out;
+}
+
+std::string TenantMetrics::render(const std::vector<TenantStat>& stats) const {
+    return render_counters() + render_gauges(stats);
+}
+
 } // namespace llmopt

@@ -83,6 +83,9 @@ public:
     std::vector<BackendId> flush_cache();
     // 被驱逐、待后端释放的 donor backend id；由 Core 在安全点消费。
     std::vector<BackendId> take_dropped_donors();
+    // 阶段 11：租户占块（含留置缓存）与主动回收本租户缓存。
+    [[nodiscard]] std::int32_t used_blocks_for(const std::string& tenant) const;
+    void evict_cached_for(const std::string& tenant);
 
     std::int32_t num_free_blocks() const noexcept;
     std::int32_t num_total_blocks() const noexcept;
@@ -101,11 +104,12 @@ private:
         bool verified = false;
         BackendId owner;
         bool listed_free = true;
+        std::string tenant;
     };
 
     std::int32_t blocks_for(std::int32_t tokens) const noexcept;
     std::uint64_t chain_hash(std::uint64_t parent, const std::vector<std::int32_t>& tokens,
-                             std::int32_t index) const noexcept;
+                             std::int32_t index, const std::string& tenant) const noexcept;
     void release_block(std::int32_t id);
     void push_free(std::int32_t id);
     bool ensure_free(std::int32_t need);

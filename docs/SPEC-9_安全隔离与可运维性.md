@@ -1,6 +1,6 @@
 # SPEC-9：安全隔离与可运维性
 
-- 状态：TLS、控制面隔离、Completion watchdog 与真后端 nightly 已实现；多租户、断连取消、长稳仍为规划
+- 状态：TLS、控制面隔离、Completion watchdog、真后端 nightly 与多租户静态 key/配额已实现；断连取消、长稳仍为规划
 - 分支：`9`（从 `8` @ `9037f61` 切出）
 - 关联调研：`docs/notes/阶段9-安全隔离调研.md`
 - 原则：默认行为不变；能力以开关/配置启用；每项先有可失败测试；不在同一提交混多个结构改造
@@ -27,7 +27,7 @@
 | --- | --- | --- | --- |
 | 数据面 TLS | 无；httplib 关闭 OpenSSL | 可选 `SSLServer`，`-DLLMOPT_ENABLE_TLS=ON` | 证书轮换、mTLS、OCSP 未做 |
 | 控制面隔离 | 与推理共享一个池，多留 3 线程 | `--control-port` 另起 loopback listener + 独立 `ThreadPool(4)` | 默认仍关闭；跨机控制面需代理 |
-| 鉴权 | 单 Bearer token，空=不鉴权 | 不变 | 无 tenant、无配额、无 key 轮换 |
+| 鉴权 | 单 Bearer token，空=不鉴权 | 阶段 11：静态 key 文件（SHA-256）+ 租户配额 + KV 域隔离；`--api-key` 兼容 | token 日配额、热加载未做 |
 | 非流式断连 | 客户端断开后继续生成到 120 s 时限 | 不变 | 浪费算力，可被低成本放大 |
 | Completion 丢失 | 无 watchdog | 不变 | Executor 卡死时 shutdown 永久等待 |
 | 真后端 CI | 只编译 `runner_llama.cpp` | 不变 | 运行时回归盲区 |
@@ -79,30 +79,34 @@
 
 - `integration_server_control_isolation`：`max-concurrency=1`、4 条长 SSE 流占满数据面 `1+3` handler；独立控制面 2 s 内返回 `/healthz` 200、`/metrics` 200。
 
-### 3.3 鉴权与多租户（规划，未实现）
+### 3.3 鉴权与多租户（已实现，阶段 11）
 
-目标模型：静态 key 文件，而不是环境变量单 token。
+目标模型：静态 key 文件，只存 SHA-256；`--api-key` 保留为单租户 `default` 的简写。
 
 ```json
 {
+  "version": 1,
   "keys": [
-    {"key": "sk-tenant-a-...", "tenant": "a", "rps": 2, "burst": 4,
-     "max_concurrency": 2, "daily_tokens": 1000000},
-    {"key": "sk-tenant-b-...", "tenant": "b", "rps": 1, "burst": 2,
-     "max_concurrency": 1, "daily_tokens": 200000}
+    {"id": "tenant-a",
+     "sha256": "3d3133c6e9b0220392a81a0b8bda5f91872ae26e244401cc7ac4d9616fd533f3",
+     "quota": {"max_concurrency": 1, "queue_capacity": 1,
+               "rate_limit_rps": 0.5, "rate_limit_burst": 1, "kv_blocks": 0}},
+    {"id": "tenant-b",
+     "sha256": "1a256545f370bc6ba136a7eebbdb5b137bf172ea46a4ff3baafae875d42ae3e9",
+     "quota": {"max_concurrency": 2, "queue_capacity": 2}}
   ]
 }
 ```
 
 契约：
 
-- `--api-keys-file` 指向 0600 文件；启动时读取，缺失/坏 JSON 退出 2；不打印 key。
-- 请求头 `Authorization: Bearer <key>` 解析为 `TenantContext`；未知 key 回 401，配额超限回 429 + `Retry-After`。
-- 调度器按 tenant 记录 `running/waiting` 与 token 用量；单 tenant 的 `max_concurrency` 不得超过全局。
-- `/metrics` 增加 `llmopt_tenant_*` 标签白名单；不把 key 作为标签。
-- 管理面（增删 key）不在本阶段；先用文件 + 重启。
-
-**未决**：key 文件格式、是否按 tenant 隔离 KV/前缀缓存、日配额重置时区。
+- `--api-keys-file` 指向 0600 文件（POSIX；Windows 跳过权限检查）；启动时读取，缺失/坏 JSON/未知字段/重复 id 或 sha/越界一律退出 3；不打印 key 与摘要。
+- 客户端 key 为 `lk_` + 32 hex，只出现在 `Authorization: Bearer <key>`；服务端做 SHA-256 后与文件内摘要定长比较，未知 key 回 401 `UNAUTHORIZED`。
+- 每 key 配额 `max_concurrency` / `queue_capacity` / `rate_limit_rps` / `rate_limit_burst` / `kv_blocks`；live 准入上限为 `max_concurrency + queue_capacity`，超限 429 `QUOTA_EXCEEDED`；单请求 KV 需求或租户总量超 `kv_blocks` 同样 429；租户限流 429 `RATE_LIMITED`。
+- 调度器按 tenant 记录 live/running，单 tenant 的 `max_concurrency` 不得超过全局；租户 KV 只做块级标记与配额计量，不拆物理池。
+- KV 前缀哈希混入租户域 salt，跨租户同前缀不命中；空租户保持旧行为。
+- `/metrics` 增加 `llmopt_tenant_requests_total`、`llmopt_tenant_inflight`、`llmopt_tenant_queue_depth`、`llmopt_tenant_kv_used_blocks`、`llmopt_tenant_quota_rejected_total`，标签只取配置内 `id`，不把 key 作为标签。
+- 管理面（增删 key）不在本阶段；先用文件 + 重启。token 日配额暂缓，`kv_blocks` 与并发/队列/限流先落地。
 
 ### 3.4 非流式断连取消（规划，未实现）
 
@@ -161,7 +165,7 @@
 | `integration_server_control_isolation` | 默认/TLS | integration/fast | 数据面饱和时控制面仍 200 |
 | `integration_server_tls` | TLS | integration/fast | HTTPS 三端点；明文不 200 |
 | `integration_server_tls_config_error` | 默认/TLS | integration/fast | 证书不可用时退出 3 + 明确 TLS 错误 |
-| 多租户 key/配额 | 默认 | integration | 401/429/tenant 指标 |
+| `tenant_keys_test` | 默认 | integration/fast | 三租户 401/429、A 限流、C KV 配额、`llmopt_tenant_*` 标签 |
 | 非流式断连 | 默认 | integration | 1 s 内 cancel + KV 归还 |
 | `completion_watchdog_test` | 默认 | contract/fast | 1 s 内 `EXECUTION_FAILED`；迟到回投后 KV 归零；shutdown <5 s |
 | `nightly_real_backend.py` | LLAMA=ON | nightly | 固定模型 sha256；health/ready、非流式、SSE、cancel、metrics 全 PASS |
@@ -172,7 +176,7 @@
 1. **已完成**：TLS 数据面 + 控制面隔离 + 两条回归。
 2. **已完成（R1-01）**：Completion watchdog，`completion_watchdog_test` 覆盖 500、迟到回收与 shutdown。
 3. **已完成（P1）**：真后端 nightly，固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑五组运行时检查。
-4. **下一步（P2）**：多租户静态 key + 配额；先出格式与隔离决策，再改调度器。
+4. **已完成（P2）**：多租户静态 key + 并发/队列/限流/KV 配额；KV 单池 + 块级租户标记 + 前缀哈希域分离。
 5. **P2**：soak 与 Docker/systemd 真机验证。
 6. **P1（阻塞）**：非流式断连取消；需要 httplib 暴露连接探测或网关层取消。
 
@@ -180,7 +184,7 @@
 
 1. 控制面是否默认开启 `control-port=8081`，还是保持 `0` 由部署显式开启？
 2. 进程内 TLS 是否只作为“直连小部署”，公网统一要求前置代理？（推荐：是）
-3. 多租户是否接受“静态 JSON key 文件 + 重启生效”，还是必须热加载/管理 API？
+3. 多租户 key 采用静态 JSON 文件 + 重启生效（已确认，阶段 11 落地）；热加载/管理 API 后置。
 4. 非流式断连取消是否允许改变响应语义（例如客户端断开后不再保留完整响应）？
 
 ## 7 验收口径
