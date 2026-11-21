@@ -142,6 +142,8 @@ void ResourceSampler::start() {
     }
     stopping_ = false;
     running_ = true;
+    // 先同步发布一次 RSS：避免 /metrics 在采样线程首次调度前读到 0，也固定启动基线。
+    publish(read_now(false));
     thread_ = std::thread([this] { loop(); });
 }
 
