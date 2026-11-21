@@ -158,7 +158,12 @@ ErrCode parse_message_content(const json& item, std::string& out, std::string& m
             message = "unsupported_field: messages[].content 分片（仅支持 type=text）";
             return ErrCode::UnsupportedField;
         }
-        text += part["text"].get<std::string>();
+        const json& text_field = part["text"];
+        if (!text_field.is_string()) {
+            message = "messages[].content[].text 必须是字符串";
+            return ErrCode::InvalidJson;
+        }
+        text += text_field.get<std::string>();
     }
     out = std::move(text);
     return ErrCode::Ok;
@@ -254,7 +259,8 @@ ErrCode validate_request_id(std::string_view id, std::string& message) {
     return ErrCode::Ok;
 }
 
-ErrCode parse_body(const std::string& body, InferenceRequest& out, std::string& message) noexcept {
+ErrCode parse_body(const std::string& body, InferenceRequest& out, std::string& message,
+                   std::string* detail) noexcept {
     try {
         const json parsed = json::parse(body, nullptr, false);
         if (parsed.is_discarded() || !parsed.is_object()) {
@@ -268,13 +274,17 @@ ErrCode parse_body(const std::string& body, InferenceRequest& out, std::string& 
         out.chat = false;
         return parse_common(parsed, out, message);
     } catch (const std::exception& exc) {
-        message = std::string("解析异常: ") + exc.what();
+        // 第三方异常原文只进 detail（日志），message 给字段级可行动信息，不外露库名。
+        message = "请求体 JSON 非法，请检查字段类型与结构";
+        if (detail != nullptr) {
+            *detail = exc.what();
+        }
         return ErrCode::InvalidJson;
     }
 }
 
-ErrCode parse_chat_body(const std::string& body, InferenceRequest& out,
-                        std::string& message) noexcept {
+ErrCode parse_chat_body(const std::string& body, InferenceRequest& out, std::string& message,
+                        std::string* detail) noexcept {
     try {
         const json parsed = json::parse(body, nullptr, false);
         if (parsed.is_discarded() || !parsed.is_object()) {
@@ -315,7 +325,11 @@ ErrCode parse_chat_body(const std::string& body, InferenceRequest& out,
         out.prompt.clear();
         return parse_common(parsed, out, message);
     } catch (const std::exception& exc) {
-        message = std::string("解析异常: ") + exc.what();
+        // 第三方异常原文只进 detail（日志），message 给字段级可行动信息，不外露库名。
+        message = "请求体 JSON 非法，请检查字段类型与结构";
+        if (detail != nullptr) {
+            *detail = exc.what();
+        }
         return ErrCode::InvalidJson;
     }
 }
@@ -339,6 +353,7 @@ std::string render_frame(const InferenceRequest& req, const Delta& delta, std::i
     }
     json frame;
     frame["id"] = req.req_id;
+    frame["model"] = req.model_echo;
     frame["object"] = req.chat ? "chat.completion.chunk" : "text_completion";
     frame["choices"] = json::array();
     json choice;
@@ -369,6 +384,7 @@ std::string render_body(const InferenceRequest& req, const std::vector<std::stri
                         const std::vector<int>& gen_tokens) {
     json body;
     body["id"] = req.req_id;
+    body["model"] = req.model_echo;
     body["object"] = req.chat ? "chat.completion" : "text_completion";
     body["choices"] = json::array();
     int total_completion = 0;

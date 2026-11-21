@@ -193,6 +193,47 @@ TEST_CASE("chat 越界字段与非法消息一律按 unsupported_field 拒绝") 
     CHECK(parse_chat_body("not json", req, message) == ErrCode::InvalidJson);
 }
 
+TEST_CASE("成功响应与流式帧回显请求的 model 字段") {
+    InferenceRequest req;
+    std::string message;
+    REQUIRE(parse_body(R"({"prompt":"hi","model":"echo-x"})", req, message) == ErrCode::Ok);
+    CHECK(req.model_echo == "echo-x");
+    const std::string body = render_completion_body(req, "abc", FinishReason::Stopped, 5, 3);
+    CHECK(body.find("\"model\":\"echo-x\"") != std::string::npos);
+    Delta delta;
+    delta.text = "A";
+    const std::string frame = render_frame(req, delta);
+    CHECK(frame.find("\"model\":\"echo-x\"") != std::string::npos);
+}
+
+TEST_CASE("解析异常 message 不含第三方库名，原始 what() 进 detail") {
+    InferenceRequest req;
+    std::string message;
+    std::string detail;
+    // model 给数字：value() 取值抛 nlohmann type_error，落到外层 catch。
+    CHECK(parse_body(R"({"prompt":"hi","model":123})", req, message, &detail) ==
+          ErrCode::InvalidJson);
+    CHECK(message.find("json.exception") == std::string::npos);
+    CHECK(message.find("type_error") == std::string::npos);
+    CHECK(message.find("parse_error") == std::string::npos);
+    CHECK_FALSE(detail.empty());
+}
+
+TEST_CASE("chat 分片 text 非字符串按字段级错误拒绝") {
+    InferenceRequest req;
+    std::string message;
+    const std::string numeric =
+            R"({"messages":[{"role":"user","content":[{"type":"text","text":123}]}]})";
+    CHECK(parse_chat_body(numeric, req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("text") != std::string::npos);
+    CHECK(message.find("字符串") != std::string::npos);
+    CHECK(message.find("json.exception") == std::string::npos);
+    const std::string object =
+            R"({"messages":[{"role":"user","content":[{"type":"text","text":{"a":1}}]}]})";
+    CHECK(parse_chat_body(object, req, message) == ErrCode::InvalidJson);
+    CHECK(message.find("字符串") != std::string::npos);
+}
+
 TEST_CASE("stop/n 解析边界：stop 最多 4 条，n 仅 1–4，流式 n>1 拒绝") {
     InferenceRequest req;
     std::string message;

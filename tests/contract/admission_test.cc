@@ -59,6 +59,33 @@ TEST_CASE("突发提交按 running+waiting+在飞 的总额拒绝，且只计一
     CHECK(harness.metrics.get(llmopt::MetricId::RequestsQueueFull) == 3);
 }
 
+TEST_CASE("关停闸门置位后 accepting 关闭，Core 边界拒绝新准入") {
+    llmopt::SchedulerConfig config;
+    config.max_concurrency = 1;
+    config.queue_capacity = 1;
+    config.chunk_size = 2;
+    llmopt::test::PreemptHarness harness(config, llmopt::KVConfig{2, 32, 0.05, false, 0}, true);
+
+    auto sink = harness.submit("shut-1", 2, 1);
+    REQUIRE(harness.run_once());
+
+    harness.core.shutdown();
+    // 处理 Shutdown 事件后 shutting_down_ 置位。
+    REQUIRE(harness.run_once());
+    CHECK_FALSE(harness.core.accepting());
+
+    // 关停后直达 Core 的提交也必须被闸门拒绝，不能再占预留名额。
+    std::vector<llmopt::ErrCode> codes;
+    for (std::int32_t index = 0; index < 2; ++index) {
+        auto rejected = std::make_shared<llmopt::BoundedSink>(8);
+        codes.push_back(harness.core.submit(make_request("shut-" + std::to_string(index), 2, 1),
+                                            prompt_ids(2), rejected));
+    }
+    CHECK(codes[0] == llmopt::ErrCode::QueueFull);
+    CHECK(codes[1] == llmopt::ErrCode::QueueFull);
+    harness.pump(sink);
+}
+
 TEST_CASE("handler 兑现预留后名额释放，accepting 恢复") {
     llmopt::SchedulerConfig config;
     config.max_concurrency = 1;

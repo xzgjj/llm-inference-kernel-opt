@@ -1,0 +1,1 @@
+PASS: 真实服务契约 10 项（healthz/readyz/metrics/SSE-200/[DONE]/choices/非流式 usage/空 prompt/越界字段/超上下文）

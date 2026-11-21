@@ -4,18 +4,24 @@
   "model": "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
   "backend": "llama",
   "host": "127.0.0.1",
-  "concurrency": [1, 2],
-  "repeats": 2,
-  "warmup_requests": 3,
+  "concurrency": [
+    1
+  ],
+  "repeats": 1,
+  "warmup_requests": 2,
   "max_tokens": 32,
   "ctx_tokens": 1280,
   "max_num_batched_tokens": 1024,
   "queue_capacity": 64,
-  "tier_timeout_ms": 600000,
-  "request_timeout_s": 120,
-  "idle_between_cells_s": 2,
+  "tier_timeout_ms": 900000,
+  "request_timeout_s": 180,
+  "idle_between_cells_s": 0,
   "tiers": [
-    {"name": "long", "max_prompt_tokens": 512, "n": 30}
+    {
+      "name": "long",
+      "max_prompt_tokens": 1400,
+      "n": 10
+    }
   ],
   "sampling": {
     "temperature": 0.0,
@@ -23,5 +29,8 @@
     "top_p": 1.0,
     "min_p": 0.0,
     "repeat_penalty": 1.0
-  }
+  },
+  "n_gpu_layers": 24,
+  "threads": 0,
+  "disable_prefix_cache": true
 }

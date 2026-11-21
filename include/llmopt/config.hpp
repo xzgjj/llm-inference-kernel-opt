@@ -48,6 +48,10 @@ struct ServerConfig {
     std::string log_level = "info";
     std::int32_t threads = 0;
     std::int32_t n_gpu_layers = 0;
+    // 容量档位：权重未落盘时用声明的 GGUF 尺寸/层数替代文件元数据，只做启动判据。
+    std::string model_profile_path;
+    // 只跑容量判据：打印 estimate/decision 后退出，不加载权重、不监听端口。
+    bool capacity_only = false;
     // 前缀 donor 槽条数（每条按 ctx_tokens 预留 KV）；8B 以上建议 0–1，默认 4 沿用旧口径。
     std::int32_t donor_slots = 4;
     // KV 缓存类型：f16（默认）/ q8_0（减半，8B 以上档推荐）/ f32。

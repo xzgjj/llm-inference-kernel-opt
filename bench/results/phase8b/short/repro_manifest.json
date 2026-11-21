@@ -1,0 +1,76 @@
+{
+  "run_id": "l1-8b-short",
+  "git_commit": "0fb057b00efafd2981fa8173c1887e0ac2e7c9f1",
+  "seed": 7,
+  "config_hash": "f4b0032ef518fe9497daa977d2921fca9ae19e0895643951daaac3f231c0ae97",
+  "model_path": "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+  "model_sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+  "server_path": "/root/llmopt-build/llmopt_server",
+  "server_sha256": "98fff96eea040236293ac5824f68a35155f18bcc14a16a9dc6e2a6a2f67d8883",
+  "backend": "llama",
+  "rounds": 2,
+  "concurrency": [
+    1,
+    2,
+    4
+  ],
+  "tiers": [
+    {
+      "name": "short",
+      "max_prompt_tokens": 128,
+      "n": 30
+    }
+  ],
+  "prompt_set_hash": "659ab076a1864da111edf45016a5b3d970c1d77ad4b3375f027c4c94ba0136e0",
+  "thresholds": {
+    "ttft_itl": 0.1,
+    "throughput": 0.07
+  },
+  "argv": [
+    "/root/llmopt-build/llmopt_server",
+    "--model",
+    "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "0",
+    "--backend",
+    "llama",
+    "--mode",
+    "off",
+    "--ctx-tokens",
+    "1024",
+    "--max-concurrency",
+    "1",
+    "--queue-capacity",
+    "64",
+    "--max-num-batched-tokens",
+    "1024"
+  ],
+  "resource_peak": {
+    "1": {
+      "rss_peak_bytes": 2685960192,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 374
+    },
+    "2": {
+      "rss_peak_bytes": 2760450048,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 303
+    },
+    "4": {
+      "rss_peak_bytes": 2876440576,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 236
+    }
+  },
+  "env": {
+    "platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "cpu_count": 16,
+    "hostname": "DESKTOP-GN8DB6B"
+  }
+}

@@ -66,6 +66,9 @@ def main() -> int:
                 check(headers.get("Retry-After") == "1", "429 必须带 Retry-After: 1")
                 error = json.loads(body)["error"]
                 check(error["code"] == "QUEUE_FULL", f"错误码应为 QUEUE_FULL，实际 {error['code']}")
+                # R2-09：message 必须带当前深度/容量（容量 = max_concurrency 1 + queue 2 = 3）。
+                check("/3" in error["message"],
+                      f"QueueFull message 应带深度/容量，实际 {error['message']}")
 
             status, body, _ = kit.get(port, "/metrics")
             check(status == 200, "/metrics 应 200")

@@ -51,6 +51,7 @@ TEST_CASE("KPI 冻结名可解析") {
     CHECK(llmopt::find_metric("llmopt_itl_ms_count") == llmopt::MetricId::ItlMsCount);
     CHECK(llmopt::find_metric("llmopt_kv_internal_frag_ratio") ==
           llmopt::MetricId::KvInternalFragRatio);
+    CHECK(llmopt::find_metric("llmopt_kv_used_blocks_peak") == llmopt::MetricId::KvUsedPeak);
     CHECK(llmopt::find_metric("llmopt_requests_running_peak") ==
           llmopt::MetricId::RequestsRunningPeak);
     CHECK(llmopt::find_metric("llmopt_preemptions_total{reason=\"admission\"}") ==

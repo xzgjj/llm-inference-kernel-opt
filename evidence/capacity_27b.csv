@@ -1,0 +1,6 @@
+profile,n_gpu_layers,ctx_tokens,max_concurrency,kv_cache_type,model_mib,kv_mib,required_mib,free_mib,model_vram_mib,kv_vram_mib,host_mib,decision,allow_start,exit_code,reason
+qwen3-27b-dense-q4,0,1024,4,q8_0,16793,544,17337,5281,0,0,17337,BLOCKED,0,3,未卸载部分超过可用内存，拒绝启动
+qwen3-27b-dense-q4,8,1024,4,q8_0,16793,544,17337,5281,2099,68,15170,BLOCKED,0,3,未卸载部分超过可用内存，拒绝启动
+qwen3-27b-dense-q4,16,1024,4,q8_0,16793,544,17337,5281,4198,136,13003,DEGRADED,0,4,分池预算超过 free×safety_ratio；mode=auto 在软超预算时拒绝启动
+qwen3-27b-dense-q4,24,1024,4,q8_0,16793,544,17337,5281,6297,204,10836,BLOCKED,0,3,已卸载部分超过可用显存，拒绝启动
+qwen3-27b-dense-q4,32,1024,4,q8_0,16793,544,17337,5281,8396,272,8668,BLOCKED,0,3,已卸载部分超过可用显存，拒绝启动

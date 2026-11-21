@@ -2,6 +2,8 @@
 // 不 mmap、不加载张量，未知类型按宽度跳过，解析失败返回 ok=false 并写明原因。
 #include "llmopt/gguf.hpp"
 
+#include "nlohmann/json.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -273,14 +275,86 @@ GgufMeta read_gguf_meta(const std::string& path) {
     return meta;
 }
 
-// KV 估算：层数 × ctx × kv 头数 × (k 维 + v 维) × 2 字节（f16）。
-std::int64_t estimate_kv_bytes(const GgufMeta& meta, std::int32_t ctx_tokens) {
+// KV 估算：层数 × ctx × kv 头数 × (k 维 + v 维) × 元素字节。
+double kv_element_bytes(const std::string& kv_cache_type) noexcept {
+    if (kv_cache_type == "q8_0") {
+        // q8_0 每 32 个值占 34 字节（32×int8 + 1×f16 scale）≈ 1.0625 B/值。
+        return 34.0 / 32.0;
+    }
+    if (kv_cache_type == "f32") {
+        return 4.0;
+    }
+    return 2.0;
+}
+
+std::int64_t estimate_kv_bytes(const GgufMeta& meta, std::int32_t ctx_tokens,
+                               const std::string& kv_cache_type) {
     if (!meta.ok || ctx_tokens <= 0) {
         return 0;
     }
-    const std::int64_t per_token = static_cast<std::int64_t>(meta.block_count) *
-                                   meta.head_count_kv * (meta.key_length + meta.value_length) * 2;
-    return per_token * ctx_tokens;
+    const double per_token = static_cast<double>(meta.block_count) * meta.head_count_kv *
+                             (meta.key_length + meta.value_length) *
+                             kv_element_bytes(kv_cache_type);
+    return static_cast<std::int64_t>(per_token) * ctx_tokens;
+}
+
+// 容量档位 JSON：只接受声明字段；数值必须为正，缺失或类型不符立即失败。
+GgufMeta read_model_profile(const std::string& path) {
+    GgufMeta meta;
+    std::ifstream file(path);
+    if (!file) {
+        meta.error = "容量档位文件无法打开: " + path;
+        return meta;
+    }
+    nlohmann::json data;
+    try {
+        file >> data;
+    } catch (const nlohmann::json::exception& exc) {
+        meta.error = "容量档位 JSON 非法: " + std::string(exc.what());
+        return meta;
+    }
+    const auto read_int = [&data](const char* key, std::int64_t& out) {
+        if (!data.contains(key) || !data[key].is_number_integer()) {
+            return false;
+        }
+        out = data[key].get<std::int64_t>();
+        return out > 0;
+    };
+    std::int64_t file_bytes = 0;
+    std::int64_t block_count = 0;
+    std::int64_t head_count = 0;
+    std::int64_t head_count_kv = 0;
+    std::int64_t key_length = 0;
+    std::int64_t value_length = 0;
+    if (!read_int("file_bytes", file_bytes) || !read_int("block_count", block_count) ||
+        !read_int("head_count", head_count) || !read_int("head_count_kv", head_count_kv) ||
+        !read_int("key_length", key_length) || !read_int("value_length", value_length)) {
+        meta.error = "容量档位缺字段或非正整数: file_bytes/block_count/head_count/"
+                     "head_count_kv/key_length/value_length";
+        return meta;
+    }
+    meta.file_bytes = file_bytes;
+    meta.block_count = static_cast<std::int32_t>(block_count);
+    meta.head_count = static_cast<std::int32_t>(head_count);
+    meta.head_count_kv = static_cast<std::int32_t>(head_count_kv);
+    meta.key_length = static_cast<std::int32_t>(key_length);
+    meta.value_length = static_cast<std::int32_t>(value_length);
+    if (data.contains("embedding_length") && data["embedding_length"].is_number_integer()) {
+        meta.embedding_length = data["embedding_length"].get<std::int32_t>();
+    }
+    if (data.contains("context_length") && data["context_length"].is_number_integer()) {
+        meta.context_length = data["context_length"].get<std::int32_t>();
+    }
+    if (data.contains("name") && data["name"].is_string()) {
+        meta.architecture = data["name"].get<std::string>();
+    } else {
+        meta.architecture = "model-profile";
+    }
+    if (meta.embedding_length <= 0) {
+        meta.embedding_length = 1; // 只用于展示/校验，不影响 KV 估算
+    }
+    meta.ok = true;
+    return meta;
 }
 
 } // namespace llmopt

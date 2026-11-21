@@ -33,6 +33,7 @@ enum class MetricId : std::uint16_t {
     RequestsQueued,
     KvFreeBlocks,
     KvUsedBlocks,
+    KvUsedPeak,
     KvCachedBlocks,
     KvSharedBlocks,
     KvWatermarkBlocks,

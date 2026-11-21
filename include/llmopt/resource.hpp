@@ -52,6 +52,8 @@ private:
     std::int32_t vram_tick_ = 0;
     double vram_cache_mib_ = -1.0;
     bool vram_cached_known_ = false;
+    // 峰值字段：仅 start() 同步首报与采样线程 loop 写入；std::thread 构造提供 happens-before，
+    // stop() join 后才析构；若新增第三处写入口，必须先改原子或纳入 mutex_ 保护。
     double rss_peak_mib_ = 0.0;
     double vram_peak_mib_ = -1.0;
 };

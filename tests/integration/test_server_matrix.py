@@ -15,11 +15,10 @@ import server_kit as kit
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "bench" / "matrix_runner.py"
-REPORT_FIELDS = [
-    "concurrency_p", "prompt_tier", "status", "n_requests", "ttft_p50_ms",
-    "ttft_p95_ms", "itl_p99_ms", "total_tok_s", "kv_internal_frag_ratio",
-    "sched_cpu_ratio", "reason", "deviation_flag",
-]
+sys.path.insert(0, str(ROOT))
+from tools.bench import matrix as matrix_tool  # noqa: E402
+
+REPORT_FIELDS = matrix_tool.REPORT_FIELDS
 
 
 def check(condition: bool, message: str) -> None:
@@ -51,6 +50,9 @@ def main() -> int:
             check(int(row["n_requests"]) == 3, "每档应有 3 条有效请求")
             check(float(row["ttft_p50_ms"]) > 0, "TTFT 应为正")
             check(float(row["total_tok_s"]) > 0, "吞吐应为正")
+            # stub 构建没有 CUDA 缓冲区日志：显存证据必须显式写 unknown，不能写 0 冒充实测。
+            check(row["vram_peak_scope"] == "unknown", f"stub 显存口径错误：{row}")
+            check(float(row["vram_peak_mib"]) == 0.0, f"stub 不应编造显存：{row}")
 
         lines = (out / "requests.jsonl").read_text(encoding="utf-8").splitlines()
         check(len(lines) == 16, f"warmup 2×2 + 正式 2×2×3 = 16，实际 {len(lines)}")
@@ -62,6 +64,7 @@ def main() -> int:
         check(len(manifest["prompt_set_hash"]) == 64, "prompt 集哈希应为 sha256")
         check(manifest["seed"] == 7, "种子应入清单")
         check(manifest["model_sha256"] == kit.sha256(model), "模型 sha256 应一致")
+        check(set(manifest["vram_buffers"]) == {"1", "2"}, "每个并发档都应有显存分项")
         for concurrency in ("1", "2"):
             peak = manifest["resource_peak"][concurrency]
             check(peak["rss_peak_bytes"] > 0, "RSS 峰值应可归因到本进程")

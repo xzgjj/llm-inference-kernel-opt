@@ -33,6 +33,8 @@ void set_env(const char* key, const char* value) {
 // 清掉上一例留下的变量，避免用例互相污染。
 void clear_env() {
     for (const char* key : {"LLMOPT_MODEL",
+                            "LLMOPT_MODEL_PROFILE",
+                            "LLMOPT_CAPACITY_ONLY",
                             "LLMOPT_CONFIG",
                             "LLMOPT_HOST",
                             "LLMOPT_PORT",
@@ -98,6 +100,44 @@ TEST_CASE("缺 model 返回用法级错误") {
     std::string message;
     CHECK(load({}, cfg, message) == ErrCode::ConfigInvalid);
     CHECK(message.find("--model") != std::string::npos);
+}
+
+TEST_CASE("容量档位可免 model，但只在 capacity-only 下成立") {
+    clear_env();
+    ServerConfig cfg;
+    std::string message;
+    CHECK(load({"--model-profile", "27b.json", "--capacity-only"}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.model_profile_path == "27b.json");
+    CHECK(cfg.capacity_only);
+    CHECK(cfg.model_path.empty());
+    CHECK(load({"--model-profile", "27b.json"}, cfg, message) == ErrCode::ConfigInvalid);
+
+    set_env("LLMOPT_MODEL_PROFILE", "env.json");
+    set_env("LLMOPT_CAPACITY_ONLY", "1");
+    CHECK(load({}, cfg, message) == ErrCode::Ok);
+    CHECK(cfg.model_profile_path == "env.json");
+    CHECK(cfg.capacity_only);
+    clear_env();
+}
+
+TEST_CASE("容量档位环境变量经 clear_env 后不残留到后续用例") {
+    clear_env();
+    // 复刻上一例的 env 注入；若 clear_env 漏清这两个键，下面第二次 load({})
+    // 会被残留的 capacity-only 错误放行，形成隐性假绿。
+    set_env("LLMOPT_MODEL_PROFILE", "env.json");
+    set_env("LLMOPT_CAPACITY_ONLY", "1");
+    ServerConfig injected;
+    std::string message;
+    CHECK(load({}, injected, message) == ErrCode::Ok);
+    CHECK(injected.model_profile_path == "env.json");
+    CHECK(injected.capacity_only);
+
+    clear_env();
+    ServerConfig after;
+    std::string why;
+    CHECK(load({}, after, why) == ErrCode::ConfigInvalid);
+    CHECK(after.model_profile_path.empty());
+    CHECK_FALSE(after.capacity_only);
 }
 
 TEST_CASE("CLI 覆盖环境变量，环境变量覆盖默认值") {

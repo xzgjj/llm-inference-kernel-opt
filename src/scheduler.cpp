@@ -346,6 +346,11 @@ void SchedulerCore::shutdown() noexcept {
 }
 
 bool SchedulerCore::accepting() const noexcept {
+    // 关停/兜底闸门：一旦 shutting_down_ 置位，无论深度镜像如何都拒绝新准入，
+    // 避免 abort_all 裸清零在飞预留后，并发 handler 的残余 fetch_sub 把计数打到负值造成超发。
+    if (shutting_down_.load(std::memory_order_acquire)) {
+        return false;
+    }
     const std::int32_t live = running_depth_.load(std::memory_order_relaxed) +
                               waiting_depth_.load(std::memory_order_relaxed) +
                               inflight_admissions_.load(std::memory_order_relaxed);
@@ -365,6 +370,9 @@ std::int32_t SchedulerCore::admission_capacity() const noexcept {
 }
 
 bool SchedulerCore::try_reserve_admission() noexcept {
+    if (shutting_down_.load(std::memory_order_acquire)) {
+        return false;
+    }
     const std::int32_t live = running_depth_.load(std::memory_order_relaxed) +
                               waiting_depth_.load(std::memory_order_relaxed) +
                               inflight_admissions_.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -686,6 +694,8 @@ void SchedulerCore::pump() {
 void SchedulerCore::publish_kv_usage() {
     const KVUsage usage = kv_.usage();
     metrics_.set(MetricId::KvUsedBlocks, usage.used_blocks);
+    kv_used_peak_ = std::max(kv_used_peak_, usage.used_blocks);
+    metrics_.set(MetricId::KvUsedPeak, kv_used_peak_);
     metrics_.set(MetricId::KvCachedBlocks, usage.cached_blocks);
     metrics_.set(MetricId::KvSharedBlocks, usage.shared_blocks);
     metrics_.set(MetricId::KvFreeBlocks, usage.free_blocks);

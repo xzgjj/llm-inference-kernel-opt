@@ -14,6 +14,7 @@
 #include <chrono>
 #include <csignal>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <thread>
@@ -77,6 +78,18 @@ void drain_loop(const std::shared_ptr<AppContext>& ctx, httplib::Server& server)
     server.stop();
 }
 
+// 拼接 Allow 头取值：按注册顺序去重列出允许的方法。
+std::string join_methods(const std::vector<std::string>& methods) {
+    std::string out;
+    for (std::size_t index = 0; index < methods.size(); ++index) {
+        if (index > 0) {
+            out += ", ";
+        }
+        out += methods[index];
+    }
+    return out;
+}
+
 // 统一错误回包：状态码与 code 由 C-03 映射，禁止各路由自行编造。
 // 429 必须带 Retry-After：客户端可据此退避，而不是把队列满误当成执行错误重试。
 void send_error(httplib::Response& res, const Error& error) {
@@ -85,7 +98,7 @@ void send_error(httplib::Response& res, const Error& error) {
     if (res.status == 429) {
         res.set_header("Retry-After", "1");
     }
-    res.set_content(render_error_body(payload), "application/json");
+    res.set_content(render_error_body(payload), "application/json; charset=utf-8");
 }
 
 // 把 SSE 帧写到当前连接；写失败即断连，由调用方投递 Cancel。
@@ -189,15 +202,17 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
                      const std::string& forced_id, InferenceRequest& req,
                      std::shared_ptr<ResponseSink>& sink, int& prompt_tokens) {
     std::string message;
+    std::string parse_detail;
     if (!ctx.service.accepting()) {
         return make_error(ErrCode::Unavailable, "服务正在排空，停止接收新请求");
     }
     if (!forced_id.empty()) {
         req.req_id = forced_id;
     }
-    ErrCode code = chat ? parse_chat_body(body, req, message) : parse_body(body, req, message);
+    ErrCode code = chat ? parse_chat_body(body, req, message, &parse_detail)
+                        : parse_body(body, req, message, &parse_detail);
     if (code != ErrCode::Ok) {
-        return make_error(code, message.empty() ? "请求体非法" : message);
+        return make_error(code, message.empty() ? "请求体非法" : message, parse_detail);
     }
     if (!forced_id.empty()) {
         req.req_id = forced_id;
@@ -228,7 +243,10 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
     const std::int32_t need = static_cast<std::int32_t>(ids.size()) + req.sampling.max_tokens;
     const std::int32_t limit = ctx.runner->n_ctx();
     if (need > limit) {
-        return make_error(ErrCode::ContextOverflow, "prompt 与 max_tokens 之和超过 ctx-tokens",
+        return make_error(ErrCode::ContextOverflow,
+                          "prompt=" + std::to_string(ids.size()) +
+                                  " + max_tokens=" + std::to_string(req.sampling.max_tokens) +
+                                  " 超过 ctx-tokens=" + std::to_string(limit),
                           "prompt=" + std::to_string(ids.size()) +
                                   " max_tokens=" + std::to_string(req.sampling.max_tokens) +
                                   " ctx=" + std::to_string(limit));
@@ -236,7 +254,10 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
     if (!ctx.core->accepting()) {
         ctx.metrics->inc(MetricId::AdmissionQueue);
         ctx.metrics->inc(MetricId::RequestsQueueFull);
-        return make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
+        return make_error(ErrCode::QueueFull,
+                          "等待队列已满（" + std::to_string(ctx.core->waiting_count()) + "/" +
+                                  std::to_string(ctx.core->admission_capacity()) +
+                                  "），请退避后重试",
                           "cap=" + std::to_string(ctx.core->admission_capacity()));
     }
     sink = std::make_shared<BoundedSink>(256);
@@ -245,7 +266,10 @@ Error submit_request(AppContext& ctx, const std::string& body, bool chat,
     if (code != ErrCode::Ok) {
         if (code == ErrCode::QueueFull) {
             // 预留竞争由 Core 记账，避免同一拒绝在两层各加一次。
-            return make_error(ErrCode::QueueFull, "等待队列已满，请退避重试",
+            return make_error(ErrCode::QueueFull,
+                              "等待队列已满（" + std::to_string(ctx.core->waiting_count()) + "/" +
+                                      std::to_string(ctx.core->admission_capacity()) +
+                                      "），请退避后重试",
                               "cap=" + std::to_string(ctx.core->admission_capacity()));
         }
         if (code == ErrCode::InvalidJson) {
@@ -273,7 +297,7 @@ void start_stream(const std::shared_ptr<AppContext>& ctx, const InferenceRequest
     auto done = std::make_shared<bool>(false);
     auto filter = std::make_shared<StopFilter>(req.stop);
     response.set_chunked_content_provider(
-            "text/event-stream",
+            "text/event-stream; charset=utf-8",
             [ctx, req, sink, done, filter](size_t, httplib::DataSink& data_sink) {
                 return stream_provider(ctx, req, sink, done, filter, data_sink);
             },
@@ -394,7 +418,7 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
         }
         response.status = 200;
         response.set_content(render_body(base, texts, finishes, prompt_tokens, gen_tokens),
-                             "application/json");
+                             "application/json; charset=utf-8");
         logger()->info("http done id={} finish={} choices={} path={}", base.req_id,
                        finish_reason_name(finishes.empty() ? FinishReason::Error : finishes[0]),
                        texts.size(), request.path);
@@ -450,15 +474,25 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
     server.set_payload_max_length(std::size_t{4} * 1024 * 1024);
     server.set_read_timeout(5, 0);
     server.set_write_timeout(120, 0);
+
+    // 已登记路由表：错误处理器据此区分 404（路径未登记）与 405（路径存在、方法不对）。
+    std::map<std::string, std::vector<std::string>> route_methods;
+    auto register_route = [&route_methods](const char* method, const char* path) {
+        route_methods[path].push_back(method);
+    };
+    register_route("POST", "/v1/completions");
     server.Post("/v1/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
         inference_handler(ctx, req, res, false);
     });
+    register_route("POST", "/completion");
     server.Post("/completion", [ctx](const httplib::Request& req, httplib::Response& res) {
         inference_handler(ctx, req, res, false);
     });
+    register_route("POST", "/v1/chat/completions");
     server.Post("/v1/chat/completions", [ctx](const httplib::Request& req, httplib::Response& res) {
         inference_handler(ctx, req, res, true);
     });
+    register_route("GET", "/v1/models");
     server.Get("/v1/models", [ctx](const httplib::Request& req, httplib::Response& res) {
         if (!bearer_allowed(req.get_header_value("Authorization"), ctx->config->api_key)) {
             res.set_header("WWW-Authenticate", "Bearer realm=\"llmopt\"");
@@ -466,22 +500,54 @@ int run_server(const ServerConfig& config, ModelRunner& runner, MetricsRegistry&
             return;
         }
         res.set_content(render_models_body(model_id_from_path(ctx->config->model_path)),
-                        "application/json");
+                        "application/json; charset=utf-8");
     });
+    register_route("GET", "/healthz");
     server.Get("/healthz", [ctx](const httplib::Request&, httplib::Response& res) {
         res.set_content("{\"status\":\"" + std::string(service_state_name(ctx->service.state())) +
                                 "\"}",
-                        "application/json");
+                        "application/json; charset=utf-8");
     });
     // /readyz 只在 Ready 返回 200；Starting/Draining/Stopped 一律 503（6-G3）。
+    register_route("GET", "/readyz");
     server.Get("/readyz", [ctx](const httplib::Request&, httplib::Response& res) {
         const ServiceState state = ctx->service.state();
         res.status = state == ServiceState::Ready ? 200 : 503;
         res.set_content("{\"status\":\"" + std::string(service_state_name(state)) + "\"}",
-                        "application/json");
+                        "application/json; charset=utf-8");
     });
+    register_route("GET", "/metrics");
     server.Get("/metrics", [ctx](const httplib::Request&, httplib::Response& res) {
         res.set_content(ctx->metrics->render(), "text/plain; version=0.0.4");
+    });
+
+    // httplib 在 handler 不被调用的出口（413 超限、未匹配路由）直接回默认空体；
+    // 这里兜底成统一错误 JSON。已由 handler 回包的 4xx 不覆盖其错误体。
+    server.set_error_handler([&route_methods](const httplib::Request& req, httplib::Response& res) {
+        if (!res.body.empty()) {
+            return httplib::Server::HandlerResponse::Unhandled;
+        }
+        if (res.status == 413) {
+            send_error(res,
+                       make_error(ErrCode::PayloadTooLarge, "请求体超过 4 MB 上限，请减小输入体量",
+                                  "payload_max=4194304"));
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        if (res.status == 404) {
+            const auto it = route_methods.find(req.path);
+            if (it != route_methods.end()) {
+                const std::string allow = join_methods(it->second);
+                res.set_header("Allow", allow);
+                send_error(res, make_error(ErrCode::NotSupported, "该端点不支持 " + req.method +
+                                                                          " 方法（允许: " + allow +
+                                                                          "）"));
+                res.status = 405;
+            } else {
+                send_error(res, make_error(ErrCode::NotSupported, "未登记的端点: " + req.path));
+            }
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        return httplib::Server::HandlerResponse::Unhandled;
     });
 
     g_server = &server;

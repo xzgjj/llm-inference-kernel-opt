@@ -12,12 +12,13 @@ import hashlib
 import json
 import os
 import platform
+import re
 import socket
 import subprocess
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +35,12 @@ REPORT_FIELDS = [
     "ttft_p95_ms",
     "itl_p99_ms",
     "total_tok_s",
+    "tok_accounting",
     "kv_internal_frag_ratio",
     "sched_cpu_ratio",
+    "vram_peak_mib",
+    "vram_peak_scope",
+    "vram_device_peak_mib",
     "reason",
     "deviation_flag",
 ]
@@ -50,6 +55,18 @@ DEVIATION_FIELDS = [
 MIN_SAMPLES = 30
 TTFT_ITL_LIMIT = 0.10
 THROUGHPUT_LIMIT = 0.07
+# llama.cpp 在加载/预留时打印各设备缓冲区；CUDA0 三项之和就是本进程在卡上的常驻。
+# WSL 里 `nvidia-smi --query-compute-apps` 拿不到 pid 归属，这组日志是唯一可归因的显存证据。
+_CUDA_BUFFER_PATTERNS = {
+    "model": re.compile(r"CUDA0\s+model buffer size\s*=\s*([0-9.]+)\s*MiB"),
+    "kv": re.compile(r"CUDA0\s+KV buffer size\s*=\s*([0-9.]+)\s*MiB"),
+    "compute": re.compile(r"CUDA0\s+compute buffer size\s*=\s*([0-9.]+)\s*MiB"),
+}
+_HOST_BUFFER_PATTERNS = {
+    "model": re.compile(r"CPU_Mapped\s+model buffer size\s*=\s*([0-9.]+)\s*MiB"),
+    "kv": re.compile(r"CPU\s+KV buffer size\s*=\s*([0-9.]+)\s*MiB"),
+    "compute": re.compile(r"CUDA_Host\s+compute buffer size\s*=\s*([0-9.]+)\s*MiB"),
+}
 
 
 class StartupError(RuntimeError):
@@ -82,7 +99,14 @@ class MatrixConfig:
     host: str
     mixed: bool
     idle_between_cells_s: float
-    raw: dict[str, Any]
+    # 新增项给默认值，保证离线重建（report.py）只凭 manifest 直构时不必补齐。
+    n_gpu_layers: int = 0
+    threads: int = 0
+    kv_cache_type: str = "f16"
+    donor_slots: int = 4
+    disable_prefix_cache: bool = False
+    chunk_size: int = 128
+    raw: dict[str, Any] = field(default_factory=dict)
 
     def config_hash(self) -> str:
         payload = {key: value for key, value in self.raw.items() if not key.startswith("_")}
@@ -130,6 +154,12 @@ def load_config(path: Path, overrides: dict[str, Any] | None = None) -> MatrixCo
         host=str(data.get("host", "127.0.0.1")),
         mixed=bool(data.get("mixed", False)),
         idle_between_cells_s=float(data.get("idle_between_cells_s", 1.0)),
+        n_gpu_layers=int(data.get("n_gpu_layers", 0)),
+        threads=int(data.get("threads", 0)),
+        kv_cache_type=str(data.get("kv_cache_type", "f16")),
+        donor_slots=int(data.get("donor_slots", 4)),
+        disable_prefix_cache=bool(data.get("disable_prefix_cache", False)),
+        chunk_size=int(data.get("chunk_size", 128)),
         raw=data,
     )
 
@@ -164,7 +194,18 @@ def server_argv(cfg: MatrixConfig, concurrency: int, port: int,
         "--max-concurrency", str(concurrency),
         "--queue-capacity", str(cfg.queue_capacity),
         "--max-num-batched-tokens", str(cfg.max_num_batched_tokens),
+        "--chunk-size", str(cfg.chunk_size),
     ]
+    if cfg.n_gpu_layers > 0:
+        argv.extend(["--n-gpu-layers", str(cfg.n_gpu_layers)])
+    if cfg.threads > 0:
+        argv.extend(["--threads", str(cfg.threads)])
+    if cfg.kv_cache_type != "f16":
+        argv.extend(["--kv-cache-type", cfg.kv_cache_type])
+    # 始终显式写 donor：服务默认是 4，不能靠“省略即默认”让 manifest 与实跑不一致。
+    argv.extend(["--donor-slots", str(cfg.donor_slots)])
+    if cfg.disable_prefix_cache:
+        argv.append("--disable-prefix-cache")
     if step_trace is not None:
         argv.extend(["--step-trace", str(step_trace)])
     return argv
@@ -351,6 +392,8 @@ class _LiveMetricSampler:
         self._thread: threading.Thread | None = None
         self.kv = 0.0
         self.sched = 0.0
+        self.device_vram = 0.0
+        self.kv_used = 0
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._loop, name="metrics-live", daemon=True)
@@ -368,10 +411,16 @@ class _LiveMetricSampler:
                 continue
             kv = parse_named(text, "llmopt_kv_internal_frag_ratio")
             sched = parse_named(text, "llmopt_sched_cpu_ratio")
+            device = parse_named(text, "llmopt_vram_device_mib")
+            kv_used = parse_named(text, "llmopt_kv_used_blocks")
             if kv is not None:
                 self.kv = max(self.kv, kv)
             if sched is not None:
                 self.sched = max(self.sched, sched)
+            if device is not None and device == device:  # NaN 不参与取峰
+                self.device_vram = max(self.device_vram, device)
+            if kv_used is not None:
+                self.kv_used = max(self.kv_used, int(kv_used))
 
 
 def read_new_trace(path: Path, start_line: int) -> tuple[list[dict], int]:
@@ -389,6 +438,46 @@ def read_new_trace(path: Path, start_line: int) -> tuple[list[dict], int]:
             # 进程被强杀时最后一行可能截断；丢掉半行，不伪造样本。
             continue
     return fresh, len(lines)
+
+
+def parse_vram_budgets(text: str) -> dict:
+    """从 llama.cpp 日志提取 CUDA0/Host 缓冲区；CUDA0 之和即本进程显存占用。
+
+    返回的 `vram_peak_scope` 只三种：`buffers`（model+KV+compute 齐全）、
+    `buffers_partial`（加载中断或缺 compute）、`unknown`（无 CUDA 日志）。
+    """
+    cuda = {name: float(match.group(1)) for name, pattern in _CUDA_BUFFER_PATTERNS.items()
+            if (match := pattern.search(text))}
+    host = {name: float(match.group(1)) for name, pattern in _HOST_BUFFER_PATTERNS.items()
+            if (match := pattern.search(text))}
+    if not cuda:
+        return {
+            "vram_peak_mib": 0.0,
+            "vram_peak_scope": "unknown",
+            "cuda0_model_mib": 0.0,
+            "cuda0_kv_mib": 0.0,
+            "cuda0_compute_mib": 0.0,
+            "host_model_mib": 0.0,
+            "host_kv_mib": 0.0,
+            "host_compute_mib": 0.0,
+        }
+    complete = {"model", "kv", "compute"} <= set(cuda)
+    return {
+        "vram_peak_mib": round(sum(cuda.values()), 3),
+        "vram_peak_scope": "buffers" if complete else "buffers_partial",
+        "cuda0_model_mib": round(cuda.get("model", 0.0), 3),
+        "cuda0_kv_mib": round(cuda.get("kv", 0.0), 3),
+        "cuda0_compute_mib": round(cuda.get("compute", 0.0), 3),
+        "host_model_mib": round(host.get("model", 0.0), 3),
+        "host_kv_mib": round(host.get("kv", 0.0), 3),
+        "host_compute_mib": round(host.get("compute", 0.0), 3),
+    }
+
+
+def read_vram_budgets(path: Path) -> dict:
+    if not path.exists():
+        return parse_vram_budgets("")
+    return parse_vram_budgets(path.read_text(encoding="utf-8", errors="replace"))
 
 
 def step_stats(records: list[dict]) -> dict:
@@ -438,11 +527,22 @@ def _cell_round(records: list[dict], concurrency: int, tier: str, round_no: int,
         itls.extend(float(value) for value in record.get("itl_ms", []))
     wall_s = 1e-9
     total_tok_s = None
+    tok_accounting = "char_estimate"
     if valid:
         start = min(float(record["t_enqueue_ms"]) for record in valid)
         end = max(float(record["t_end_ms"]) for record in valid)
         wall_s = max((end - start) / 1000.0, 1e-9)
-        tokens = sum(int(record.get("n_prompt", 0)) + int(record.get("n_gen", 0)) for record in valid)
+        gen_tokens = sum(int(record.get("n_gen", 0)) for record in valid)
+        # 服务端 PrefillTokens 只计真正算过的 token；前缀命中部分要加回才是逻辑 prompt 长度。
+        # 字符估算对中文 BPE 会高估 ~2.6×，两者都不能直接用字符数。
+        prefill_tokens = metrics.get("prefill_tokens")
+        prefix_hit_tokens = metrics.get("prefix_hit_tokens") or 0.0
+        if prefill_tokens is not None and prefill_tokens + prefix_hit_tokens > 0:
+            tokens = float(prefill_tokens) + float(prefix_hit_tokens) + gen_tokens
+            tok_accounting = "prompt_metrics"
+        else:
+            tokens = sum(int(record.get("n_prompt", 0)) + int(record.get("n_gen", 0))
+                        for record in valid)
         total_tok_s = tokens / wall_s
     return {
         "concurrency": concurrency,
@@ -455,6 +555,7 @@ def _cell_round(records: list[dict], concurrency: int, tier: str, round_no: int,
         "itl_p50_ms": aggregate.percentile(itls, 0.50) if itls else None,
         "itl_p99_ms": aggregate.percentile(itls, 0.99) if itls else None,
         "total_tok_s": total_tok_s,
+        "tok_accounting": tok_accounting,
         "kv_internal_frag_ratio": metrics.get("kv"),
         "sched_cpu_ratio": metrics.get("sched"),
         "reason": reason,
@@ -496,10 +597,18 @@ def _deviation_flag(cfg: MatrixConfig, cells: list[dict]) -> tuple[str, dict[str
 
 
 def summarize(cfg: MatrixConfig, records: list[dict],
-              metrics_by_round: dict[tuple[int, int], dict[str, float | None]]) -> tuple[list[dict], list[dict]]:
+              metrics_by_round: dict[tuple[int, int], dict[str, float | None]],
+              vram_by_concurrency: dict[int, dict] | None = None) -> tuple[list[dict], list[dict]]:
     report: list[dict] = []
     deviations: list[dict] = []
+    vram_by_concurrency = vram_by_concurrency or {}
     for concurrency in cfg.concurrency:
+        vram = vram_by_concurrency.get(concurrency, parse_vram_budgets(""))
+        device_peak = max(
+            (float(metrics_by_round.get((concurrency, round_no), {}).get("device") or 0.0)
+             for round_no in range(1, cfg.repeats + 1)),
+            default=0.0,
+        )
         for tier in cfg.tiers:
             cells = [
                 _cell_round(records, concurrency, tier.name, round_no,
@@ -517,8 +626,12 @@ def summarize(cfg: MatrixConfig, records: list[dict],
                 "ttft_p95_ms": selected["ttft_p95_ms"],
                 "itl_p99_ms": selected["itl_p99_ms"],
                 "total_tok_s": selected["total_tok_s"],
+                "tok_accounting": selected["tok_accounting"],
                 "kv_internal_frag_ratio": selected["kv_internal_frag_ratio"],
                 "sched_cpu_ratio": selected["sched_cpu_ratio"],
+                "vram_peak_mib": vram.get("vram_peak_mib", 0.0),
+                "vram_peak_scope": vram.get("vram_peak_scope", "unknown"),
+                "vram_device_peak_mib": round(device_peak, 3),
                 "reason": selected["reason"] or "na",
                 "deviation_flag": flag,
             })
@@ -634,6 +747,7 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
     records_path.unlink(missing_ok=True)
     metrics_by_round: dict[tuple[int, int], dict[str, float | None]] = {}
     peaks: dict[int, dict] = {}
+    vram_by_p: dict[int, dict] = {}
     step_rows: list[dict] = []
     for concurrency in cfg.concurrency:
         try:
@@ -647,11 +761,20 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
             for round_no in range(1, cfg.repeats + 1):
                 live = _LiveMetricSampler(cfg, handle[0])
                 live.start()
+                before_text = fetch_metrics(cfg, handle[0])
+                prefill_before = parse_named(before_text, "llmopt_prefill_tokens_total") or 0.0
+                prefix_hit_before = parse_named(
+                    before_text, "llmopt_prefix_hit_tokens_total") or 0.0
                 try:
                     _run_round(cfg, handle[0], concurrency, prompt_rows, round_no, records_path)
                 finally:
                     live.stop()
                 metrics_text = fetch_metrics(cfg, handle[0])
+                prefill_after = parse_named(metrics_text, "llmopt_prefill_tokens_total") or 0.0
+                prefix_hit_after = parse_named(
+                    metrics_text, "llmopt_prefix_hit_tokens_total") or 0.0
+                prefill_round = max(prefill_after - prefill_before, 0.0)
+                prefix_hit_round = max(prefix_hit_after - prefix_hit_before, 0.0)
                 (out_dir / f"metrics_p{concurrency}_r{round_no}.prom").write_text(
                     metrics_text, encoding="utf-8"
                 )
@@ -660,10 +783,24 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
                               live.kv),
                     "sched": max(parse_named(metrics_text, "llmopt_sched_cpu_ratio") or 0.0,
                                  live.sched),
+                    "device": live.device_vram,
+                    "kv_used": live.kv_used,
+                    "kv_used_peak": parse_named(metrics_text, "llmopt_kv_used_blocks_peak"),
+                    "preempt_admission": parse_named(
+                        metrics_text, 'llmopt_preemptions_total{reason="admission"}'),
+                    "preempt_chunk": parse_named(
+                        metrics_text, 'llmopt_preemptions_total{reason="chunk_plan"}'),
+                    "preempt_cap_errors": parse_named(metrics_text,
+                                                      "llmopt_preempt_cap_errors_total"),
+                    "chunk_deferred": parse_named(metrics_text, "llmopt_chunk_deferred_total"),
+                    "chunk_steps": parse_named(metrics_text, "llmopt_chunk_prefill_steps_total"),
+                    "prefill_tokens": prefill_round,
+                    "prefix_hit_tokens": prefix_hit_round,
                 }
                 time.sleep(cfg.idle_between_cells_s)
         finally:
             peaks[concurrency] = _peak_dict(stop(proc, handle))
+            vram_by_p[concurrency] = read_vram_budgets(out_dir / f"server-p{concurrency}.log")
             trace_lines = []
             trace_path = out_dir / f"steps-p{concurrency}.jsonl"
             if trace_path.exists():
@@ -673,7 +810,7 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
         print(f"[matrix] P={concurrency} 完成")
 
     records = [json.loads(line) for line in records_path.read_text(encoding="utf-8").splitlines() if line]
-    report, deviations = summarize(cfg, records, metrics_by_round)
+    report, deviations = summarize(cfg, records, metrics_by_round, vram_by_p)
     write_report(out_dir / "matrix_report.csv", report, REPORT_FIELDS)
     write_report(out_dir / "deviation.csv", deviations, DEVIATION_FIELDS)
     write_report(out_dir / "step_summary.csv", step_rows,
@@ -695,6 +832,14 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
         "thresholds": {"ttft_itl": TTFT_ITL_LIMIT, "throughput": THROUGHPUT_LIMIT},
         "argv": server_argv(cfg, cfg.concurrency[0], 0),
         "resource_peak": peaks,
+        "vram_buffers": vram_by_p,
+        "cell_metrics": {
+            f"p{concurrency}": {
+                f"r{round_no}": metrics_by_round.get((concurrency, round_no), {})
+                for round_no in range(1, cfg.repeats + 1)
+            }
+            for concurrency in cfg.concurrency
+        },
         "env": {
             "platform": platform.platform(),
             "python": platform.python_version(),

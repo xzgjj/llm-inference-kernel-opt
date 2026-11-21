@@ -246,19 +246,17 @@ python scripts/spec5/recompute_spec5.py \
 
 ## 当前水平与局限
 
-已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度；阶段 5 只做预研判据，不落实现。Windows 本机 `ctest -L fast` 162 条（107 unit / 42 contract / 13 integration）全绿；Linux 侧 ASan / UBSan 无报告，TSan 10 轮 0 race，30 分钟 soak 343,736 请求 / 0 非 200 / RSS +0.25 MiB。
+已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据；阶段 5 只做预研判据，不落实现。WSL `ctest -L fast` 171 条全绿、全量 172 条 0 失败（1 条真服务 e2e 跳过）；真服务 e2e 10 项另行通过。
 
-官方 8B 矩阵（WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q4_K_M，每档 30 请求 × 32 token × 2 轮，`ngl 24 / threads 8`）：
+官方 8B 矩阵（WSL Ubuntu 26.04，RTX 4060 Laptop 8 GB，Qwen3-8B Q4_K_M，每档 30 请求 × 32 token × 2 轮，`ngl 24 / threads 0`，真实 token 口径）：
 
-| 并发 P | TTFT p50 (ms) | ITL p99 (ms) | 总吞吐 (tok/s) | 相对 P=1 | 两轮偏差 |
+| 并发 P | TTFT p50 (ms) | ITL p99 (ms) | 总 token 吞吐 (tok/s) | 单路 decode p50 (tok/s) | 两轮偏差 |
 | --- | --- | --- | --- | --- | --- |
-| 1 | 229.5 | 245.6 | 40.96 | 1.00× | ≤7% |
-| 2 | 434.4 | 291.0 | 50.28 | 1.23× | ≤7% |
-| 4 | 711.7 | 407.1 | 65.94 | 1.61× | ≤5% |
+| 1 | 208.4 | 131.9 | 26.27 | 12.83 | ok（2.0%） |
+| 2 | 445.8 | 324.7 | 29.66 | 6.61 | high（8.9%） |
+| 4 | 913.8 | 657.2 | 25.66 | 3.10 | high（11.5%） |
 
-同为 P=4 的调优对照：`ngl 28` 把 TTFT 压到 347.8 ms；`threads 12` 再降到 339 ms、ITL p99 从 393 ms 砍到 230 ms；`ngl 30 + q8_0 KV + donor 0`（前缀关闭）拿到当前最优 **31.07 tok/s 纯 decode、TTFT 339 ms、ITL p99 210 ms**。
-
-怎么读这组数：P=4 吞吐 1.61×（含 prefill token）过 1.5× 门槛，纯 decode 23.3→31.1 tok/s；两轮偏差 ≤7%，复现性达标。ITL p99 随并发放大（245→407 ms）是 13/37 层留在 CPU 的必然结果——8B Q4 在这张 8GB 卡上无法全量驻留（`-ngl 99` 需 5370 MiB，桌面常驻后仅剩约 4996 MiB，被判 BLOCKED）。0.5B 的旧矩阵保留在 `docs/evidence/` 作历史对照。
+**旧表（40.96/50.28/65.94 tok/s、P=4 1.61×）已作废**：prompt 侧用非空白字符数估算，中文 BPE 下高估约 2.6 倍。真实口径下 P=4 没有吞吐增益，单路 decode 从 12.8 线性降到 3.1，根因是 13/37 层留在 CPU、decode 被内存带宽卡住。要 50 tok/s 单路必须全量上卡：Q3_K_M + `ngl 37` + `q8_0 KV` 实测 decode p50 **52.14 tok/s**，代价是 4bit 量化质量损失。长 prompt（关闭前缀缓存、522 token/请求）TTFT p50 1045 ms、decode 13.6 tok/s；KV 压力档（P=16/ctx512）打到 461/512 块、10 次准入抢占，TTFT 13.5 s——这三组都不能与短档吞吐混引。证据与命令见 `docs/8B-重测记录.md` §5。
 
 局限，直说：
 

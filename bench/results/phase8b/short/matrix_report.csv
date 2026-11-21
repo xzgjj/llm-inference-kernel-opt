@@ -1,0 +1,4 @@
+concurrency_p,prompt_tier,status,n_requests,ttft_p50_ms,ttft_p95_ms,itl_p99_ms,total_tok_s,kv_internal_frag_ratio,sched_cpu_ratio,reason,deviation_flag
+1,short,ok,30,229.509,273.386,245.594,40.956,0.1538,0.0001,na,ok
+2,short,ok,30,434.37,560.778,291.017,50.282,0.1875,0.0001,na,ok
+4,short,ok,30,711.672,884.834,407.053,65.941,0.1364,0.0,na,ok

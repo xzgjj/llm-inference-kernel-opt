@@ -47,6 +47,8 @@ constexpr FieldSpec kFields[] = {
         {"log-level", false},
         {"threads", false},
         {"n-gpu-layers", false},
+        {"model-profile", false},
+        {"capacity-only", true},
         {"backend", false},
         {"rate-limit-rps", false},
         {"rate-limit-burst", false},
@@ -79,6 +81,8 @@ constexpr const char* kConfigKeys[] = {
         "log-level",
         "threads",
         "n-gpu-layers",
+        "model-profile",
+        "capacity-only",
         "backend",
         "rate-limit-rps",
         "rate-limit-burst",
@@ -224,6 +228,8 @@ ErrCode apply_core_arg(ServerConfig& cfg, const std::string& key, const std::str
         return parse_int(value, cfg.threads) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--n-gpu-layers") {
         return parse_int(value, cfg.n_gpu_layers) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--model-profile") {
+        cfg.model_profile_path = value;
     } else if (key == "--donor-slots") {
         return parse_int(value, cfg.donor_slots) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--kv-cache-type") {
@@ -244,6 +250,10 @@ ErrCode apply_gate_arg(ServerConfig& cfg, const std::string& key, const std::str
     }
     if (key == "--allow-force-on") {
         cfg.allow_force_on = true;
+        return ErrCode::Ok;
+    }
+    if (key == "--capacity-only") {
+        cfg.capacity_only = true;
         return ErrCode::Ok;
     }
     return ErrCode::NotSupported;
@@ -352,11 +362,19 @@ ErrCode validate_service_limits(const ServerConfig& cfg, std::string& message) {
     return ErrCode::Ok;
 }
 
-ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
-    if (cfg.model_path.empty()) {
-        message = "缺少 --model 或 LLMOPT_MODEL";
+ErrCode validate_model_entry(const ServerConfig& cfg, std::string& message) {
+    if (cfg.model_path.empty() && cfg.model_profile_path.empty()) {
+        message = "缺少 --model 或 LLMOPT_MODEL（容量档位可改用 --model-profile）";
         return ErrCode::PromptTooLong;
     }
+    if (cfg.model_path.empty() && !cfg.capacity_only) {
+        message = "--model-profile 只在 --capacity-only 下允许缺省 --model";
+        return ErrCode::InvalidJson;
+    }
+    return ErrCode::Ok;
+}
+
+ErrCode validate_runtime_limits(const ServerConfig& cfg, std::string& message) {
     if (cfg.port < 1 || cfg.port > 65535) {
         message = "端口必须在 1..65535";
         return ErrCode::InvalidJson;
@@ -369,12 +387,10 @@ ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
         message = "max-concurrency 必须在 1..64";
         return ErrCode::InvalidJson;
     }
-    if (validate_sched_config(cfg, message) != ErrCode::Ok) {
-        return ErrCode::InvalidJson;
-    }
-    if (validate_service_limits(cfg, message) != ErrCode::Ok) {
-        return ErrCode::InvalidJson;
-    }
+    return ErrCode::Ok;
+}
+
+ErrCode validate_backend_knobs(const ServerConfig& cfg, std::string& message) {
     if (cfg.safety_ratio < 0.80 || cfg.safety_ratio > 0.95) {
         message = "safety-ratio 必须在 0.80..0.95";
         return ErrCode::InvalidJson;
@@ -405,6 +421,26 @@ ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
     return ErrCode::Ok;
 }
 
+ErrCode validate_config(const ServerConfig& cfg, std::string& message) {
+    ErrCode rc = validate_model_entry(cfg, message);
+    if (rc != ErrCode::Ok) {
+        return rc;
+    }
+    rc = validate_runtime_limits(cfg, message);
+    if (rc != ErrCode::Ok) {
+        return rc;
+    }
+    rc = validate_sched_config(cfg, message);
+    if (rc != ErrCode::Ok) {
+        return rc;
+    }
+    rc = validate_service_limits(cfg, message);
+    if (rc != ErrCode::Ok) {
+        return rc;
+    }
+    return validate_backend_knobs(cfg, message);
+}
+
 const char* env_string(const char* name, std::string& out) {
     const char* raw = std::getenv(name);
     if (!raw || !*raw) {
@@ -422,6 +458,7 @@ ErrCode load_env_strings(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sour
     };
     const StringBinding strings[] = {
             {"LLMOPT_MODEL", "model", &cfg.model_path},
+            {"LLMOPT_MODEL_PROFILE", "model-profile", &cfg.model_profile_path},
             {"LLMOPT_HOST", "host", &cfg.host},
             {"LLMOPT_LOG_LEVEL", "log-level", &cfg.log_level},
             {"LLMOPT_BACKEND", "backend", &cfg.backend},
@@ -541,6 +578,11 @@ ErrCode load_env_flags(ServerConfig& cfg, std::vector<ConfigSourceEntry>* source
         return code;
     }
     code = load_env_flag("LLMOPT_ALLOW_FORCE_ON", "allow-force-on", &cfg.allow_force_on, sources,
+                         message);
+    if (code != ErrCode::Ok) {
+        return code;
+    }
+    code = load_env_flag("LLMOPT_CAPACITY_ONLY", "capacity-only", &cfg.capacity_only, sources,
                          message);
     if (code != ErrCode::Ok) {
         return code;

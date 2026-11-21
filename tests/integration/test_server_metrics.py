@@ -77,6 +77,12 @@ def main() -> int:
             check(samples["llmopt_tokens_per_sec"] > 0, "平均吞吐应为正")
             check(samples["llmopt_kv_held_blocks"] == 0, "收尾后 held 应为 0")
 
+            # KV 峰值：排空后当前占用回到 0，峰值必须保留运行期水位，且不低于当前占用。
+            check("llmopt_kv_used_blocks_peak" in samples, "缺少 llmopt_kv_used_blocks_peak 序列")
+            check(samples["llmopt_kv_used_blocks_peak"] >= samples["llmopt_kv_used_blocks"],
+                  "KV 峰值不应低于当前占用")
+            check(samples["llmopt_kv_used_blocks_peak"] >= 1, "排空后峰值应保留运行期水位")
+
             # K-9：stub + mode=off 应判 ELIGIBLE 且未降级。
             check(samples['llmopt_gate_verdict_total{verdict="ELIGIBLE"}'] == 1,
                   "门控应记录 1 次 ELIGIBLE")
@@ -91,6 +97,12 @@ def main() -> int:
             if probe == 0:
                 check(math.isnan(samples["llmopt_vram_mib"]), "未知 VRAM 应写 NaN")
                 check(math.isnan(samples["llmopt_vram_peak_mib"]), "未知 VRAM 峰值应写 NaN")
+
+            # 设备级整卡显存序列必须发射；未知探针口径下为 NaN，其余为非负实数。
+            check("llmopt_vram_device_mib" in samples, "缺少 llmopt_vram_device_mib 序列")
+            device_vram = samples["llmopt_vram_device_mib"]
+            check(device_vram >= 0 or math.isnan(device_vram),
+                  f"设备显存口径应为非负或 NaN，实际 {device_vram}")
 
             # 反例：未知指标名不得被动态注册成新序列。
             check("llmopt_unknown_metric" not in samples, "未知指标不应出现在 /metrics")

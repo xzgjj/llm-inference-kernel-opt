@@ -1,0 +1,215 @@
+{
+  "hash": "659ab076a1864da111edf45016a5b3d970c1d77ad4b3375f027c4c94ba0136e0",
+  "prompts": [
+    {
+      "prompt_id": "short-000",
+      "tier": "short",
+      "text": "A fixed seed makes sampling reproducible across two rounds.Prefill chunks interleave with decode to smooth inter-token latency.",
+      "max_prompt_tokens": 128,
+      "n_prompt": 111
+    },
+    {
+      "prompt_id": "short-001",
+      "tier": "short",
+      "text": "Block tables are the single source of truth for KV allocation.SSE 逐 token 回包便于观察生成节奏。量化权重减少了显存带宽压力，但可能损失少量精度。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 96
+    },
+    {
+      "prompt_id": "short-002",
+      "tier": "short",
+      "text": "固定种子下，同一请求的输出序列必须逐 token 一致。Prefix reuse turns repeated system prompts into shared blocks.连续批处理把不同请求的 decode 步骤合并到同一次前向。吞吐与延迟是两条互相拉扯的曲线。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 124
+    },
+    {
+      "prompt_id": "short-003",
+      "tier": "short",
+      "text": "Every measurement row carries run_id and concurrency for audit.取消请求后必须释放块与上下文槽，避免泄漏。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 76
+    },
+    {
+      "prompt_id": "short-004",
+      "tier": "short",
+      "text": "首 token 延迟由排队、分词与前向三部分组成。块表负责逻辑分页，物理 cell 由后端决定。A token budget separates request count from sequence length.KV 显存占用随上下文长度线性增长。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 113
+    },
+    {
+      "prompt_id": "short-005",
+      "tier": "short",
+      "text": "A fixed seed makes sampling reproducible across two rounds.Prefill chunks interleave with decode to smooth inter-token latency.",
+      "max_prompt_tokens": 128,
+      "n_prompt": 111
+    },
+    {
+      "prompt_id": "short-006",
+      "tier": "short",
+      "text": "Block tables are the single source of truth for KV allocation.SSE 逐 token 回包便于观察生成节奏。量化权重减少了显存带宽压力，但可能损失少量精度。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 96
+    },
+    {
+      "prompt_id": "short-007",
+      "tier": "short",
+      "text": "固定种子下，同一请求的输出序列必须逐 token 一致。Prefix reuse turns repeated system prompts into shared blocks.连续批处理把不同请求的 decode 步骤合并到同一次前向。吞吐与延迟是两条互相拉扯的曲线。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 124
+    },
+    {
+      "prompt_id": "short-008",
+      "tier": "short",
+      "text": "Every measurement row carries run_id and concurrency for audit.取消请求后必须释放块与上下文槽，避免泄漏。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 76
+    },
+    {
+      "prompt_id": "short-009",
+      "tier": "short",
+      "text": "首 token 延迟由排队、分词与前向三部分组成。块表负责逻辑分页，物理 cell 由后端决定。A token budget separates request count from sequence length.KV 显存占用随上下文长度线性增长。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 113
+    },
+    {
+      "prompt_id": "short-010",
+      "tier": "short",
+      "text": "A fixed seed makes sampling reproducible across two rounds.Prefill chunks interleave with decode to smooth inter-token latency.",
+      "max_prompt_tokens": 128,
+      "n_prompt": 111
+    },
+    {
+      "prompt_id": "short-011",
+      "tier": "short",
+      "text": "Block tables are the single source of truth for KV allocation.SSE 逐 token 回包便于观察生成节奏。量化权重减少了显存带宽压力，但可能损失少量精度。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 96
+    },
+    {
+      "prompt_id": "short-012",
+      "tier": "short",
+      "text": "固定种子下，同一请求的输出序列必须逐 token 一致。Prefix reuse turns repeated system prompts into shared blocks.连续批处理把不同请求的 decode 步骤合并到同一次前向。吞吐与延迟是两条互相拉扯的曲线。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 124
+    },
+    {
+      "prompt_id": "short-013",
+      "tier": "short",
+      "text": "Every measurement row carries run_id and concurrency for audit.取消请求后必须释放块与上下文槽，避免泄漏。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 76
+    },
+    {
+      "prompt_id": "short-014",
+      "tier": "short",
+      "text": "首 token 延迟由排队、分词与前向三部分组成。块表负责逻辑分页，物理 cell 由后端决定。A token budget separates request count from sequence length.KV 显存占用随上下文长度线性增长。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 113
+    },
+    {
+      "prompt_id": "short-015",
+      "tier": "short",
+      "text": "A fixed seed makes sampling reproducible across two rounds.Prefill chunks interleave with decode to smooth inter-token latency.",
+      "max_prompt_tokens": 128,
+      "n_prompt": 111
+    },
+    {
+      "prompt_id": "short-016",
+      "tier": "short",
+      "text": "Block tables are the single source of truth for KV allocation.SSE 逐 token 回包便于观察生成节奏。量化权重减少了显存带宽压力，但可能损失少量精度。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 96
+    },
+    {
+      "prompt_id": "short-017",
+      "tier": "short",
+      "text": "固定种子下，同一请求的输出序列必须逐 token 一致。Prefix reuse turns repeated system prompts into shared blocks.连续批处理把不同请求的 decode 步骤合并到同一次前向。吞吐与延迟是两条互相拉扯的曲线。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 124
+    },
+    {
+      "prompt_id": "short-018",
+      "tier": "short",
+      "text": "Every measurement row carries run_id and concurrency for audit.取消请求后必须释放块与上下文槽，避免泄漏。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 76
+    },
+    {
+      "prompt_id": "short-019",
+      "tier": "short",
+      "text": "首 token 延迟由排队、分词与前向三部分组成。块表负责逻辑分页，物理 cell 由后端决定。A token budget separates request count from sequence length.KV 显存占用随上下文长度线性增长。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 113
+    },
+    {
+      "prompt_id": "short-020",
+      "tier": "short",
+      "text": "A fixed seed makes sampling reproducible across two rounds.Prefill chunks interleave with decode to smooth inter-token latency.",
+      "max_prompt_tokens": 128,
+      "n_prompt": 111
+    },
+    {
+      "prompt_id": "short-021",
+      "tier": "short",
+      "text": "Block tables are the single source of truth for KV allocation.SSE 逐 token 回包便于观察生成节奏。量化权重减少了显存带宽压力，但可能损失少量精度。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 96
+    },
+    {
+      "prompt_id": "short-022",
+      "tier": "short",
+      "text": "固定种子下，同一请求的输出序列必须逐 token 一致。Prefix reuse turns repeated system prompts into shared blocks.连续批处理把不同请求的 decode 步骤合并到同一次前向。吞吐与延迟是两条互相拉扯的曲线。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 124
+    },
+    {
+      "prompt_id": "short-023",
+      "tier": "short",
+      "text": "Every measurement row carries run_id and concurrency for audit.取消请求后必须释放块与上下文槽，避免泄漏。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 76
+    },
+    {
+      "prompt_id": "short-024",
+      "tier": "short",
+      "text": "首 token 延迟由排队、分词与前向三部分组成。块表负责逻辑分页，物理 cell 由后端决定。A token budget separates request count from sequence length.KV 显存占用随上下文长度线性增长。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 113
+    },
+    {
+      "prompt_id": "short-025",
+      "tier": "short",
+      "text": "A fixed seed makes sampling reproducible across two rounds.Prefill chunks interleave with decode to smooth inter-token latency.",
+      "max_prompt_tokens": 128,
+      "n_prompt": 111
+    },
+    {
+      "prompt_id": "short-026",
+      "tier": "short",
+      "text": "Block tables are the single source of truth for KV allocation.SSE 逐 token 回包便于观察生成节奏。量化权重减少了显存带宽压力，但可能损失少量精度。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 96
+    },
+    {
+      "prompt_id": "short-027",
+      "tier": "short",
+      "text": "固定种子下，同一请求的输出序列必须逐 token 一致。Prefix reuse turns repeated system prompts into shared blocks.连续批处理把不同请求的 decode 步骤合并到同一次前向。吞吐与延迟是两条互相拉扯的曲线。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 124
+    },
+    {
+      "prompt_id": "short-028",
+      "tier": "short",
+      "text": "Every measurement row carries run_id and concurrency for audit.取消请求后必须释放块与上下文槽，避免泄漏。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 76
+    },
+    {
+      "prompt_id": "short-029",
+      "tier": "short",
+      "text": "首 token 延迟由排队、分词与前向三部分组成。块表负责逻辑分页，物理 cell 由后端决定。A token budget separates request count from sequence length.KV 显存占用随上下文长度线性增长。",
+      "max_prompt_tokens": 128,
+      "n_prompt": 113
+    }
+  ]
+}

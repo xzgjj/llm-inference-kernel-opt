@@ -188,6 +188,31 @@ TEST_CASE("单请求跑到 max_tokens 后释放块并关闭 sink") {
     CHECK(harness.metrics.get("llmopt_tokens_generated_total") == 3);
 }
 
+TEST_CASE("KV 峰值随占用取大，排空后保留不清零") {
+    Harness harness;
+    const auto first = harness.submit("req-peak-1", 3);
+    (void)harness.core.run_once(20);
+    const std::int64_t used_after_first = harness.metrics.get(MetricId::KvUsedBlocks);
+    const std::int64_t peak_after_first = harness.metrics.get(MetricId::KvUsedPeak);
+    CHECK(used_after_first >= 1);
+    CHECK(peak_after_first >= used_after_first);
+
+    harness.pump(first);
+    (void)drain(first);
+    CHECK(harness.metrics.get(MetricId::KvUsedBlocks) == 0);
+    // 排空后当前占用回到 0，峰值必须保留，不能被当前值覆盖清零。
+    const std::int64_t peak_after_drain = harness.metrics.get(MetricId::KvUsedPeak);
+    CHECK(peak_after_drain >= peak_after_first);
+    CHECK(peak_after_drain >= 1);
+
+    // 第二条请求结束后峰值只增不减（非递减）。
+    const auto second = harness.submit("req-peak-2", 3);
+    harness.pump(second);
+    (void)drain(second);
+    CHECK(harness.metrics.get(MetricId::KvUsedBlocks) == 0);
+    CHECK(harness.metrics.get(MetricId::KvUsedPeak) >= peak_after_drain);
+}
+
 TEST_CASE("取消排队请求不影响正在运行的请求") {
     Harness harness;
     const auto first = harness.submit("req-a", 5);

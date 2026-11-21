@@ -12,11 +12,13 @@
 namespace llmopt {
 
 // 解析 `/v1/completions` 与 `/completion` 共用的请求体。
-ErrCode parse_body(const std::string& body, InferenceRequest& out, std::string& message) noexcept;
+// detail 可选：第三方原始 cause（如 nlohmann 异常 what()）只进 detail，不外发。
+ErrCode parse_body(const std::string& body, InferenceRequest& out, std::string& message,
+                   std::string* detail = nullptr) noexcept;
 
 // 解析 `/v1/chat/completions`：messages 只做结构校验，模板渲染在提交前完成。
-ErrCode parse_chat_body(const std::string& body, InferenceRequest& out,
-                        std::string& message) noexcept;
+ErrCode parse_chat_body(const std::string& body, InferenceRequest& out, std::string& message,
+                        std::string* detail = nullptr) noexcept;
 
 // 请求缺省时生成唯一 id；格式 req-<12 hex>，不依赖随机源。
 std::string make_request_id();

@@ -29,7 +29,7 @@
 
 C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机约定一致）；本机另建目录时手动执行 `ctest --test-dir <dir>`，不改本表。CI 的非默认构建目录（sanitizer、覆盖率）用 `run_registry.py --build-dir <dir>` 覆盖表里的路径，表本身仍保持一条可独立执行的命令。
 
-CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前近百条（另有 4 个进程级脚本）。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
+CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`），当前 **172 条**（另有 4 个进程级脚本）。因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行。
 
 目录与命名约定见 [../tests/README.md](../tests/README.md)：`unit/` `contract/` `integration/` `e2e/` `perf/` 按层级分目录，Scope 一律写目录而不是单个文件，目录内新增用例自动被覆盖。
 
@@ -176,10 +176,15 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 阶段 4 矩阵工具链的用例：
 
-- `tests/tools/test_matrix.py`（9 例）：JSON 配置必填/覆盖、§1.6 十二列、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`、压测窗口 K-4/K-5 峰值采样、比率列保留 6 位小数（防 K-4 被舍成 0）。
+- `tests/tools/test_matrix.py`（17 例）：JSON 配置必填/覆盖、§1.6 证据列（含显存三列与 `tok_accounting`）、真实 prompt token 口径（prefill + prefix hit，覆盖字符估算）、默认 donor=4 必须显式进 argv、两轮偏差 ok/high、全错档 `failed`、不可行档保留行、n<30 标 `insufficient`、压测窗口 K-4/K-5/显存/KV 水位峰值采样、比率列保留 6 位小数（防 K-4 被舍成 0）、CUDA0/Host 缓冲区解析与 `unknown/buffers_partial` 语义、GPU/KV 参数必须进 argv。
+- `tests/tools/test_capacity_check.py`（8 例）：只解析服务 `estimate/capacity-only` 行不补算、缺行留空、`--capacity-only/--model-profile/--n-gpu-layers` 必须进 argv、CSV 行数与 ngl 对齐、子进程超时保留 partial 行、`OSError` 启动失败占位、半行/垃圾行解析、失败行不丢早期行。
+- `tests/tools/test_watch_matrix.py`（8 例）：`watch_matrix.snapshot` 统计行/成功/失败/`(P,tier,round)` 分格，坏 JSON 行跳过不崩；目录不存在时 `rows=0`、`last_event_age_s=None`，渲染不抛异常；只有 CSV 没有 `repro_manifest.json` 时不判完成（回归：矩阵先写 CSV 再写 manifest）；脏字段不崩；`decide` 在超阈值/未超/年龄未知时不误报、只有 report 才退出。
+- `tests/unit/gguf_test.cc` 增 3 例：`q8_0` 按 1.0625 B/值、`f32` 按 4 B/值；容量档位只读声明字段并推出 262144 B/token；缺字段/坏 JSON 必须失败。
+- `tests/unit/config_test.cc` 增 1 例：`--model-profile` 可免 `--model`，但只在 `--capacity-only` 下成立；env 同名键等价。
+- `tests/e2e/test_real_service_contract.py`（10 项）：真实服务根地址口径，`/healthz` 与 `/readyz` 都必须 `status=ready`；SSE 200、终止帧 `[DONE]`、帧含 `choices`、非流式 usage 自洽、空 prompt 返回 `INVALID_JSON`、`max_tokens` 越界字段、`CONTEXT_OVERFLOW`。`scripts/bench/run_real_contract.sh` 负责起 8B、等待 `/readyz`、落 `evidence/e2e_8b_contract.txt`。
 - `tests/tools/test_report.py`（4 例）：仅凭 JSONL + manifest 离线重建报告、四张 PNG 签名、`/metrics` 计数漂移检测、偏差 `high` 返回非零。
 - `tests/tools/test_peak_sampler.py`、`tests/tools/test_bench_*`：采样与 SSE 解析口径。
-- `tests/integration/test_server_matrix.py`：真 stub 服务跑 2 并发 × 2 档 × 1 轮；校验 CSV 列、warmup 丢弃、manifest 哈希、RSS 峰值、`.prom` 快照、`step_summary.csv`，并回调 `aggregate.py --check-metrics --check-deviation`。
+- `tests/integration/test_server_matrix.py`：真 stub 服务跑 2 并发 × 2 档 × 1 轮；校验 CSV 列（从 `REPORT_FIELDS` 单一真源导入）、warmup 丢弃、manifest 哈希、RSS 峰值、`vram_peak_scope=unknown`、显存分项键、`.prom` 快照、`step_summary.csv`，并回调 `aggregate.py --check-metrics --check-deviation`。
 - `tests/integration/test_server_mixed.py`（4-G6）：长短 1:1 同轮，CSV 分组行各 3 条、长请求全部完成。
 - `tests/integration/test_server_slow_client.py`（4-G0-2）：慢读客户端 + 快请求并发，`backpressure.csv` 记录快侧 ITL p99 与溢出计数。
 
@@ -193,8 +198,8 @@ CI 工具自测 `ci/test_phase4_scanners.py`：依赖清单无纸面依赖、规
 阶段 5 不改 `src/`，因此 v0 指标对比沿用阶段 4 官方 14 行（同一 CSV + 同一 trace 复算）；真实判据表在 `docs/evidence/phase5/`，结论“本期数据不支持翻案”。
 
 阶段 6 的兼容面与指标收口（7-2）：
-- `tests/unit/protocol_test.cc` 追加 6 例：chat `messages` 纯文本解析与文本分片合并、`tools`/图片分片/`role=tool` 归 `unsupported_field`、`stop` 最多 4 条与长度边界、`n` 1–4 及 `stream+n>1` 拒绝、`StopFilter` 跨帧命中与尾部 flush、chat 帧/非流式体/models 列表形状。
-- `tests/integration/test_compat_openai.py`（登记名 `compat_openai_test`）：真 stub 服务跑 `/v1/models`、chat 非流式/流式（帧数 ≥2、以 `[DONE]` 结束、流式拼接与一次性文本一致）、旧 `/completion` 回归、`n=2` 双候选、seed 0/7 文本不同、`stop` 命中后 `finish_reason=stop` 且截断、`tools` 返回 400 `unsupported_field`；同时校验 `llmopt_http_requests_total` 与实际请求数一致，请求 id 出现在服务日志行。帧与指标证据落 `build/evidence/compat_frames.txt`、`metrics_format.txt`。
+- `tests/unit/protocol_test.cc` 追加 6 例：chat `messages` 纯文本解析与文本分片合并、`tools`/图片分片/`role=tool` 归 `UNSUPPORTED_FIELD`、`stop` 最多 4 条与长度边界、`n` 1–4 及 `stream+n>1` 拒绝、`StopFilter` 跨帧命中与尾部 flush、chat 帧/非流式体/models 列表形状。
+- `tests/integration/test_compat_openai.py`（登记名 `compat_openai_test`）：真 stub 服务跑 `/v1/models`、chat 非流式/流式（帧数 ≥2、以 `[DONE]` 结束、流式拼接与一次性文本一致）、旧 `/completion` 回归、`n=2` 双候选、seed 0/7 文本不同、`stop` 命中后 `finish_reason=stop` 且截断、`tools` 返回 400 `UNSUPPORTED_FIELD`；同时校验 `llmopt_http_requests_total` 与实际请求数一致，请求 id 出现在服务日志行。帧与指标证据落 `build/evidence/compat_frames.txt`、`metrics_format.txt`。
 
 阶段 6 的服务状态与排空（7-3）：
 
@@ -231,7 +236,27 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - 未能执行：`deploy_smoke`（复测机无 docker）、`soak_30m`（按 30 min 另跑）、慢客户端真后端 ITL 判定（无 `/root/llm-src/llama.cpp` 与 GGUF 模型）。
 - `llama_chat_apply_template` API 兼容（6-G1 遗留）：对 llama.cpp 当前 master（`374d90a`）头文件做 `g++ -fsyntax-only -DLLMOPT_ENABLE_LLAMA=1 src/runner_llama.cpp` 通过，签名与调用方式一致。
 
-准入/背压用例需要稳定复现“突发并发”，stub 后端支持环境变量 `LLMOPT_TEST_STUB_DELAY_MS`（毫秒，默认 0，仅 `--backend stub` 生效），在 `decode_step` 前 sleep；真实后端不读该变量。它只用于测试，不进入 CLI 契约。
+阶段质量整改 A（P0/P1，2026-11-21）：
+- `unit_protocol`：外部 Request ID 长度 1–64、字符集 `[A-Za-z0-9._:-]`；`ConfigInvalid/KvInsufficient/KvBelowWatermark/UNSUPPORTED_FIELD` 的状态码、名称与 retryable 全量映射。
+- `unit_config`：CLI/env/配置文件所有非法输入统一落 `CONFIG_INVALID`，不再借用 `not_supported`/`invalid_json`/`prompt_too_long`。
+- `unit_stub_runner`、`contract_continuous_batch`：重复活跃 ID 被拒绝、结束后可复用；后续 prefill chunk 只提交一次预算；`running_count()` 改读原子镜像。
+- `unit_runner_raii`（LLAMA_ON）：`load → tokenize → release` 后再调 `tokenize/detokenize/is_eos` 必须返回未加载，覆盖 vocab 悬垂。
+- `preempt_test`：可释放总量不足时 `try_preempt` 零副作用；新增“共享前缀块不计入可释放量”，锁共享块 `ref_cnt>1` 时释放不回收、预判不得高估。
+- `preempt_test`：请求 id 结束后可复用；旧前缀 donor 同名时先丢弃，不得被 `add_sequence` 当成活跃重复。
+- `compat_openai_test`：同 ID 并发恰好一条 200/一条 400；动态 stub 10 ms/token 下，1/2 字符 stop 都跨 provider 回调命中、无前缀文本丢失、末帧为 `[DONE]`；同 ID 连续两次非流式请求都 200。
+- Windows 本机 `ctest -L fast`：156 条全绿（102 unit / 41 contract / 13 integration）。
+- WSL LLAMA_ON 构建通过，注入 Qwen2.5-0.5B Q4 GGUF 后 `runner_raii_test` 3/3；HTTP 非流式 `finish=length`、24 token，流式 24 个 delta 后收到 `[DONE]`，`llmopt_requests_total{status="ok"}=2`、error=0。
+- WSL ASan+UBSan：`ctest -L 'unit|contract'` 140/140，无泄漏/越界/UB 报告；TSan：同集 140/140，另跑 `service_state_test`、`compat_openai_test` 2/2，0 race。
+
+阶段 8 的三轮 review 修复回归（2026-11-21，详见 `evidence/phase8_verification.md`）：
+
+- `unit_protocol` +3 例：成功体/流式帧回显请求 `model`；解析异常 message 不含 nlohmann 库名、原始 `what()` 进 detail；chat 分片 `text` 非字符串按字段级错误拒绝。
+- `admission_test` +1 例：关停闸门置位后 `accepting()` 关闭、Core 边界拒绝新准入。
+- `contract_scheduler`：KV 峰值随占用取大、排空后保留不清零；`test_server_metrics.py` 补 peak 序列、`peak ≥ used`、排空后 `peak ≥ 1` 与 `llmopt_vram_device_mib` 非负断言。
+- `test_server_smoke.py`：413/404/405 统一错误体与 `Allow` 头、`charset=utf-8`、capacity-only/model-profile 进程级起停与端口不监听；`test_server_admission.py` 补 QueueFull message 容量数值。
+- `unit_config`：`clear_env` 补 `LLMOPT_MODEL_PROFILE`/`LLMOPT_CAPACITY_ONLY` 并加隔离自检；`unit_gguf` 补浮点/字符串/非正整数负样本。
+- `tests/tools/test_real_contract_base.py`（10 例）：根地址 6 分支 + 非 JSON/非对象错误体容错；`test_watch_matrix.py` 8 例、`test_capacity_check.py` 8 例、`test_matrix.py` 17 例。
+- 复跑口径：全量 ctest **172 注册 / 171 通过 / 0 失败 / 1 跳过**；`tests/tools` **96 例**、`ci/` **21 例**；`run_ci.py --mode pr` 四步 PASS；真 8B e2e 在 HTTP 修复后 **PASS 10 项**。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 

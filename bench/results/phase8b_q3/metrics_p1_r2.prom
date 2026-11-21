@@ -1,0 +1,203 @@
+# HELP llmopt_requests_total 请求总数，status 取 accepted/ok/error/cancelled/queue_full
+# TYPE llmopt_requests_total counter
+llmopt_requests_total{status="accepted"} 67
+llmopt_requests_total{status="ok"} 67
+llmopt_requests_total{status="error"} 0
+llmopt_requests_total{status="cancelled"} 0
+llmopt_requests_total{status="queue_full"} 0
+# HELP llmopt_http_requests_total 进入补全端点的 HTTP 请求数（含解析失败与拒绝）
+# TYPE llmopt_http_requests_total counter
+llmopt_http_requests_total 67
+# HELP llmopt_tokens_generated_total 已采样并下发的生成 token 总数
+# TYPE llmopt_tokens_generated_total counter
+llmopt_tokens_generated_total 8240
+# HELP llmopt_prefill_tokens_total 已写入 KV 的 prefill token 总数（含 recompute 重放）
+# TYPE llmopt_prefill_tokens_total counter
+llmopt_prefill_tokens_total 902
+# HELP llmopt_forward_steps_total 执行线程完成的前向步数
+# TYPE llmopt_forward_steps_total counter
+llmopt_forward_steps_total 8240
+# HELP llmopt_queue_depth deprecated：等待队列深度，等价 llmopt_requests_queued
+# TYPE llmopt_queue_depth gauge
+llmopt_queue_depth 0
+# HELP llmopt_running_sequences deprecated：运行序列数，等价 llmopt_requests_running
+# TYPE llmopt_running_sequences gauge
+llmopt_running_sequences 0
+# HELP llmopt_requests_running 当前在跑请求数
+# TYPE llmopt_requests_running gauge
+llmopt_requests_running 0
+# HELP llmopt_requests_running_peak 进程寿命内运行请求数峰值（K-6）
+# TYPE llmopt_requests_running_peak gauge
+llmopt_requests_running_peak 1
+# HELP llmopt_requests_queued 当前等待队列深度
+# TYPE llmopt_requests_queued gauge
+llmopt_requests_queued 0
+# HELP llmopt_kv_free_blocks 空闲 KV 块数
+# TYPE llmopt_kv_free_blocks gauge
+llmopt_kv_free_blocks 28
+# HELP llmopt_kv_used_blocks 已占用 KV 块数（含可淘汰的 cached donor）
+# TYPE llmopt_kv_used_blocks gauge
+llmopt_kv_used_blocks 4
+# HELP llmopt_kv_used_blocks_peak 进程寿命内已占用块峰值；用于判断是否打到 watermark 水位
+# TYPE llmopt_kv_used_blocks_peak gauge
+llmopt_kv_used_blocks_peak 13
+# HELP llmopt_kv_cached_blocks 仍被缓存前缀占用的块数（可淘汰）
+# TYPE llmopt_kv_cached_blocks gauge
+llmopt_kv_cached_blocks 4
+# HELP llmopt_kv_shared_blocks 引用计数大于 1 的共享块数
+# TYPE llmopt_kv_shared_blocks gauge
+llmopt_kv_shared_blocks 0
+# HELP llmopt_kv_watermark_blocks 准入预留的空闲块水位
+# TYPE llmopt_kv_watermark_blocks gauge
+llmopt_kv_watermark_blocks 2
+# HELP llmopt_kv_held_blocks 活跃占用块数 = used_blocks - cached_blocks（K-5）
+# TYPE llmopt_kv_held_blocks gauge
+llmopt_kv_held_blocks 0
+# HELP llmopt_kv_internal_frag_ratio 块表内部碎片率：1 - 已写 token 所需块 / 已分配块（含 max_tokens 预留）
+# TYPE llmopt_kv_internal_frag_ratio gauge
+llmopt_kv_internal_frag_ratio 0.0000
+# HELP llmopt_scheduler_ns_total 调度线程累计耗时（纳秒）
+# TYPE llmopt_scheduler_ns_total counter
+llmopt_scheduler_ns_total 36074842
+# HELP llmopt_scheduler_steps_total 调度步总数
+# TYPE llmopt_scheduler_steps_total counter
+llmopt_scheduler_steps_total 8240
+# HELP llmopt_schedule_step_ns_last 最近一次调度步耗时（纳秒）；p99 由离线 step trace 复算
+# TYPE llmopt_schedule_step_ns_last gauge
+llmopt_schedule_step_ns_last 4128
+# HELP llmopt_sched_cpu_ratio 调度耗时占进程墙钟比例（K-4）
+# TYPE llmopt_sched_cpu_ratio gauge
+llmopt_sched_cpu_ratio 0.0002
+# HELP llmopt_batch_size_last 最近一批的序列数
+# TYPE llmopt_batch_size_last gauge
+llmopt_batch_size_last 1
+# HELP llmopt_batch_size_peak 批次序列数峰值
+# TYPE llmopt_batch_size_peak gauge
+llmopt_batch_size_peak 1
+# HELP llmopt_batch_tokens_last 最近一批的 token 数
+# TYPE llmopt_batch_tokens_last gauge
+llmopt_batch_tokens_last 1
+# HELP llmopt_batch_tokens_peak 批次 token 数峰值
+# TYPE llmopt_batch_tokens_peak gauge
+llmopt_batch_tokens_peak 30
+# HELP llmopt_batch_prefill_tokens_last 最近一批的 prefill token 数
+# TYPE llmopt_batch_prefill_tokens_last gauge
+llmopt_batch_prefill_tokens_last 0
+# HELP llmopt_batch_decode_tokens_last 最近一批的 decode token 数
+# TYPE llmopt_batch_decode_tokens_last gauge
+llmopt_batch_decode_tokens_last 1
+# HELP llmopt_batch_prefill_seqs_last 最近一批的 prefill 序列数
+# TYPE llmopt_batch_prefill_seqs_last gauge
+llmopt_batch_prefill_seqs_last 0
+# HELP llmopt_batch_decode_seqs_last 最近一批的 decode 序列数
+# TYPE llmopt_batch_decode_seqs_last gauge
+llmopt_batch_decode_seqs_last 1
+# HELP llmopt_chunk_prefill_steps_total 非末块 chunk 的步数
+# TYPE llmopt_chunk_prefill_steps_total counter
+llmopt_chunk_prefill_steps_total 0
+# HELP llmopt_chunk_prefill_tokens_total 非末块 chunk 写入的 token 数
+# TYPE llmopt_chunk_prefill_tokens_total counter
+llmopt_chunk_prefill_tokens_total 0
+# HELP llmopt_chunk_deferred_total 因 token 预算不足而延后的 prefill 次数
+# TYPE llmopt_chunk_deferred_total counter
+llmopt_chunk_deferred_total 0
+# HELP llmopt_preemptions_total 抢占总次数，reason 取 admission/chunk_plan
+# TYPE llmopt_preemptions_total counter
+llmopt_preemptions_total{reason="admission"} 0
+llmopt_preemptions_total{reason="chunk_plan"} 0
+# HELP llmopt_preempted_tokens_total 被抢占请求丢弃并需重算的 token 总数
+# TYPE llmopt_preempted_tokens_total counter
+llmopt_preempted_tokens_total 0
+# HELP llmopt_preempt_recompute_total 走 recompute 恢复路径的抢占次数
+# TYPE llmopt_preempt_recompute_total counter
+llmopt_preempt_recompute_total 0
+# HELP llmopt_preempt_recovered_total 重算完成并恢复生成的请求数
+# TYPE llmopt_preempt_recovered_total counter
+llmopt_preempt_recovered_total 0
+# HELP llmopt_preempt_cap_errors_total 连续抢占超限而终止的请求数
+# TYPE llmopt_preempt_cap_errors_total counter
+llmopt_preempt_cap_errors_total 0
+# HELP llmopt_preempt_stalls_total 抢占试算未能释放足够块的次数
+# TYPE llmopt_preempt_stalls_total counter
+llmopt_preempt_stalls_total 0
+# HELP llmopt_aging_exempt_total 因老化规则豁免、未参与 victim 竞争的组数
+# TYPE llmopt_aging_exempt_total counter
+llmopt_aging_exempt_total 0
+# HELP llmopt_prefix_hits_total 前缀缓存命中次数
+# TYPE llmopt_prefix_hits_total counter
+llmopt_prefix_hits_total 16
+# HELP llmopt_prefix_misses_total 前缀缓存未命中次数
+# TYPE llmopt_prefix_misses_total counter
+llmopt_prefix_misses_total 51
+# HELP llmopt_prefix_hit_tokens_total 前缀命中的 token 总数
+# TYPE llmopt_prefix_hit_tokens_total counter
+llmopt_prefix_hit_tokens_total 256
+# HELP llmopt_prefix_evictions_total 被淘汰的缓存 donor 数
+# TYPE llmopt_prefix_evictions_total counter
+llmopt_prefix_evictions_total 0
+# HELP llmopt_kv_reconcile_diffs_total 块表与后端位置对账差异次数
+# TYPE llmopt_kv_reconcile_diffs_total counter
+llmopt_kv_reconcile_diffs_total 0
+# HELP llmopt_sink_overflow_total 回包队列满导致的溢出次数（请求随即断开，不丢帧）
+# TYPE llmopt_sink_overflow_total counter
+llmopt_sink_overflow_total 0
+# HELP llmopt_admission_rejected_total 准入拒绝总数，reason 取 no_free_block/below_watermark/context_overflow/token_budget/queue
+# TYPE llmopt_admission_rejected_total counter
+llmopt_admission_rejected_total{reason="no_free_block"} 0
+llmopt_admission_rejected_total{reason="below_watermark"} 0
+llmopt_admission_rejected_total{reason="context_overflow"} 0
+llmopt_admission_rejected_total{reason="token_budget"} 0
+llmopt_admission_rejected_total{reason="queue"} 0
+# HELP llmopt_ttft_ms_sum 首 token 延迟累计（毫秒，服务端从入队到首帧）
+# TYPE llmopt_ttft_ms_sum counter
+llmopt_ttft_ms_sum 3311.8212
+# HELP llmopt_ttft_ms_count 首 token 延迟样本数（K-1）
+# TYPE llmopt_ttft_ms_count counter
+llmopt_ttft_ms_count 67
+# HELP llmopt_itl_ms_sum 纯 decode 步 token 间隔累计（毫秒）
+# TYPE llmopt_itl_ms_sum counter
+llmopt_itl_ms_sum 159151.3573
+# HELP llmopt_itl_ms_count 纯 decode 步 token 间隔样本数（K-2，不含 mixed 步）
+# TYPE llmopt_itl_ms_count counter
+llmopt_itl_ms_count 8173
+# HELP llmopt_decode_steps_total 纯 decode 步数
+# TYPE llmopt_decode_steps_total counter
+llmopt_decode_steps_total 8173
+# HELP llmopt_mixed_steps_total 含 prefill 的 mixed 步数（不计入 K-2 分母）
+# TYPE llmopt_mixed_steps_total counter
+llmopt_mixed_steps_total 0
+# HELP llmopt_tokens_per_sec 启动至今平均生成吞吐（tok/s，窗口值由离线聚合给出）
+# TYPE llmopt_tokens_per_sec gauge
+llmopt_tokens_per_sec 50.0566
+# HELP llmopt_rss_mib 当前进程 RSS（MiB）
+# TYPE llmopt_rss_mib gauge
+llmopt_rss_mib 785.8633
+# HELP llmopt_rss_peak_mib 进程 RSS 峰值（MiB，K-8）
+# TYPE llmopt_rss_peak_mib gauge
+llmopt_rss_peak_mib 4328.3984
+# HELP llmopt_vram_mib 当前进程 VRAM（MiB）；NaN 表示本平台采不到
+# TYPE llmopt_vram_mib gauge
+llmopt_vram_mib NaN
+# HELP llmopt_vram_peak_mib 进程 VRAM 峰值（MiB，K-8）；NaN 表示采不到
+# TYPE llmopt_vram_peak_mib gauge
+llmopt_vram_peak_mib NaN
+# HELP llmopt_vram_probe_ok VRAM 进程级采样可用性：1 可用 / 0 不可用
+# TYPE llmopt_vram_probe_ok gauge
+llmopt_vram_probe_ok 0
+# HELP llmopt_vram_device_mib 整卡显存占用（MiB，设备级，不等于本进程；WSL 下用于补峰值证据）
+# TYPE llmopt_vram_device_mib gauge
+llmopt_vram_device_mib 7434.0000
+# HELP llmopt_gate_verdict_total 启动门控判定总数，verdict 取 ELIGIBLE/DEGRADED/BLOCKED
+# TYPE llmopt_gate_verdict_total counter
+llmopt_gate_verdict_total{verdict="ELIGIBLE"} 0
+llmopt_gate_verdict_total{verdict="DEGRADED"} 1
+llmopt_gate_verdict_total{verdict="BLOCKED"} 0
+# HELP llmopt_degraded 门控降级标记：1 表示 force_on 降并发放行 / 0 正常（K-9）
+# TYPE llmopt_degraded gauge
+llmopt_degraded 0
+# HELP llmopt_drain_timeout_total 排空超过 drain-deadline-seconds 的次数（超时后在飞请求强制中止）
+# TYPE llmopt_drain_timeout_total counter
+llmopt_drain_timeout_total 0
+# HELP llmopt_rate_limited_total 令牌桶拒绝的请求数（429，未进入队列）
+# TYPE llmopt_rate_limited_total counter
+llmopt_rate_limited_total 0

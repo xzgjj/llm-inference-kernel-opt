@@ -35,6 +35,8 @@ int http_status(ErrCode code) noexcept {
         return 504;
     case ErrCode::UnsupportedField:
         return 400;
+    case ErrCode::PayloadTooLarge:
+        return 413;
     }
     return 500;
 }
@@ -77,6 +79,8 @@ const char* error_code_name(ErrCode code) noexcept {
         return "CONFIG_INVALID";
     case ErrCode::KvBelowWatermark:
         return "KV_BELOW_WATERMARK";
+    case ErrCode::PayloadTooLarge:
+        return "PAYLOAD_TOO_LARGE";
     }
     return "EXECUTION_FAILED";
 }

@@ -282,6 +282,10 @@ public:
     }
 
     // 全量释放：先断开 vocab 视图，再按创建反序 reset 句柄；后端初始化是进程级的，不在此处 free。
+    // 生命周期不变式：服务期不支持重载模型；release() 仅在 Core 线程 join、且无 HTTP 线程在读
+    // 模板/后端名/n_ctx_ 之后调用。chat_template_/model_/n_ctx_/n_gpu_layers_ 在 load_model
+    // 后冻结， render_chat/n_ctx() 的无锁读取依赖该前提；若引入服务期重载，这些字段必须先纳入
+    // mutex_ 保护。
     void release() override {
         std::lock_guard<std::mutex> lock(mutex_);
         std::lock_guard<std::mutex> vocab_lock(vocab_mutex_);

@@ -351,7 +351,8 @@ private:
     bool pending_pure_decode_ = false;
     bool pumping_ = false;
     bool preempted_this_pump_ = false;
-    bool shutting_down_ = false;
+    // 关停/兜底标志：Core 线程写，HTTP 线程在 accepting() 只读；用原子保证跨线程可见。
+    std::atomic<bool> shutting_down_{false};
     // 队列深度镜像：只有 Core 线程写，HTTP 线程只读，用于入口准入。
     std::atomic<std::int32_t> waiting_depth_{0};
     std::atomic<std::int32_t> running_depth_{0};
@@ -362,6 +363,9 @@ private:
     std::unordered_set<RequestId> active_ids_;
     std::int64_t started_ns_ = 0;
     std::int32_t running_peak_ = 0;
+    // KV 占用峰值：Core 线程私有，仅随 publish_kv_usage() 的快照刷新；新增收尾出口须走该路径，
+    // 否则峰值可能低于真实占用。
+    std::int32_t kv_used_peak_ = 0;
     std::int32_t batch_size_peak_ = 0;
     std::int32_t batch_tokens_peak_ = 0;
     // 步级 trace：可选，默认关闭；开启时每步一行 JSONL，供离线复算 p99。

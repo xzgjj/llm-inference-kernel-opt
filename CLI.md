@@ -1,6 +1,6 @@
 # CLI 与接口契约（阶段 1 冻结版 v1.1 / 阶段 3 chunk-size / 阶段 5 预研工具）
 
-> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，2026-11-20 经用户确认纳入冻结契约，其余不变。阶段 5 只新增只读判据工具，不改服务 CLI。对应 SPEC-1（C-01…C-13）、SPEC-3 F-04、SPEC-5 §1.7。
+> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，2026-11-20 经用户确认纳入冻结契约；阶段 8 新增 `--model-profile` / `--capacity-only`（容量档位，待本轮 review 确认）。阶段 5 只新增只读判据工具，不改服务 CLI。对应 SPEC-1（C-01…C-13）、SPEC-3 F-04、SPEC-5 §1.7。
 > 与 SPEC 冲突处已记录在 `implementation-notes.md`。适用进程：`llmopt_server`。`tools/dev.py` 参数命名独立，见第 8 节。
 
 
@@ -20,7 +20,8 @@
 ## 2 启动参数
 
 ```bash
-llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] \
+llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capacity-only] \
+              [--host 127.0.0.1] [--port 8080] \
               [--ctx-tokens 2048] [--max-concurrency 8] \
               [--max-num-batched-tokens 2048] [--queue-capacity 32] \
               [--block-size 16] [--watermark-ratio 0.05] [--disable-prefix-cache] \
@@ -52,23 +53,30 @@ llmopt_server [--config <json>] --model <gguf> [--host 127.0.0.1] [--port 8080] 
 | `--max-consecutive-preemptions` | `LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS` | `3` | 1–32 | 同一请求连续被抢占上限；达到即转 `Error`，防饿死 |
 | `--preempt-trace` | `LLMOPT_PREEMPT_TRACE` | 空 | 可写路径 | 每次抢占写一行 CSV：victim/块数/重算 token/路径/代价 |
 | `--step-trace` | `LLMOPT_STEP_TRACE` | 空 | 可写路径 | 每个调度 step 写一行 JSONL（ts/steps/tokens/prefill/decode/ns）；步级 p99 只离线复算，不写回 `/metrics` |
-| `--disable-prefix-cache` | `LLMOPT_DISABLE_PREFIX_CACHE` | `false` | 布尔开关，不带值 | 关闭满块哈希与前缀复用；后端不支持零拷贝共享时也会自动关闭 |
+| `--disable-prefix-cache` | `LLMOPT_DISABLE_PREFIX_CACHE` | `false` | 布尔开关，不带值 | 关闭满块哈希与前缀复用；后端不能安全借用 KV 时也会自动关闭。共享的是逻辑块元数据，物理 KV 仍由后端 `seq_cp`/预留写入目标槽，不是物理零拷贝 |
 | `--mode` | `LLMOPT_MODE` | `off` | `off`/`auto`/`force_on` | 门控三档，见第 5 节 |
 | `--safety-ratio` | `LLMOPT_SAFETY_RATIO` | `0.80` | 0.80–0.85 | 软预算系数 |
 | `--allow-force-on` | `LLMOPT_ALLOW_FORCE_ON` | `false` | 布尔开关，不带值 | `force_on` 的二次确认 |
 | `--threads` | `LLMOPT_THREADS` | `0` | ≥0 | 0 交给 llama.cpp 决定 |
 | `--n-gpu-layers` | `LLMOPT_N_GPU_LAYERS` | `0` | ≥0 | 0 为纯 CPU |
+| `--model-profile` | `LLMOPT_MODEL_PROFILE` | 空 | 可读 JSON，含 `file_bytes/block_count/head_count/head_count_kv/key_length/value_length` 正整数 | 权重未落盘时，用声明值替代 GGUF 文件元数据做启动预算；只允许与 `--capacity-only` 搭配，不加载权重、不产出吞吐 |
+| `--capacity-only` | `LLMOPT_CAPACITY_ONLY` | `false` | 布尔开关，不带值 | 打印 `estimate`/`decision`/`capacity-only: allow_start` 后退出：可启动回 0，软超预算回 4，硬阻塞回 3；不监听端口 |
 | `--backend` | `LLMOPT_BACKEND` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
 | `--log-level` | `LLMOPT_LOG_LEVEL` | `info` | spdlog 级别 | 跑基准建议 `warn` |
 | `--rate-limit-rps` | `LLMOPT_RATE_LIMIT_RPS` | `0` | 0–1e6 | 全局令牌桶速率；0=关，>0 时超额回 429（行为已接入） |
 | `--rate-limit-burst` | `LLMOPT_RATE_LIMIT_BURST` | `32` | 1–1024 | 桶容量；突发额度，回填不超过该值 |
-| `--drain-deadline-seconds` | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | 1–300 | SIGTERM 排空上限（行为在 7-3 接入） |
+| `--drain-deadline-seconds` | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | 1–300 | SIGTERM 排空上限；超时强制停止 |
+| `--request-deadline-seconds` | `LLMOPT_REQUEST_DEADLINE_SECONDS` | `120` | 1–3600 | 请求级总时限，从入队起算；流式/非流式共享，到期由 Scheduler 以 `TIMEOUT` 收尾 |
 | `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值 |
 | `--step-trace-rate` | `LLMOPT_STEP_TRACE_RATE` | `0` | 0–64 | 每步 trace 1/N 采样；0=关（行为在 7-5 接入） |
 
 阶段 3 起支持 chunked prefill，`ctx-tokens` 不再受单步预算限制；`chunk-size` 取四档，其他值启动即拒绝。调度顺序固定为：在跑 decode 保位 → 在跑 prefill 的下一 chunk → 预算内补新请求，合计 token 不超过 `max-num-batched-tokens`。
 
+并发口径：HTTP 线程池大小 = `max-concurrency + 3`，额外 3 路固定留给 `/healthz`、`/readyz`、`/metrics` 与排空监视；一个连接由 cpp-httplib 串行处理，单连接并发恒为 1。入口准入预算为 `max-concurrency + queue-capacity`，超出的请求不占 handler。
+
 优先级固定：**CLI > `LLMOPT_*` > `--config` 文件 > 内置默认**。启动第一行打印生效配置，随后逐行打印 `config source: <键>=cli|env|file|default`，第三行打印预算与门控结论，便于复核。
+
+`--model` 默认必填；只有 `--capacity-only` + `--model-profile` 同时出现时允许缺省。此时 `estimate: ...` 的 `kv` 已按 `--kv-cache-type` 折算（f16=2 B、q8_0≈1.0625 B、f32=4 B），不再按 f16 高估 2 倍。
 
 配置文件键与 CLI 同名，允许 kebab-case 或 snake_case（`ctx-tokens` / `ctx_tokens` 等价）；未知键、类型不符、越界与坏 JSON 一律退出 2，不静默取默认。`api-key` 可来自文件或 env，但启动摘要只打印 `set/unset`。
 
@@ -116,7 +124,7 @@ chat 端点额外约束：
 | `messages` | array | 非空；`role` 仅 `system`/`user`/`assistant` |
 | `messages[].content` | string / array | 数组仅接受 `{"type":"text","text":...}` 分片 |
 
-`tools` / `tool_choice` / `functions` / `logprobs` / `logit_bias` / `response_format` / 图片分片等兼容面之外的字段返回 400 `unsupported_field`（D6-1），不静默忽略。模板读不到时回退 `role: content\n` 拼接并记 warn。
+`tools` / `tool_choice` / `functions` / `logprobs` / `logit_bias` / `response_format` / 图片分片等兼容面之外的字段返回 400 `UNSUPPORTED_FIELD`（D6-1），不静默忽略。模板读不到时回退 `role: content\n` 拼接并记 warn。
 
 采样链固定为：**惩罚 → top-k → top-p → min-p → 温度 → dist**。顺序写死在 `runner_llama.cpp`，请求不能改顺序。
 
@@ -134,10 +142,10 @@ data: [DONE]
 chat 流式帧的结构是 `object=chat.completion.chunk`，文本放在 `choices[].delta.content`；两条路径都以 `data: [DONE]` 结束。
 
 - 增量帧每帧一个 token，`text` 是该 token 的 detokenize 结果。
-- `id` 取请求里的 `req_id`；调用方必须保证同一进程内 `req_id` 唯一，重试请换新 id，否则取消与收尾可能命中错误请求。
+- `id` 取请求里的 `req_id`，长度 1–64，仅允许 `[A-Za-z0-9._:-]`；同一进程内活跃请求重复 id 返回 400 `INVALID_JSON`，重试请换新 id。请求结束后 id 可复用：服务端内部 `BackendId` 永不复用，旧 donor 保留旧内部 key，新请求可正常命中前缀而不会把旧 donor 当成活跃重复。
 - `X-Request-Id` 头优先于请求体 `id`，并写入该请求的日志行。
 - 末帧 `finish_reason` 取 `stop` / `length` / `abort` / `error`，随后补 `data: [DONE]`。
-- `stop` 跨帧命中时先下发截断前的文本，再补一帧 `finish_reason=stop` 并取消后续生成。
+- `stop` 跨 provider 回调、跨 token 命中时都先下发截断前文本，再补 `finish_reason=stop` 和 `data: [DONE]`，不静默断流。
 - `data: [DONE]\n\n` 实测 14 字节；SPEC-1 C-02 写 15 字节是笔误，以本文与实现为准。
 
 非流式响应（`n>1` 时 `choices` 按 `index` 排列，`usage` 汇总全部候选）：
@@ -159,16 +167,19 @@ chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assis
 | ErrCode | HTTP | code | 可重试 |
 | --- | --- | --- | --- |
 | `InvalidJson` | 400 | `INVALID_JSON` | 否 |
+| `ConfigInvalid` | 400 | `CONFIG_INVALID` | 否 |
 | `ModelNotLoaded` | 503 | `MODEL_NOT_LOADED` | 是 |
 | `PromptTooLong` | 400 | `PROMPT_TOO_LONG` | 否 |
 | `ContextOverflow` | 400 | `CONTEXT_OVERFLOW` | 否 |
-| `KvInsufficient` | 429 | `KV_INSUFFICIENT` | 是 |
+| `PayloadTooLarge` | 413 | `PAYLOAD_TOO_LARGE` | 否 |
+| `KvInsufficient` | 507 | `KV_INSUFFICIENT` | 否 |
+| `KvBelowWatermark` | 429 | `KV_BELOW_WATERMARK` | 是 |
 | `Cancelled` | 499 | `REQUEST_CANCELLED` | 否 |
 | `ExecutionFailed` | 500 | `EXECUTION_FAILED` | 否 |
 | `QueueFull` | 429 | `QUEUE_FULL` | 是 |
 | `NotSupported` | 404 | `NOT_SUPPORTED` | 否 |
 | `ResourceInsufficient` | 507 | `RESOURCE_INSUFFICIENT` | 否 |
-| `UnsupportedField` | 400 | `unsupported_field` | 否 |
+| `UnsupportedField` | 400 | `UNSUPPORTED_FIELD` | 否 |
 | `Unavailable` | 503 | `SERVICE_UNAVAILABLE` | 是 |
 | `RateLimited` | 429 | `RATE_LIMITED` | 是 |
 | `Unauthorized` | 401 | `UNAUTHORIZED` | 否 |
@@ -294,7 +305,45 @@ curl -s -X POST http://127.0.0.1:8080/v1/completions \
 
 ```bash
 curl -s http://127.0.0.1:8080/healthz
+curl -s http://127.0.0.1:8080/readyz
 curl -s http://127.0.0.1:8080/metrics | grep llmopt_requests_total
+```
+
+容量档位（权重未落盘，只看“这档模型 + 这张卡”进不进预算，不监听端口）：
+
+```bash
+./llmopt_server --model-profile scripts/bench/capacity/qwen3-27b-dense-q4.json \
+  --backend stub --capacity-only --mode auto \
+  --n-gpu-layers 16 --ctx-tokens 1024 --max-concurrency 4 \
+  --max-num-batched-tokens 1024 --kv-cache-type q8_0 --disable-prefix-cache
+# 退出 0=可启动，3=硬阻塞，4=软超预算被 auto 拒绝
+```
+
+一次跑多档并落 CSV：
+
+```bash
+python3 scripts/bench/capacity_check.py --server ./llmopt_server \
+  --profile scripts/bench/capacity/qwen3-27b-dense-q4.json \
+  --ngl 0,8,16,24,32 --out evidence/capacity_27b.csv
+```
+
+实验矩阵（短档 / 长档 / KV 压力档共用，配置决定规模）：
+
+```bash
+python3 scripts/bench/matrix_runner.py \
+  --config scripts/bench/matrix/phase8b_long.json \
+  --out bench/results/phase8b_long
+```
+
+长档或压力档可能出现“请求长时间无新记录”，用独立监控进程 tail 进度，不要靠肉眼盯 `/metrics`：
+
+```bash
+python3 scripts/bench/watch_matrix.py \
+  --out bench/results/phase8b_long \
+  --log bench/results/phase8b_long/progress.log \
+  --interval 10 --until-report
+# 输出：rows=... ok=... failed=... p1/long/r1=10 last_event=3.4s report=no
+# 超过 --stall-after（默认 120 s）无新请求会追加 STALL，而不是静默等待
 ```
 
 脚本化压测（重用阶段 0 采集器，指向本服务时只需改端口与路径）：
@@ -306,7 +355,7 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 
 
 
-## 10 已与用户核对并冻结的契约点
+## 10 已冻结与待确认的契约点
 
 1. 阶段 0+1 共用整数分支 `1`，下一阶段从 `2` 开始。
 2. 采样链顺序见第 3 节。
@@ -317,6 +366,9 @@ python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
 7. 阶段 2 调度参数默认值：`max-num-batched-tokens=2048`、`queue-capacity=32`、`block-size=16`、`watermark-ratio=0.05`、前缀缓存默认开。
 8. 阶段 3 新增 `--chunk-size`，默认 128，仅 32/64/128/256；`max-num-batched-tokens` 可小于 `ctx-tokens`（chunked prefill 承接）。
 9. 分支约定：阶段 2 用 `2`，阶段 3 用 `3`；每阶段结束需用户 review 后才允许推送。
+10. **待用户确认（阶段 8 新增）**：`--model-profile <json>` 允许权重不在本机时只声明模型元数据；仅在 `--capacity-only` 下可替代 `--model`；默认关闭。env 同名键 `LLMOPT_MODEL_PROFILE` / `LLMOPT_CAPACITY_ONLY` 等价。
+11. **待用户确认（阶段 8 根地址口径）**：e2e `LLMOPT_REAL_BASE` 只接受 `scheme://host:port`，禁止带路径；探活固定 `/healthz` + `/readyz`（`status=ready`），`/metrics` 仅作证据抓取。
+12. **已冻结（阶段 8 证据口径）**：`matrix_report.csv` 新增 `tok_accounting`，`total_tok_s` 的 prompt 部分必须用 `llmopt_prefill_tokens_total + llmopt_prefix_hit_tokens_total`，不得用字符数估算。
 
 
 

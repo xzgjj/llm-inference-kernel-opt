@@ -1,0 +1,204 @@
+{
+  "run_id": "p4-20261121T063753Z",
+  "git_commit": "242ca55610497a293727c54138c5c699c453d222",
+  "seed": 7,
+  "config_hash": "9cd9555abe62f11c313bdbbf3e97e45fe06208c5b74a1ffe27181fd38d69a93d",
+  "model_path": "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+  "model_sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+  "server_path": "/root/llmopt-build/llmopt_server",
+  "server_sha256": "471114bc52e28e2d17524612e0313da1995d6431ab4dcf2537a05e5e1880eaf7",
+  "backend": "llama",
+  "rounds": 2,
+  "concurrency": [
+    1,
+    2,
+    4
+  ],
+  "tiers": [
+    {
+      "name": "short",
+      "max_prompt_tokens": 128,
+      "n": 30
+    }
+  ],
+  "prompt_set_hash": "659ab076a1864da111edf45016a5b3d970c1d77ad4b3375f027c4c94ba0136e0",
+  "thresholds": {
+    "ttft_itl": 0.1,
+    "throughput": 0.07
+  },
+  "argv": [
+    "/root/llmopt-build/llmopt_server",
+    "--model",
+    "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "0",
+    "--backend",
+    "llama",
+    "--mode",
+    "off",
+    "--ctx-tokens",
+    "1024",
+    "--max-concurrency",
+    "1",
+    "--queue-capacity",
+    "64",
+    "--max-num-batched-tokens",
+    "1024",
+    "--chunk-size",
+    "128",
+    "--n-gpu-layers",
+    "24"
+  ],
+  "resource_peak": {
+    "1": {
+      "rss_peak_bytes": 2684149760,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 307
+    },
+    "2": {
+      "rss_peak_bytes": 2762244096,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 280
+    },
+    "4": {
+      "rss_peak_bytes": 2875977728,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 322
+    }
+  },
+  "vram_buffers": {
+    "1": {
+      "vram_peak_mib": 3804.52,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3015.58,
+      "cuda0_kv_mib": 460.0,
+      "cuda0_compute_mib": 328.94,
+      "host_model_mib": 1773.61,
+      "host_kv_mib": 260.0,
+      "host_compute_mib": 33.21
+    },
+    "2": {
+      "vram_peak_mib": 3896.58,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3015.58,
+      "cuda0_kv_mib": 552.0,
+      "cuda0_compute_mib": 329.0,
+      "host_model_mib": 1773.61,
+      "host_kv_mib": 312.0,
+      "host_compute_mib": 33.28
+    },
+    "4": {
+      "vram_peak_mib": 4080.33,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3015.58,
+      "cuda0_kv_mib": 736.0,
+      "cuda0_compute_mib": 328.75,
+      "host_model_mib": 1773.61,
+      "host_kv_mib": 416.0,
+      "host_compute_mib": 33.02
+    }
+  },
+  "cell_metrics": {
+    "p1": {
+      "r1": {
+        "kv": 0.1538,
+        "sched": 0.0,
+        "device": 7171.0,
+        "kv_used": 13,
+        "kv_used_peak": 13.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 1194.0,
+        "prefix_hit_tokens": 0.0
+      },
+      "r2": {
+        "kv": 0.1538,
+        "sched": 0.0,
+        "device": 6958.0,
+        "kv_used": 13,
+        "kv_used_peak": 13.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 1194.0,
+        "prefix_hit_tokens": 0.0
+      }
+    },
+    "p2": {
+      "r1": {
+        "kv": 0.1875,
+        "sched": 0.0001,
+        "device": 7075.0,
+        "kv_used": 16,
+        "kv_used_peak": 16.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 394.0,
+        "prefix_hit_tokens": 800.0
+      },
+      "r2": {
+        "kv": 0.1875,
+        "sched": 0.0,
+        "device": 6954.0,
+        "kv_used": 16,
+        "kv_used_peak": 16.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 394.0,
+        "prefix_hit_tokens": 800.0
+      }
+    },
+    "p4": {
+      "r1": {
+        "kv": 0.1538,
+        "sched": 0.0001,
+        "device": 7055.0,
+        "kv_used": 22,
+        "kv_used_peak": 22.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 394.0,
+        "prefix_hit_tokens": 800.0
+      },
+      "r2": {
+        "kv": 0.1538,
+        "sched": 0.0,
+        "device": 7347.0,
+        "kv_used": 22,
+        "kv_used_peak": 22.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 0.0,
+        "prefill_tokens": 394.0,
+        "prefix_hit_tokens": 800.0
+      }
+    }
+  },
+  "env": {
+    "platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "cpu_count": 16,
+    "hostname": "DESKTOP-GN8DB6B"
+  }
+}

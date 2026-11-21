@@ -1,0 +1,21 @@
+{
+  "name": "qwen3-27b-dense-q4",
+  "note": "容量档位：27B dense / 4bit 权重按 16.4 GiB 声明；64 层、8 KV 头、head_dim 128，KV 约 262144 B/token(f16)。权重未落盘，只用于启动预算判据，不产出吞吐结论。",
+  "file_bytes": 17609365914,
+  "block_count": 64,
+  "head_count": 40,
+  "head_count_kv": 8,
+  "embedding_length": 5120,
+  "key_length": 128,
+  "value_length": 128,
+  "context_length": 32768,
+  "recommended": {
+    "n_gpu_layers": 16,
+    "ctx_tokens": 1024,
+    "max_concurrency": 4,
+    "threads": 12,
+    "kv_cache_type": "q8_0",
+    "donor_slots": 0,
+    "disable_prefix_cache": true
+  }
+}

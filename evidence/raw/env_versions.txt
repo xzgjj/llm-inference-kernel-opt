@@ -1,0 +1,30 @@
+== date ==
+2026-11-21T15:19:23+08:00
+== uname ==
+Linux DESKTOP-GN8DB6B 6.18.58.1-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Tue Oct 27 00:24:11 UTC 2026 x86_64 GNU/Linux
+== gcc ==
+gcc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+== g++/c++ ==
+c++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+== cmake ==
+cmake version 4.2.3
+== ninja ==
+1.13.2
+== python3 ==
+Python 3.14.4
+== clang-format ==
+Ubuntu clang-format version 21.1.8 (6ubuntu1)
+== clang-format config ==
+BasedOnStyle: LLVM
+ColumnLimit: 100
+IndentWidth: 4
+ContinuationIndentWidth: 8
+== build cache ==
+CMAKE_BUILD_TYPE:STRING=Release
+CMAKE_CXX_COMPILER:FILEPATH=/usr/bin/c++
+LLMOPT_ENABLE_LLAMA:BOOL=ON
+CMAKE_GENERATOR:INTERNAL=Ninja
+CMAKE_GENERATOR_INSTANCE:INTERNAL=
+CMAKE_GENERATOR_PLATFORM:INTERNAL=
+CMAKE_GENERATOR_TOOLSET:INTERNAL=
+CMAKE_HOME_DIRECTORY:INTERNAL=/mnt/d/c++_myproject/llm-inference-kernel-opt

@@ -1,0 +1,22 @@
+--- tests/unit/gguf_test.cc	2026-11-21 13:22:13.884523500 +0800
++++ -	2026-11-21 15:24:50.102095575 +0800
+@@ -59,7 +59,8 @@
+ }
+ 
+ // 容量档位 JSON 与 GGUF 头分开写，避免把 JSON 当二进制头解析。
+-std::string write_profile(const std::string& text, const std::string& name = "llmopt_profile.json") {
++std::string write_profile(const std::string& text,
++                          const std::string& name = "llmopt_profile.json") {
+     const std::string path = (std::filesystem::temp_directory_path() / name).string();
+     std::ofstream stream(path, std::ios::trunc);
+     stream << text;
+@@ -137,8 +138,7 @@
+ }
+ 
+ TEST_CASE("容量档位缺字段、坏 JSON 都失败并给原因") {
+-    const std::string missing = write_profile(
+-            R"({"file_bytes": 1024, "block_count": 2})");
++    const std::string missing = write_profile(R"({"file_bytes": 1024, "block_count": 2})");
+     const GgufMeta bad = read_model_profile(missing);
+     CHECK_FALSE(bad.ok);
+     CHECK(bad.error.find("缺字段") != std::string::npos);

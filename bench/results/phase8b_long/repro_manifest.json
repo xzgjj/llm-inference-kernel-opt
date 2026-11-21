@@ -1,0 +1,97 @@
+{
+  "run_id": "p4-20261121T071601Z",
+  "git_commit": "242ca55610497a293727c54138c5c699c453d222",
+  "seed": 7,
+  "config_hash": "15a13451b7b621e5be66635e8e845557d4a0ff402bbe840fc6923021598ca8c4",
+  "model_path": "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+  "model_sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+  "server_path": "/root/llmopt-build/llmopt_server",
+  "server_sha256": "471114bc52e28e2d17524612e0313da1995d6431ab4dcf2537a05e5e1880eaf7",
+  "backend": "llama",
+  "rounds": 1,
+  "concurrency": [
+    1
+  ],
+  "tiers": [
+    {
+      "name": "long",
+      "max_prompt_tokens": 1400,
+      "n": 10
+    }
+  ],
+  "prompt_set_hash": "5b870bfebe19c1138120e860ca82d74509f5ca4ce61b845ca728b9acd3b8db4a",
+  "thresholds": {
+    "ttft_itl": 0.1,
+    "throughput": 0.07
+  },
+  "argv": [
+    "/root/llmopt-build/llmopt_server",
+    "--model",
+    "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+    "--host",
+    "127.0.0.1",
+    "--port",
+    "0",
+    "--backend",
+    "llama",
+    "--mode",
+    "off",
+    "--ctx-tokens",
+    "1280",
+    "--max-concurrency",
+    "1",
+    "--queue-capacity",
+    "64",
+    "--max-num-batched-tokens",
+    "1024",
+    "--chunk-size",
+    "128",
+    "--n-gpu-layers",
+    "24",
+    "--disable-prefix-cache"
+  ],
+  "resource_peak": {
+    "1": {
+      "rss_peak_bytes": 2483482624,
+      "vram_peak_bytes": 0,
+      "vram_known": false,
+      "samples": 70
+    }
+  },
+  "vram_buffers": {
+    "1": {
+      "vram_peak_mib": 3459.33,
+      "vram_peak_scope": "buffers",
+      "cuda0_model_mib": 3015.58,
+      "cuda0_kv_mib": 115.0,
+      "cuda0_compute_mib": 328.75,
+      "host_model_mib": 1773.61,
+      "host_kv_mib": 65.0,
+      "host_compute_mib": 33.27
+    }
+  },
+  "cell_metrics": {
+    "p1": {
+      "r1": {
+        "kv": 0.0571,
+        "sched": 0.0001,
+        "device": 6610.0,
+        "kv_used": 35,
+        "kv_used_peak": 35.0,
+        "preempt_admission": 0.0,
+        "preempt_chunk": 0.0,
+        "preempt_cap_errors": 0.0,
+        "chunk_deferred": 0.0,
+        "chunk_steps": 48.0,
+        "prefill_tokens": 5220.0,
+        "prefix_hit_tokens": 0.0
+      }
+    }
+  },
+  "env": {
+    "platform": "Linux-6.18.58.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "cpu_count": 16,
+    "hostname": "DESKTOP-GN8DB6B"
+  }
+}

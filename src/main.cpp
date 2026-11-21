@@ -59,6 +59,7 @@ void print_config(const ServerConfig& cfg) {
               << " drain_s=" << cfg.drain_deadline_seconds
               << " request_deadline_s=" << cfg.request_deadline_seconds
               << " step_trace_rate=" << cfg.step_trace_rate
+              << " capacity_only=" << (cfg.capacity_only ? 1 : 0)
               << " api_key=" << (cfg.api_key.empty() ? "unset" : "set") << "\n";
 }
 
@@ -132,7 +133,18 @@ void report_gate_metrics(MetricsRegistry& metrics, const GateResult& gate) {
 // 启动前预算检查：读模型元数据、按 L2 口径估算并返回退出码（0 表示放行）。
 std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::int32_t& ctx_total,
                           GateResult& gate) {
-    const GgufMeta meta = read_gguf_meta(cfg.model_path);
+    GgufMeta meta;
+    if (cfg.model_profile_path.empty()) {
+        meta = read_gguf_meta(cfg.model_path);
+    } else {
+        // 容量档位：权重可不在本机，用声明值替换文件元数据；结论只覆盖容量，不覆盖吞吐。
+        meta = read_model_profile(cfg.model_profile_path);
+        if (meta.ok) {
+            std::cout << "capacity-profile: path=" << cfg.model_profile_path
+                      << " name=" << meta.architecture << " bytes=" << meta.file_bytes
+                      << " layers=" << meta.block_count << "\n";
+        }
+    }
     if (!meta.ok) {
         std::cerr << "读取模型元数据失败: " << meta.error << "\n";
         return kExitStartFail;
@@ -142,7 +154,7 @@ std::int32_t gate_startup(const ServerConfig& cfg, std::int32_t requested, std::
     ctx_total = model_cfg.n_ctx_total;
     EstBudget budget;
     budget.model_bytes = meta.file_bytes;
-    budget.kv_bytes = estimate_kv_bytes(meta, ctx_total);
+    budget.kv_bytes = estimate_kv_bytes(meta, ctx_total, cfg.kv_cache_type);
     budget.required_bytes = budget.model_bytes + budget.kv_bytes;
     budget.safety_ratio = cfg.safety_ratio;
     // 部分卸载：按 n_gpu_layers 把权重与 KV 拆成显存/内存两池，其余仍走单池口径。
@@ -209,7 +221,15 @@ std::int32_t run(const ServerConfig& cfg) {
     GateResult gate;
     const std::int32_t gate_rc = gate_startup(cfg, requested, ctx_total, gate);
     if (gate_rc != kExitOk) {
+        if (cfg.capacity_only) {
+            std::cout << "capacity-only: allow_start=0\n";
+        }
         return gate_rc;
+    }
+    if (cfg.capacity_only) {
+        // 只验证“这档模型 + 这张卡 + 这组参数”是否进得了预算；不加载权重、不监听端口。
+        std::cout << "capacity-only: allow_start=1\n";
+        return kExitOk;
     }
     // K-9：门控结论一次落指标，矩阵侧可直接对账启动时是否发生降级。
     MetricsRegistry metrics;
