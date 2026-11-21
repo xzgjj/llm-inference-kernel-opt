@@ -29,6 +29,8 @@ function(llmopt_add_doctest name labels)
     set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${label_file}")
 endfunction()
 
+# nightly_real_backend.py 由 CI real-backend 作业直接调用（需真模型与 LLAMA 构建），
+# 不进 CTest 注册表，避免无模型环境把 nightly 用例误当默认测试。
 llmopt_add_doctest(unit_protocol "unit;fast;hermetic" SOURCES unit/protocol_test.cc)
 llmopt_add_doctest(unit_config "unit;fast;hermetic" SOURCES unit/config_test.cc)
 llmopt_add_doctest(unit_kv "unit;fast;hermetic" SOURCES unit/kv_test.cc)

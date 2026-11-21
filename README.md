@@ -266,6 +266,7 @@ python scripts/spec5/recompute_spec5.py \
 - 兼容面是最小集：不做多租户、配额、WebUI、OpenAI 全量字段；鉴权只有一个 Bearer token。
 - 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
 - 阶段 9 增加 Completion watchdog（`--completion-timeout-ms`，默认 30 s）：执行线程不回投时先回 500，迟到回投后再释放 KV；永久挂死仍需 runner 级进程隔离。
+- nightly 增加 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。
 - `/metrics` 不含直方图，p99 需离线复算；慢读退化与真后端容器冒烟仍缺真机复测。
 - 基准噪声偏大：同一档两轮的 TTFT / 吞吐漂移经常越过 10%，暂不适合做精细调参依据。
 

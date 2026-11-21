@@ -242,6 +242,7 @@ Limitations, stated plainly:
 - The compatibility surface is minimal: no multi-tenancy, quotas, web UI or full OpenAI field set; auth is one Bearer token.
 - Phase 9 adds optional in-process TLS (`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`) and an optional loopback control listener (`--control-port`); defaults remain plaintext and shared-port. Public/multi-tenant deployments should still use a reverse proxy.
 - Phase 9 adds a completion watchdog (`--completion-timeout-ms`, default 30 s): a missing step completion returns 500 first, and KV is released only after the late completion arrives; a permanently hung worker still needs process-level isolation.
+- Nightly adds a `real-backend` job: fixed Qwen2.5-0.5B Q4_K_M + sha256 on CPU, covering healthz/readyz, non-stream, SSE, disconnect-cancel and `/metrics`.
 - `/metrics` has no histograms, so p99 needs offline recomputation. Slow-reader degradation and container smoke tests with the real backend still need a machine that has both Docker and GGUF models.
 - Benchmark noise is high: round-to-round TTFT and throughput drift often crosses 10%, so the numbers are not yet suitable for fine-grained tuning decisions.
 

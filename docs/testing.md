@@ -268,6 +268,7 @@ D6-2 的可选 Bearer（用户确认实现，默认关）：
 - `completion_watchdog_test`：慢回投 runner（1.2 s）注入，请求 1 s 内收到 `EXECUTION_FAILED`；迟到 Completion 后 KV 归零；shutdown <5 s。
 - 非 TLS 构建仍注册控制面/证书失败用例；TLS 握手用例只在 TLS 构建出现，避免默认 Windows/MSVC 无 OpenSSL 时误报。
 - TLS CI 作业：`.github/workflows/ci.yml` 的 `tls` 作业用 `-DLLMOPT_ENABLE_TLS=ON` 编译并跑 TLS/控制面/证书失败三条，编译失败即红灯。
+- 真后端 nightly：`real-backend` 作业固定 llama.cpp `b12557` + 官方 Qwen2.5-0.5B Q4_K_M（sha256 `74a4da8c...`），CPU 构建后跑 `tests/e2e/nightly_real_backend.py`；断言 healthz/readyz、非流式 usage、SSE `[DONE]`/choices、断开后 cancelled 指标增长、`/metrics` 系列存在，并验证取消后服务仍可用、KV 回零。
 
 自动执行靠 `.githooks/pre-commit`：每次提交先跑 `run_ci.py --mode fast`，再增量构建并跑 `ctest -L fast`，失败即拒绝提交。覆盖率不在钩子里跑（要插桩重建，约 1 分钟），由 CI 的 `coverage` 作业与 `scripts/ci/check_coverage.py` 负责。
 

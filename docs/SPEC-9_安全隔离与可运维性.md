@@ -1,6 +1,6 @@
 # SPEC-9：安全隔离与可运维性
 
-- 状态：TLS、控制面隔离与 Completion watchdog 已实现；多租户、断连取消、真后端 CI、长稳仍为规划
+- 状态：TLS、控制面隔离、Completion watchdog 与真后端 nightly 已实现；多租户、断连取消、长稳仍为规划
 - 分支：`9`（从 `8` @ `9037f61` 切出）
 - 关联调研：`docs/notes/阶段9-安全隔离调研.md`
 - 原则：默认行为不变；能力以开关/配置启用；每项先有可失败测试；不在同一提交混多个结构改造
@@ -133,18 +133,18 @@
 
 验收：注入慢回投 fake runner（1.2 s）；请求在 1 s 内收到 `EXECUTION_FAILED`；迟到回投后 KV 归零；shutdown 在 5 s 内完成。
 
-### 3.6 真后端 CI（规划，未实现）
+### 3.6 真后端 CI（已实现）
 
-现状：CI 只编译 `runner_llama.cpp`；真模型 e2e 需手工设置 `LLMOPT_REAL_BASE`。
+现状：CI 的 `llama-compile` 只守头文件兼容；`real-backend` nightly 守真实运行时行为。
 
 契约：
 
 - nightly（或 `workflow_dispatch`）新增 `real-backend` 作业：
-  - 下载 0.5B GGUF（固定 URL + sha256）；
-  - 构建 `LLMOPT_ENABLE_LLAMA=ON`；
-  - 起服务，跑 `/healthz`、`/readyz`、非流式、SSE、cancel、`/metrics` 五项；
-  - 不要求 GPU；CPU 后端即可。
-- 失败必须红灯，不允许“环境跑不了”跳过；若下载失败，作业失败并保留日志。
+  - 固定下载官方 `Qwen/Qwen2.5-0.5B-Instruct-GGUF` 的 `qwen2.5-0.5b-instruct-q4_k_m.gguf`（491,400,032 bytes），sha256 必须等于 `74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db`；
+  - 固定 llama.cpp `b12557`，CPU shared 构建 `llama`/`ggml`，再以 `LLMOPT_ENABLE_LLAMA=ON` 构建 `llmopt_server`；
+  - `tests/e2e/nightly_real_backend.py` 起真实服务，跑 healthz/readyz、非流式、SSE、客户端断开取消、`/metrics` 五组；
+  - 取消断言：断开后 `llmopt_requests_total{status="cancelled"}` 增长，取消后服务仍可正常完成请求，`llmopt_kv_used_blocks` 回零。
+- 失败必须红灯，不允许“环境跑不了”跳过；下载/构建/运行失败都保留日志与 `real-backend.json`。
 - 与 `llama-compile` 分离：编译作业守头文件兼容，运行作业守行为。
 
 ### 3.7 长稳/soak（规划，未实现）
@@ -164,17 +164,17 @@
 | 多租户 key/配额 | 默认 | integration | 401/429/tenant 指标 |
 | 非流式断连 | 默认 | integration | 1 s 内 cancel + KV 归还 |
 | `completion_watchdog_test` | 默认 | contract/fast | 1 s 内 `EXECUTION_FAILED`；迟到回投后 KV 归零；shutdown <5 s |
-| real-backend nightly | LLAMA=ON | nightly | 五项运行时 PASS |
+| `nightly_real_backend.py` | LLAMA=ON | nightly | 固定模型 sha256；health/ready、非流式、SSE、cancel、metrics 全 PASS |
 | soak | 默认 | slow | 30 min 无泄漏/漂移 |
 
 ## 5 实施顺序
 
 1. **已完成**：TLS 数据面 + 控制面隔离 + 两条回归。
 2. **已完成（R1-01）**：Completion watchdog，`completion_watchdog_test` 覆盖 500、迟到回收与 shutdown。
-3. **下一步（P1）**：非流式断连取消（R2-03）——需要 httplib 暴露连接探测；当前 0.18.3 无该 API。
-4. **P1**：真后端 nightly 小模型。
-5. **P2**：多租户静态 key + 配额；先出格式与隔离决策，再改调度器。
-6. **P2**：soak 与 Docker/systemd 真机验证。
+3. **已完成（P1）**：真后端 nightly，固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑五组运行时检查。
+4. **下一步（P2）**：多租户静态 key + 配额；先出格式与隔离决策，再改调度器。
+5. **P2**：soak 与 Docker/systemd 真机验证。
+6. **P1（阻塞）**：非流式断连取消；需要 httplib 暴露连接探测或网关层取消。
 
 ## 6 需要用户确认的决策
 

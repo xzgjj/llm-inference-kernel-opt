@@ -1,0 +1,20 @@
+{
+  "checks": {
+    "healthz": true,
+    "readyz": true,
+    "non_stream": true,
+    "sse": true,
+    "sse_first_frame": true,
+    "cancel": true,
+    "metrics": true,
+    "post_cancel_healthy": true
+  },
+  "metrics": {
+    "cancelled_before": 0.0,
+    "cancelled_after": 1.0,
+    "kv_used_blocks": 0.0
+  },
+  "model": "/mnt/d/ai_model/models/qwen3-8b/Qwen3-8B-Q4_K_M.gguf",
+  "model_sha256": "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
+  "port": 18081
+}

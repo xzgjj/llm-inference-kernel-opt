@@ -249,3 +249,61 @@ jobs:
           else
             echo "SKIP(perf): 注册表中尚无 perf 基线，数据不足以判定回退" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+  # rule: CI-REAL-001 / CI-REAL-002 —— 真后端 nightly：固定模型 URL + sha256，
+  # CPU 跑 healthz/readyz、非流式、SSE、断连取消、/metrics；失败必须红灯，不跳过。
+  real-backend:
+    name: real-backend
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      MODEL_URL: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+      MODEL_SHA256: 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
+      LLAMA_TAG: b12557
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build llama.cpp (CPU, shared)
+        run: |
+          curl -sSL --retry 3 -o /tmp/llama.tar.gz \
+            "https://github.com/ggml-org/llama.cpp/archive/refs/tags/${LLAMA_TAG}.tar.gz"
+          tar -xzf /tmp/llama.tar.gz -C /tmp
+          mv "/tmp/llama.cpp-${LLAMA_TAG}" /tmp/llama
+          cmake -S /tmp/llama -B /tmp/llama/build -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=ON -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF -DLLAMA_CURL=OFF -DGGML_NATIVE=OFF
+          cmake --build /tmp/llama/build --parallel --target llama ggml
+      - name: configure llmopt with llama
+        env:
+          LLMOPT_LLAMA_ROOT: /tmp/llama
+        run: >
+          cmake -S . -B build-real -DCMAKE_BUILD_TYPE=Release
+          -DLLMOPT_ENABLE_LLAMA=ON -DLLMOPT_BUILD_TESTS=OFF
+      - name: build server
+        run: cmake --build build-real --parallel --target llmopt_server
+      - name: download fixed model
+        run: |
+          mkdir -p /tmp/models
+          curl -fSL --retry 3 --retry-delay 5 -o /tmp/models/qwen2.5-0.5b-q4_k_m.gguf "$MODEL_URL"
+          echo "${MODEL_SHA256}  /tmp/models/qwen2.5-0.5b-q4_k_m.gguf" | sha256sum -c -
+      - name: five-part runtime checks
+        run: |
+          mkdir -p build/ci-reports
+          python tests/e2e/nightly_real_backend.py \
+            --server build-real/llmopt_server \
+            --model /tmp/models/qwen2.5-0.5b-q4_k_m.gguf \
+            --port 18080 \
+            --evidence build/ci-reports/real-backend.json
+      - name: upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-backend-evidence
+          path: |
+            build/ci-reports/real-backend.json
+            /tmp/llmopt-nightly-real.log
+          if-no-files-found: warn
+          retention-days: 30

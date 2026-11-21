@@ -1,0 +1,20 @@
+{
+  "checks": {
+    "healthz": true,
+    "readyz": true,
+    "non_stream": true,
+    "sse": true,
+    "sse_first_frame": true,
+    "cancel": true,
+    "metrics": true,
+    "post_cancel_healthy": true
+  },
+  "metrics": {
+    "cancelled_before": 0.0,
+    "cancelled_after": 1.0,
+    "kv_used_blocks": 0.0
+  },
+  "model": "/root/models/qwen2.5-ms.gguf",
+  "model_sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+  "port": 18082
+}
