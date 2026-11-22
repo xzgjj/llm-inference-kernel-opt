@@ -19,7 +19,7 @@ import check_code
 import check_diff
 import check_docs
 import check_tests
-from ci_common import CheckResult, emit, guard_console, write_report, write_summary
+from ci_common import CheckResult, Violation, emit, guard_console, write_report, write_summary
 
 # 覆盖率脚本按文件路径加载：避免与 site-packages 里的 coverage 包同名冲突。
 _spec = importlib.util.spec_from_file_location(
@@ -28,9 +28,9 @@ coverage_gate = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(coverage_gate)
 
 MODES = {
-    "fast": ["docs", "tests", "code"],
-    "pr": ["docs", "tests", "code", "diff"],
-    "nightly": ["docs", "tests", "code", "diff", "coverage"],
+    "fast": ["docs", "tests", "code", "perf"],
+    "pr": ["docs", "tests", "code", "perf", "diff"],
+    "nightly": ["docs", "tests", "code", "perf", "diff", "coverage"],
 }
 
 MIN_PYTHON = (3, 10)
@@ -78,9 +78,31 @@ def run_step(step: str, base: str | None, labels: str, enforce: bool,
         return check_tests.run()
     if step == "code":
         return check_code.run()
+    if step == "perf":
+        return run_perf_gate()
     if step == "coverage":
         return coverage_gate.run(base=base or "", build_dir=coverage_build_dir)
     return check_diff.run(base, labels, enforce)
+
+
+def run_perf_gate() -> CheckResult:
+    """D2-13：拿入库矩阵 CSV 与基线比，劣化 >5% 即 FAIL；缺输入记 SKIP 并说明原因。"""
+    result = CheckResult("perf")
+    script = Path(__file__).resolve().parent / "check_perf_baseline.py"
+    proc = subprocess.run([sys.executable, str(script)], capture_output=True, text=True,
+                          cwd=Path(__file__).resolve().parents[2])
+    output = (proc.stdout + proc.stderr).strip()
+    if proc.returncode == 0:
+        result.notes.append(output)
+        return result
+    if proc.returncode == 3:
+        result.skipped = True
+        result.notes.append(f"SKIP: {output}")
+        return result
+    result.violations.append(
+        Violation(rule="CI-PERF-001", path="ci/baseline/perf-baseline.json",
+                  message=output or "性能劣化超过 5%"))
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:

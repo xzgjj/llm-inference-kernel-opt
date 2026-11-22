@@ -23,6 +23,16 @@
 
 
 
+## 版本与回滚
+
+当前版本 **0.13.0**（`CMakeLists.txt` 里 `project(llmopt VERSION)` 是唯一来源，`--version`、启动日志、`/metrics` 的 `llmopt_build_info` 同源）。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+回滚三步：
+
+1. 代码：`git revert <坏提交>` 或 `git checkout <上一个 tag>`，重新 `cmake --build build`；
+2. 部署：把镜像/二进制换回上一版本，确认 `/readyz` 回 200 且 `llmopt_build_info` 的 version 已变；
+3. 数据面：无持久状态，KV 与队列都在内存里，回滚只需重启进程；慢请求 dump 与证据目录可直接保留。
+
 ## 核心功能
 
 每条先说明“解决什么问题”，再说怎么做，最后给实测数字或边界。
@@ -55,7 +65,7 @@
 | --- | --- |
 | 语言标准 | C++20：`std::span` / `std::optional` / `std::atomic` / RAII / `enum class`；热路径不用 modules、协程、ranges |
 | 构建 | CMake ≥ 3.20 + FetchContent（依赖只拉到 `third_party/_deps`，不入库）；可选 Ninja |
-| 推理后端 | ggml + llama.cpp（commit `b94959a`），编译期开关 `LLMOPT_ENABLE_LLAMA`；默认 stub 后端供 CI 与路由自检 |
+| 推理后端 | ggml + llama.cpp（tag `b12557`，可用 `LLMOPT_LLAMA_EXPECTED_REVISION` 严格校验），编译期开关 `LLMOPT_ENABLE_LLAMA`；默认 stub 后端供 CI 与路由自检 |
 | HTTP / SSE | cpp-httplib 0.18.5（单头，关闭 OpenSSL / zlib / brotli；0.18.5 起提供 `is_connection_closed`） |
 | JSON | nlohmann/json 3.11.3 |
 | 日志 | spdlog 1.17.0（header-only，内嵌 fmt） |
@@ -285,6 +295,37 @@ python scripts/spec5/recompute_spec5.py \
 **结论：全驻留档下 continuous batching 的吞吐收益被证伪**（P8/P1 仅 1.05×，判据要求 ≥1.3×），代价是 ITL p99 放大 7.4×。归因是"单执行线程串行 + 显存带宽封顶"：调度步 p50 仅 4–8 µs、`sched_cpu_ratio` 0.01–0.02%，控制面不是瓶颈；77–81 tok/s 已接近该卡有效带宽上限。吞吐在 P=4 到平台，再往上只增加排队与尾延迟。旧表（`ngl 24`、13/37 层留 CPU 时的 1.61× 与 12.8 tok/s 单路）是 CPU-offload 天花板下的相对改善，**已作废**，只作历史对照。证据、分档显存分项与复现命令见 `evidence/phase12/perf/README.md`。
 
 **这条结论的边界**：负载是等长 32-token 短解码、prompt 单档、P=1/2/4/8，且没有"静态批"对照。它证明的是"把并发从 1 拉到 8 不再涨吞吐、只涨尾延迟"，不能推出"continuous batching 本身没有收益"——等长输出恰好抹掉了槽位复用，而没有静态批基线就无法把这 1.05× 精确归因到"补位"这一机制。混长输出、static/continuous 对照、前缀缓存开/关三组配置已落在 `scripts/bench/matrix/phase12_s3_*.json`，跑出来之前不要引用更宽的结论。
+
+### 容量与 SLO（D2-13）
+
+SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024、P≤8 成立）：
+
+| 指标 | 目标 | 判定口径 |
+| --- | --- | --- |
+| TTFT p50 | ≤ 350 ms | 连续批、短 prompt 档，P≤8 |
+| ITL p99 | ≤ 200 ms | 同上；超过即该并发档不可用于交互式场景 |
+| 可用性 | ≥ 99.5% / 30 天 | systemd `Restart=on-failure` + 外部探针（D2-11） |
+| 服务端错误率 | ≤ 0.1% | 只算 5xx，4xx 客户端错误不计 |
+
+容量表由 `python scripts/bench/capacity_table.py --evidence evidence/phase13` 从 D2-03 的 `matrix_report.csv` 生成，不手写数字：
+
+| 组 | P | TTFT p50 (ms) | ITL p99 (ms) | 总 token 吞吐 (tok/s) | VRAM 峰值 (MiB) | 备注 |
+| --- | --- | --- | --- | --- | --- | --- |
+| perf-static | 1 | 29.4 | 23.2 | 62.0 | 4384 |  |
+| perf-static | 2 | 744.5 | 23.4 | 62.2 | 4461 |  |
+| perf-static | 4 | 2160.3 | 70.2 | 56.0 | 4614 |  |
+| perf-static | 8 | 6970.0 | 142.1 | 57.1 | 4920 | high† |
+| perf-mixed | 1 | 29.8 | 23.3 | 61.0 | 4384 |  |
+| perf-mixed | 2 | 70.9 | 51.7 | 51.5 | 4461 | high† |
+| perf-mixed | 4 | 168.3 | 112.0 | 61.2 | 4614 | high† |
+| perf-mixed | 8 | 307.2 | 208.9 | 62.4 | 4920 | high† |
+
+判读：
+
+- **交互式容量上限 P=4**：P=8 的 ITL p99 208.9 ms 已越过 200 ms 目标，TTFT 仍达标；P=4 的 ITL p99 112 ms、TTFT 168 ms 都在目标内，是当前单卡可承诺的档位。
+- **static 批的 P2/P4 TTFT 爆炸**（744 ms / 2160 ms）是"整批跑空才补位"的必然代价；continuous 在 P=8 把 TTFT 压到 307 ms，补位净收益成立，但吞吐只从 57.1 涨到 62.4 tok/s（+9%），**没有 1.3×**，因此不翻案吞吐结论。
+- `deviation_flag=high` 表示该项目按固定阈值判为偏差（不是失败），用于提示"该点与相邻档差异过大，引用时要看原始 `deviation.csv`"。
+- 27B 吞吐、ctx>1024、P>8、多实例 + 网关一律不在本期结论内（见文末边界）。
 
 局限，直说：
 

@@ -1,0 +1,11 @@
+{
+  "source": "evidence/phase13/perf-mixed/matrix_report.csv",
+  "group": "perf-mixed",
+  "concurrency_p": "4",
+  "recorded_at": "2026-11-22",
+  "hardware": "RTX 4060 Laptop 8GB / R9 7940H / Qwen3-8B-Q3_K_M / ngl 37 / ctx 1024",
+  "ttft_p50_ms": 168.345,
+  "itl_p99_ms": 112.027,
+  "total_tok_s": 61.204,
+  "threshold": 0.05
+}

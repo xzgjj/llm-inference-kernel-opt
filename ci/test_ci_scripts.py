@@ -9,6 +9,7 @@ import argparse
 import importlib.util
 import re
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -208,6 +209,39 @@ class CliDocTest(unittest.TestCase):
         doc = (REPO / "CLI.md").read_text(encoding="utf-8")
         for name in commands:
             self.assertIn(f"dev.py {name}", doc, f"CLI.md 未收录 dev.py 子命令 {name}")
+
+
+class PerfGateTest(unittest.TestCase):
+    """D2-13 回归闸门：5% 边界、方向、缺文件退出码。"""
+
+    @staticmethod
+    def _module():
+        spec = importlib.util.spec_from_file_location(
+            "ci_perf_gate", REPO / "scripts" / "ci" / "check_perf_baseline.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_throughput_boundary(self) -> None:
+        gate = self._module()
+        baseline = {"total_tok_s": 60.0, "ttft_p50_ms": 150.0}
+        ok = {"total_tok_s": "57.1", "ttft_p50_ms": "150.0"}
+        self.assertEqual(gate.compare(baseline, ok), [])
+        bad = {"total_tok_s": "56.9", "ttft_p50_ms": "150.0"}
+        self.assertTrue(gate.compare(baseline, bad))
+
+    def test_ttft_direction(self) -> None:
+        gate = self._module()
+        baseline = {"total_tok_s": 60.0, "ttft_p50_ms": 150.0}
+        self.assertEqual(gate.compare(baseline, {"total_tok_s": "60.0", "ttft_p50_ms": "157.4"}), [])
+        self.assertTrue(gate.compare(baseline, {"total_tok_s": "60.0", "ttft_p50_ms": "157.6"}))
+
+    def test_missing_inputs_exit_three(self) -> None:
+        gate = self._module()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.assertEqual(gate.main(["--baseline", str(root / "no.json"),
+                                        "--csv", str(root / "no.csv")]), 3)
 
 
 if __name__ == "__main__":
