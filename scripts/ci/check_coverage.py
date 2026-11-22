@@ -111,10 +111,22 @@ def _find_build_dir(preferred: str = "") -> str | None:
     return None
 
 
-def run(base: str = "", build_dir: str = "", min_line: float = 70.0,
-        min_diff: float = 80.0) -> CheckResult:
+def normalize_threshold(value: float) -> float:
+    """阈值既接受百分数（85）也接受小数（0.85）：小于 1 的一律按比例换算。
+
+    历史上有人写 `--min-line 0.85`，脚本按「0.85%」判定，恒过——门禁等于没有。
+    """
+    if 0.0 < value <= 1.0:
+        return value * 100.0
+    return value
+
+
+def run(base: str = "", build_dir: str = "", min_line: float = 85.0,
+        min_diff: float = 85.0) -> CheckResult:
     """给 run_ci.py 调用的入口：无 gcov/无数据时按 SKIP 留痕，不判失败。"""
     result = CheckResult("coverage")
+    min_line = normalize_threshold(min_line)
+    min_diff = normalize_threshold(min_diff)
     if not shutil.which("gcovr"):
         result.notes.append("SKIP：gcovr 不可用（Windows/MSVC 无 gcov，由 Linux runner 补跑）")
         return result
@@ -167,8 +179,8 @@ def run(base: str = "", build_dir: str = "", min_line: float = 70.0,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="覆盖率闸门")
     parser.add_argument("--build-dir", default="")
-    parser.add_argument("--min-line", type=float, default=70.0)
-    parser.add_argument("--min-diff", type=float, default=80.0)
+    parser.add_argument("--min-line", type=float, default=85.0, help="src/ 行覆盖阈值（百分数，也可传 0.85）")
+    parser.add_argument("--min-diff", type=float, default=85.0, help="改动行覆盖阈值（百分数，也可传 0.85）")
     parser.add_argument("--base", default="", help="增量覆盖的对比基线，如 origin/main")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)

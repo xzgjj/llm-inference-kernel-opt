@@ -12,7 +12,7 @@
 - D2-01 证据链不再硬依赖 git：`tools/bench/matrix.py` 取不到 commit 时降级写 `git_available=false`，manifest 仍可复现。
 - D2-02 测试前置显式登记：`run_ci.py` 缺 `clang-format`/`git`/`cmake` 直接 exit 3，Windows 缺 UCRT 只告警；`check_docs` 无 ctest 时 SKIP 而非 FAIL。
 - D2-03 Phase 13 四组对照矩阵（static / mixed / prefix-on / prefix-off）产出与判据见 `evidence/phase13/`；结论：补位净收益 +9%（不达 1.3×，不翻案吞吐），交互式容量上限 P=4。顺带修复前缀复用的 KV 位置重叠缺陷（`runner_llama.cpp` 的 donor 裁剪）。
-- D2-04 覆盖率弱项补齐：GGUF 类型分支与 20 个错误码全表。
+- D2-04 覆盖率弱项补齐：GGUF 类型分支与 20 个错误码全表；WSL 实测 `src/` 行 85.3%（4,563/5,351），`gguf.cpp` 60.3% → 93.3%。同时修掉覆盖率闸门把 `0.85` 当成 0.85% 的恒过缺陷，以及 Linux 上 key 文件用例未设 0600 的误报。
 - D2-05 文档漂移修正：取消指标名、构建前置、历史性能数据作废、llama.cpp 版本号对齐。
 - D2-06 故障面扫描结论表（`docs/notes/阶段13-故障面扫描.md`）。
 

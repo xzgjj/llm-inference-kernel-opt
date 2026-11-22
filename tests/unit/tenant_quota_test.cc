@@ -19,6 +19,10 @@ std::string write_key_file(const std::string& name, const std::string& body) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out << body;
     out.close();
+    // POSIX 下 key 文件必须 0600 才被接受；Windows 没有 POSIX 位，忽略错误即可。
+    std::error_code ec;
+    fs::permissions(path, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace, ec);
     return path.string();
 }
 

@@ -30,7 +30,10 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "${base}/healthz"); [ "$code" = "2
 code=$(curl -s -o /dev/null -w '%{http_code}' "${base}/readyz"); [ "$code" = "200" ] && pass "readyz=200" || bad "readyz=${code}"
 
 metrics=$(curl -s "${base}/metrics")
-echo "$metrics" | grep -q 'llmopt_ttft_ms' && echo "$metrics" | grep -q 'llmopt_itl_ms' \
+# 三支直方图必须同时出现；前缀是 latency_，与既有 *_sum/_count 计数器区分。
+echo "$metrics" | grep -q 'llmopt_latency_ttft_ms_bucket' \
+    && echo "$metrics" | grep -q 'llmopt_latency_itl_ms_bucket' \
+    && echo "$metrics" | grep -q 'llmopt_latency_queue_wait_ms_bucket' \
     && pass "metrics 三支直方图" || bad "metrics 缺直方图"
 
 body=$(curl -s -X POST "${base}/completion" -H 'content-type: application/json' \
@@ -49,3 +52,4 @@ ec=$(cat /tmp/smoke-exit 2>/dev/null || echo "?")
 docker rm -f "$name" >/dev/null 2>&1 || true
 echo "SMOKE_RESULT=$([ "$fail" = "0" ] && echo PASS || echo FAIL)"
 exit "$fail"
+

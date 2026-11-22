@@ -103,6 +103,9 @@
 - 用例清单：(a) GGUF 异常面——magic 错、版本不支持、tensor 数量溢出、KV 长度字段截断、metadata 类型不符、字段超大值；(b) `common.cpp` 错误码全表参数化——19 个失败码 × 断言 `code` / `http_status` / `retryable` / message 非空。
 - 验收：`check_coverage.py` 报告行 ≥85%；`--min-diff` 在 PR 模式通过。
 - 测试：新增 `unit/gguf_negative_test.cc`、`unit/error_map_test.cc`（或并入现有 `gguf_test.cc` / `common` 用例，二选一但必须登记 `docs/testing.md`）。
+- **状态：done（2026-11-22 取证）**。WSL Ubuntu-26.04 插桩构建 + `ctest -L fast` 后 gcovr 实测 `src/` 行 **4,563/5,351 = 85.3%**（函数 94.6%、分支 56.4%），达 85% 门槛；`gguf.cpp` 60.3% → 93.3%。JSON 落 `evidence/phase13/coverage/coverage-2026-11-22-linux.json`。
+  - Windows 同口径为 74.0%（3,972/5,357）：集成用例用 `TerminateProcess` 收服务进程，`http_server.cpp` 只落 25 行，属采集限制；因此覆盖率取证必须在 Linux/WSL 做。
+  - 顺带修掉闸门自身缺陷：`--min-line 0.85` 曾被当成 0.85% 而恒过，现按比例换算并加单测；Linux 上 `tenant_quota` 用例写 key 文件未设 0600 会误报 16，已补 `fs::permissions`。
 
 #### D2-05 文档漂移清零
 
@@ -223,7 +226,7 @@
 | D2-01 | done | `6e7f027` | matrix manifest 无 git 降级 |
 | D2-02 | done | `b917a2e` | run_ci env_check → exit 3 |
 | D2-03 | done | `7492070` | 四组矩阵 + seq_cp 缺陷修复 + `evidence/phase13/README.md` |
-| D2-04 | done | `2001e58` | GGUF 异常面 + 错误码全表 |
+| D2-04 | done | `2001e58`、覆盖率取证 commit | GGUF 异常面 + 错误码全表；WSL 实测 src 行 4,563/5,351 = 85.3%（`evidence/phase13/coverage/`） |
 | D2-05 | done | `cebe06f`、`ccb4014` | 契约文档入库；README 局限段对齐 |
 | D2-06 | done | `436800f` | 故障面扫描表 + 2 条新用例 |
 | D2-07 | done | `b6d1b33`、镜像取证 commit | WSL Docker 实建 132 MB 真后端镜像，六项冒烟 PASS；CUDA 变体未验证 |
@@ -282,4 +285,5 @@
 ## 11 变更记录
 
 - v1.0 · 2026-11-22 · 首版：13 项（6 缺陷/证据债 + 7 功能）、三条冻结边界、不切分阶段、生产分口径与 7.0 目标、全局门禁与裁决记录。
+
 

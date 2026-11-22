@@ -267,7 +267,7 @@ python scripts/spec5/recompute_spec5.py \
   --traces docs/evidence/phase4-official --out docs/evidence/phase5
 ```
 
-`/metrics` 输出 counter / gauge，并按 D2-09 补了三支在线直方图（`llmopt_ttft_ms`、`llmopt_itl_ms`、`llmopt_request_duration_ms`，桶边界固定）；离线基准工具仍可复算 p50 / p95 / p99，两者口径一致（同一 `histogram_quantile` 公式）。
+`/metrics` 输出 counter / gauge，并按 D2-09 补了三支在线直方图（`llmopt_latency_queue_wait_ms`、`llmopt_latency_ttft_ms`、`llmopt_latency_itl_ms`，前缀刻意用 `latency_`，避免与既有 `llmopt_ttft_ms_sum/_count` 撞成重复时间序列）；离线基准工具仍可复算 p50 / p95 / p99，口径一致。
 
 
 
@@ -343,7 +343,7 @@ SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024
 - 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
 - 阶段 9 增加 Completion watchdog（`--completion-timeout-ms`，默认 30 s）：执行线程不回投时先回 500，迟到回投后再释放 KV；永久挂死仍需 runner 级进程隔离。
 - `ci.yml` 的 `schedule` 触发器跑 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。
-- `/metrics` 自 D2-09 起含三支延迟直方图（`llmopt_latency_queue_wait_ms` / `ttft_ms` / `itl_ms`），仅用于监控与告警；对外 p50/p99 仍由离线复算（C-P13-01）。慢读退化已在真实后端记录。
+- `/metrics` 自 D2-09 起含三支延迟直方图（`llmopt_latency_queue_wait_ms` / `llmopt_latency_ttft_ms` / `llmopt_latency_itl_ms`），仅用于监控与告警；对外 p50/p99 仍由离线复算（C-P13-01）。慢读退化已在真实后端记录。
 - 真后端镜像（D2-07）：`scripts/release/build_images.sh . real`（离线可用 `LLMOPT_LLAMA_VENDOR=<已编 llama.cpp>`），产物 `llmopt:0.13.0-llama` 在 WSL Docker 实建并通过六项冒烟；CUDA 变体本机无 GPU 直通，未构建（做法见 `docs/deploy.md`）。
 - 基准噪声偏大：5 轮下 P4/P8 的 TTFT / ITL 轮间偏差仍 12–15%，结论只做同环境相对比较；吞吐平台值稳定。
 

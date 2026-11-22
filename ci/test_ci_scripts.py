@@ -100,6 +100,12 @@ class CoverageGateTest(unittest.TestCase):
         text = "--- a/src/a.cpp\n+++ b/src/a.cpp\n@@ -10,0 +11,3 @@\n+x\n+y\n+z\n"
         self.assertEqual(coverage_gate.parse_diff_text(text), {"src/a.cpp": {11, 12, 13}})
 
+    def test_threshold_accepts_fraction_and_percent(self) -> None:
+        # 只写 0.85 曾被当成 0.85%，门禁恒过；两种写法必须等价换算。
+        self.assertAlmostEqual(coverage_gate.normalize_threshold(0.85), 85.0)
+        self.assertAlmostEqual(coverage_gate.normalize_threshold(85), 85.0)
+        self.assertAlmostEqual(coverage_gate.normalize_threshold(1.0), 100.0)
+
 
 class WaiverTest(unittest.TestCase):
     def test_waivers_file_is_valid(self) -> None:

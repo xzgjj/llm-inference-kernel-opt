@@ -127,7 +127,9 @@ python scripts/ci/run_ci.py --mode pr     # 缺工具 → 退出码 3，并打�
 
 `run_registry.py` 读同一份注册表执行测试，表里的 Args 就是运行命令。两处不一致即 CI-DOC-006 违规。
 
-覆盖率闸门（`scripts/ci/check_coverage.py`，规则 CI-COV-001/002）：nightly 用 `-DLLMOPT_COVERAGE=ON` 的构建目录跑完注册用例后取证，判 `src/` 行覆盖 ≥70%、本分支改动行 ≥80%。Windows 无 gcov 时该步 SKIP 并留痕，Linux/WSL 必须实跑；SKIP 不等于通过。2026-11-20 实测：`src/` 2,091/2,447 = **85.5%**，96 个用例全绿。
+覆盖率闸门（`scripts/ci/check_coverage.py`，规则 CI-COV-001/002）：nightly 用 `-DLLMOPT_COVERAGE=ON` 的构建目录跑完注册用例后取证，判 `src/` 行覆盖 **≥85%**、本分支改动行 **≥85%**（D2-04 之后由 70%/80% 上调）。阈值接受百分数（`85`）或小数（`0.85`），小于 1 的值按比例换算——历史上写 `--min-line 0.85` 曾被当成 0.85% 而恒过，已修并加单测 `test_threshold_accepts_fraction_and_percent`。Windows 无 gcov 时该步 SKIP 并留痕，Linux/WSL 必须实跑；SKIP 不等于通过。
+
+2026-11-22 实测（WSL Ubuntu-26.04，GCC + gcovr，`ctest -L fast`）：`src/` 行 **4,563/5,351 = 85.3%**，函数 94.6%，分支 56.4%；JSON 见 `evidence/phase13/coverage/coverage-2026-11-22-linux.json`。同日 Windows 侧同口径测得 74.0%（3,972/5,357）：差异来自 Windows 集成用例用 `TerminateProcess` 收服务进程，`http_server.cpp`（589 行）只落 25 行，进程退出前 `.gcda` 未刷盘——这是采集环境限制，不是代码缺口。`gguf.cpp` 由 D2-04 的 60.3% 提到 93.3%，`common.cpp` 错误码全表逐条断言。
 
 ### 5.1 覆盖率闸门（CI-COV-001 / CI-COV-002）
 
@@ -135,8 +137,8 @@ python scripts/ci/run_ci.py --mode pr     # 缺工具 → 退出码 3，并打�
 
 | 规则 | 口径 | 阈值 | 实现 |
 | --- | --- | --- | --- |
-| CI-COV-001 | `src/` 总体行覆盖率 | ≥70% | `scripts/ci/check_coverage.py --min-line` |
-| CI-COV-002 | 本次改动新增/修改的可执行行覆盖率 | ≥80% | `scripts/ci/check_coverage.py --min-diff` |
+| CI-COV-001 | `src/` 总体行覆盖率 | ≥85% | `scripts/ci/check_coverage.py --min-line` |
+| CI-COV-002 | 本次改动新增/修改的可执行行覆盖率 | ≥85% | `scripts/ci/check_coverage.py --min-diff` |
 
 - 插桩：`cmake -DLLMOPT_COVERAGE=ON`（GCC/Clang 的 `--coverage`），只对 `src/` 计分；`include/`、`tests/`、`third_party/` 不计——头文件里的模板会按 TU 摊开，混进总分会虚高。
 - 采集：CI `coverage` 作业装 `gcovr`，跑 `run_registry.py --build-dir build-cov` 后调 `check_coverage.py`；本地同样 `pip install gcovr` 后可用一条命令复核。

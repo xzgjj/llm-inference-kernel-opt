@@ -132,8 +132,8 @@ CI 的职责是把**可判定**的部分变成机器红灯，把**不可判定**
 
 | ID | 规则 | 判定 | 阈值 | 实现 | 豁免 |
 | --- | --- | --- | --- | --- | --- |
-| CI-COV-001 | 总体行覆盖 | 自动 | `src/` 行覆盖率 ≥70%（gcovr 统计，排除 tests/third_party） | `script:check_coverage.py:line` | Windows/MSVC 无 gcov 时 SKIP 并留痕，由 Linux runner 补跑 |
-| CI-COV-002 | 增量行覆盖 | 自动 | 本分支改动行 ≥80% | `script:check_coverage.py:diff` | 基线不可用时 SKIP 并留痕，不允许静默通过 |
+| CI-COV-001 | 总体行覆盖 | 自动 | `src/` 行覆盖率 ≥85%（gcovr 统计，排除 tests/third_party；阈值 0.85/85 两种写法等价） | `script:check_coverage.py:line` | Windows/MSVC 无 gcov 时 SKIP 并留痕，由 Linux runner 补跑 |
+| CI-COV-002 | 增量行覆盖 | 自动 | 本分支改动行 ≥85% | `script:check_coverage.py:diff` | 基线不可用时 SKIP 并留痕，不允许静默通过 |
 
 覆盖率在 PR 的 `coverage` 作业执行（`run_ci.py --mode nightly` 也带同一步，前提是先有插桩构建）；两者都要求 `-DLLMOPT_COVERAGE=ON` 的独立构建目录（`build-cov` 或带插桩的 `build`）与 gcovr；Windows 本机无 gcov 时该步 SKIP，WSL/Linux runner 必须实跑。SKIP 与“通过”在报告里分开记录，不允许把 SKIP 当绿灯。
 
@@ -372,3 +372,4 @@ docs/testing.md（登记表）
 ```
 
 消息必须能让人在不打开代码的情况下知道下一步做什么。做不到，就是脚本写得不够好，不是使用者的问题。
+
