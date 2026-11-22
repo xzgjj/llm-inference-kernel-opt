@@ -206,6 +206,58 @@ TEST_CASE("成功响应与流式帧回显请求的 model 字段") {
     CHECK(frame.find("\"model\":\"echo-x\"") != std::string::npos);
 }
 
+// D2-04：错误码全表（20 个）逐一锁死 code / HTTP / retryable，防止新增码只改一处。
+TEST_CASE("错误码全表的名称、状态码与可重试性逐项对齐") {
+    struct Row {
+        ErrCode code;
+        int status;
+        const char* name;
+        bool can_retry;
+    };
+    const Row rows[] = {
+            {ErrCode::Ok, 200, "OK", false},
+            {ErrCode::InvalidJson, 400, "INVALID_JSON", false},
+            {ErrCode::ConfigInvalid, 400, "CONFIG_INVALID", false},
+            {ErrCode::PromptTooLong, 400, "PROMPT_TOO_LONG", false},
+            {ErrCode::ContextOverflow, 400, "CONTEXT_OVERFLOW", false},
+            {ErrCode::PayloadTooLarge, 413, "PAYLOAD_TOO_LARGE", false},
+            {ErrCode::ModelNotLoaded, 503, "MODEL_NOT_LOADED", true},
+            {ErrCode::KvInsufficient, 507, "KV_INSUFFICIENT", false},
+            {ErrCode::KvBelowWatermark, 429, "KV_BELOW_WATERMARK", true},
+            {ErrCode::QueueFull, 429, "QUEUE_FULL", true},
+            {ErrCode::Cancelled, 499, "REQUEST_CANCELLED", false},
+            {ErrCode::ExecutionFailed, 500, "EXECUTION_FAILED", false},
+            {ErrCode::NotSupported, 404, "NOT_SUPPORTED", false},
+            {ErrCode::ResourceInsufficient, 507, "RESOURCE_INSUFFICIENT", false},
+            {ErrCode::Timeout, 504, "TIMEOUT", true},
+            {ErrCode::UnsupportedField, 400, "UNSUPPORTED_FIELD", false},
+            {ErrCode::Unavailable, 503, "SERVICE_UNAVAILABLE", true},
+            {ErrCode::RateLimited, 429, "RATE_LIMITED", true},
+            {ErrCode::Unauthorized, 401, "UNAUTHORIZED", false},
+            {ErrCode::QuotaExceeded, 429, "QUOTA_EXCEEDED", true},
+    };
+    for (const Row& row : rows) {
+        CAPTURE(row.name);
+        CHECK(http_status(row.code) == row.status);
+        CHECK(std::string(error_code_name(row.code)) == row.name);
+        CHECK(retryable(row.code) == row.can_retry);
+        // 每个码都必须能渲染出非空 message 与 code，不允许出现空 body。
+        const std::string body = render_error_body(row.code, "测试消息");
+        CHECK(body.find(std::string("\"code\":\"") + row.name + "\"") != std::string::npos);
+        CHECK(body.find("测试消息") != std::string::npos);
+    }
+}
+
+// D2-04：结束原因六态文本，避免前端拿到 none/error 之外的未定义值。
+TEST_CASE("FinishReason 六态文本与兜底") {
+    CHECK(std::string(finish_reason_name(FinishReason::None)) == "none");
+    CHECK(std::string(finish_reason_name(FinishReason::Stopped)) == "stop");
+    CHECK(std::string(finish_reason_name(FinishReason::LengthCapped)) == "length");
+    CHECK(std::string(finish_reason_name(FinishReason::Aborted)) == "abort");
+    CHECK(std::string(finish_reason_name(FinishReason::Error)) == "error");
+    CHECK(std::string(finish_reason_name(FinishReason::Preempted)) == "preempt");
+}
+
 TEST_CASE("解析异常 message 不含第三方库名，原始 what() 进 detail") {
     InferenceRequest req;
     std::string message;
