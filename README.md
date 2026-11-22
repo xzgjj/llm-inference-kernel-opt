@@ -37,7 +37,7 @@
 
 每条先说明“解决什么问题”，再说怎么做，最后给实测数字或边界。
 
-1. **Continuous Batching（请求拼批）**——解决“一次只能服务一个请求、GPU 总在等人”的问题。把多个请求按 token 拼进同一批，每步有 token 预算上限（`max-num-batched-tokens`），跑不下的进等待队列，队列满直接回 429。实测（8B 全驻留、等长短输出、单执行线程）：1 路 77.1 tok/s，8 路 80.7 tok/s，**只快 5%**；但单请求尾延迟 ITL p99 从 23.3 ms 涨到 171.3 ms。所以”拼批一定提吞吐”在这台机器上、这个负载形状下不成立，瓶颈是单执行线程串行 + 显存带宽封顶，控制面本身只占 0.01–0.02% CPU。等长负载抹掉了”短请求先完、槽位立刻复用”这一项，混长/静态批/前缀开关三组对照配置已备好、尚未跑完，结论边界见第 8 节。
+1. **Continuous Batching（请求拼批）**——解决“一次只能服务一个请求、GPU 总在等人”的问题。把多个请求按 token 拼进同一批，每步有 token 预算上限（`max-num-batched-tokens`），跑不下的进等待队列，队列满直接回 429。实测（8B 全驻留、等长短输出、单执行线程）：1 路 77.1 tok/s，8 路 80.7 tok/s，**只快 5%**；但单请求尾延迟 ITL p99 从 23.3 ms 涨到 171.3 ms。所以”拼批一定提吞吐”在这台机器上、这个负载形状下不成立，瓶颈是单执行线程串行 + 显存带宽封顶，控制面本身只占 0.01–0.02% CPU。等长负载抹掉了「短请求先完、槽位立刻复用」这一项；混长/静态批/前缀开关四组对照已于 D2-03 跑完（见第 8 节与 `evidence/phase13/README.md`）：混长并发在 TTFT 上收益巨大（P8 6970→307 ms），但吞吐只从 57.1 提到 62.4 tok/s（+9.3%），未达 1.3× 翻案线。
 
 2. **块表 KV 管理（给显存做分页）**——解决“KV 缓存越长越占显存、释放不干净”的问题。把 KV 切成固定 16 token 的块，用引用计数标记谁在用，写时复制（CoW）避免互相踩；块表是分配的唯一决策者，后端只按块表给的地址算，不反向改块表。实测 30 分钟压测收尾后 `used=cached=0`，块表对账差异为 0。
 
@@ -51,7 +51,7 @@
 
 7. **容量门控（启动前先算账）**——解决“模型一加载就 OOM”的问题。启动前探测内存和显存，按“需求 ≤ 空闲 × 0.8”判断，给出 `ELIGIBLE / DEGRADED / BLOCKED` 三态，`off / auto / force_on` 三档，默认 `off`；层没全放 GPU 时，显存和内存分开算。8B 在 8 GB 卡上就是靠“部分层放 CPU”才起得来；全驻留时权重占 3672 MiB，KV 随上下文涨到约 918 MiB。
 
-8. **可运维性（能上线、能排障）**——解决“出了事不知道、停服很粗暴”的问题。配置按 CLI > 环境变量 > JSON > 默认四层覆盖；有 `/healthz`（活着没）和 `/readyz`（能接活没）；SIGTERM 后先拒新请求、把在飞请求收尾再退出；令牌桶限流；静态 key 文件鉴权 + 每租户并发/队列/限流/KV 配额（阶段 11）；Prometheus 文本指标只出 counter/gauge，带 `llmopt_tenant_*` 租户标签。实测：容器 `docker stop` 退出码 0；30 分钟压测 297,441 个请求、0 错误、RSS 只涨 0.05 MiB。
+8. **可运维性（能上线、能排障）**——解决“出了事不知道、停服很粗暴”的问题。配置按 CLI > 环境变量 > JSON > 默认四层覆盖；有 `/healthz`（活着没）和 `/readyz`（能接活没）；SIGTERM 后先拒新请求、把在飞请求收尾再退出；令牌桶限流；静态 key 文件鉴权 + 每租户并发/队列/限流/KV 配额（阶段 11）；Prometheus 文本指标输出 counter/gauge，并带三支 TTFT/ITL/时延直方图（D2-09）与 `llmopt_tenant_*` 租户标签。实测：容器 `docker stop` 退出码 0；30 分钟压测 297,441 个请求、0 错误、RSS 只涨 0.05 MiB。
 
 9. **实验与证据链（结论可复查）**——解决“性能数字口口相传、回头没法复现”的问题。`tools/bench` 负责发请求、收 SSE、算 TTFT/ITL/吞吐、画图，结果按 `phaseN/runs/<run_id>/` 归档，CSV / JSONL / 日志都能重跑。阶段 12 的 30 分钟长稳和 batching 矩阵就是这么出的数，原始文件在 `evidence/phase12/`。
 
@@ -267,7 +267,7 @@ python scripts/spec5/recompute_spec5.py \
   --traces docs/evidence/phase4-official --out docs/evidence/phase5
 ```
 
-`/metrics` 只输出 counter / gauge；p50 / p95 / p99 由基准工具离线复算，避免在线直方图与自研后端口径冲突。
+`/metrics` 输出 counter / gauge，并按 D2-09 补了三支在线直方图（`llmopt_ttft_ms`、`llmopt_itl_ms`、`llmopt_request_duration_ms`，桶边界固定）；离线基准工具仍可复算 p50 / p95 / p99，两者口径一致（同一 `histogram_quantile` 公式）。
 
 
 
@@ -337,14 +337,14 @@ SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024
 局限，直说：
 
 - 单机单进程，实测覆盖 0.5B–8B 量化模型；27B 档只做容量与抢占验证，不出吞吐结论。
-- 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主。阶段 12 S5 的 stub 容器镜像（83 MB、非 root）与六项冒烟曾在装有 Docker 的机器上实跑；阶段 13 新增的真后端镜像构建参数未在本机验证（BLOCKED）。
+- 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主。阶段 12 S5 的 stub 容器镜像（83 MB、非 root）与六项冒烟曾在装有 Docker 的机器上实跑；阶段 13 的真后端镜像已在 WSL Docker 实建（`llmopt:0.13.0-llama`，132 MB）并跑通六项冒烟（CPU 推理）。
 - llama.cpp 的 `llama_batch` 没有 slot 字段，cell 由内部 `find_slot` 选择且无公开 getter，块表与 cell 的对账依赖内部头文件，属于**源码耦合点**，升级 llama.cpp 必须复核。
 - 兼容面是最小集：阶段 11 支持静态 key 文件 → 租户 + 并发/队列/限流/KV 配额；阶段 12 S4 补同 id 多摘要轮换与 SIGHUP/轮询热加载（POSIX SIGHUP 已在 WSL 实测）。阶段 13 D2-12 补租户 token 小时/日预算（只计 completion tokens，超限 429 + `Retry-After`）。鉴权仍是进程内静态文件，公网多租户应前置网关。
 - 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
 - 阶段 9 增加 Completion watchdog（`--completion-timeout-ms`，默认 30 s）：执行线程不回投时先回 500，迟到回投后再释放 KV；永久挂死仍需 runner 级进程隔离。
 - `ci.yml` 的 `schedule` 触发器跑 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。
 - `/metrics` 自 D2-09 起含三支延迟直方图（`llmopt_latency_queue_wait_ms` / `ttft_ms` / `itl_ms`），仅用于监控与告警；对外 p50/p99 仍由离线复算（C-P13-01）。慢读退化已在真实后端记录。
-- 真后端镜像（D2-07）的 Dockerfile 已具备 `LLMOPT_ENABLE_LLAMA=ON` 分支与运行库拷贝，但本机无 Docker，镜像构建与六项冒烟 **BLOCKED**，解除条件见 `docs/SPEC-DEBUG2.md` D2-07 节与 `docs/deploy.md`。
+- 真后端镜像（D2-07）：`scripts/release/build_images.sh . real`（离线可用 `LLMOPT_LLAMA_VENDOR=<已编 llama.cpp>`），产物 `llmopt:0.13.0-llama` 在 WSL Docker 实建并通过六项冒烟；CUDA 变体本机无 GPU 直通，未构建（做法见 `docs/deploy.md`）。
 - 基准噪声偏大：5 轮下 P4/P8 的 TTFT / ITL 轮间偏差仍 12–15%，结论只做同环境相对比较；吞吐平台值稳定。
 
 

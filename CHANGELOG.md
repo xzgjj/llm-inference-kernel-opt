@@ -18,7 +18,7 @@
 
 ### 功能
 
-- D2-07 真后端镜像：固定 llama.cpp revision、非 root 运行、CUDA 变体；本机无 Docker 时构建记 BLOCKED。
+- D2-07 真后端镜像：固定 llama.cpp revision `b12557`、非 root 运行、运行库拷贝、离线 vendor 与 CUDA 变体做法；WSL Docker 实建 `llmopt:0.13.0-llama`（132 MB）并跑通六项冒烟（healthz / readyz / metrics 直方图 / completion / 非 root / `docker stop` rc=0），基础镜像统一 Ubuntu 26.04。
 - D2-08 版本与发布面：0.13.0、本 CHANGELOG、镜像 label、回滚段落。
 - D2-09 监控直方图：`llmopt_latency_queue_wait_ms` / `llmopt_latency_ttft_ms` / `llmopt_latency_itl_ms`＋`scripts/release/prometheus-rules.yml`。对外分位数仍只来自离线复算（C-P13-01）。
 - D2-10 排障链路：`--slow-request-ms` 慢请求 dump（四段计时、脱敏、保留 20 份）＋`tools/dev.py trace <req_id>`。

@@ -14,21 +14,29 @@ docker run --rm -p 8080:8080 -e LLMOPT_ALLOW_STUB=1 \
 
 镜像默认 `LLMOPT_ENABLE_LLAMA=OFF`（只带 stub），真后端需在构建时打开开关并准备 llama.cpp；模型不进镜像，运行时挂载。`docker_smoke.sh` 用伪造 GGUF 跑通「起服务 → readyz 200 → chat 200 → SIGTERM 退出 0」。
 
-真后端镜像（D2-07）：
+真后端镜像（D2-07，已实测）：
 
 ```bash
-docker build -f scripts/release/Dockerfile \
-  --build-arg LLMOPT_ENABLE_LLAMA=ON -t llmopt:0.13.0-llama .
+# 一次性入口：stub 镜像
+bash scripts/release/build_images.sh . stub
+
+# 真后端：能访问 GitHub 时容器内 clone + 编 llama.cpp；
+# 内网/被墙时先准备已编好的 llama.cpp 根目录，走离线 vendor 路径
+LLMOPT_LLAMA_VENDOR=/root/llm-src/llama.cpp bash scripts/release/build_images.sh . real
+
+# 六项冒烟（healthz / readyz / metrics 直方图 / completion / 非 root / stop rc=0）
+bash scripts/release/smoke_image.sh llmopt:0.13.0-llama /path/to/models Qwen3-8B-Q3_K_M.gguf
+
 docker run --gpus all --rm -p 8080:8080 \
   -v "$PWD/models:/app/models:ro" llmopt:0.13.0-llama \
   --model /app/models/Qwen3-8B-Q3_K_M.gguf --host 0.0.0.0 --port 8080 \
   --ctx-tokens 1024 --n-gpu-layers 37 --mode auto --log-level warn
 ```
 
-- builder 内按 `LLAMA_REVISION=b12557` 拉 llama.cpp 只编 `llama`/`ggml` 共享库，runtime 只拷 `/opt/llama.cpp/build/bin/*.so*` 并设 `LD_LIBRARY_PATH=/app/lib`；基础镜像与 builder 同为 Ubuntu 24.04，避免 glibc 不匹配。
-- runtime 仍是非 root `uid 10001`，模型只读挂载，镜像 label 带 `llmopt.backend` 与 `llmopt.llama.revision`。
-- CUDA 变体不在默认路径：需要 `nvidia/cuda:12.4-runtime-ubuntu24.04` 作 runtime 基础镜像，builder 加 `-DGGML_CUDA=ON`；本仓库未验证该组合，写在这里供后续照做。
-- **取证状态：BLOCKED**。本机 Windows 无 Docker、WSL 内无 docker CLI，镜像构建与六项冒烟（healthz / readyz / 非流式 / SSE / 断连取消 / `docker stop` rc=0）都没有跑过。补齐条件：在装有 Docker 的机器上执行上面两条命令 + `scripts/release/docker_smoke.sh`，产物放 `evidence/phase13/packaging/`。
+- builder 内按 `LLAMA_REVISION=b12557` 取 llama.cpp（网络 clone 或离线 vendor），只编 `llama`/`ggml` 共享库；runtime 只拷 `*.so*` 到 `/app/lib` 并设 `LD_LIBRARY_PATH`。基础镜像统一 Ubuntu 26.04（glibc 2.43，与本机 WSL 同代；用 24.04 会因 `sqrtf@GLIBC_2.43` 链接失败）。
+- runtime 非 root `uid 10001`，模型只读挂载，label 带 `llmopt.backend` 与 `llmopt.llama.revision`。
+- CUDA 变体不在默认路径：把 runtime 基础镜像换 `nvidia/cuda:12.4-runtime-ubuntu26.04`，builder 加 `-DGGML_CUDA=ON`；本仓库未验证该组合。
+- **取证状态：已实测（2026-11-22，WSL Docker 29.1.3）**：`llmopt:0.13.0-llama` 构建成功（132 MB，label `backend=ON`/`rev=b12557`），六项冒烟全 PASS（CPU 推理，Qwen3-8B Q3_K_M）。产物见 `evidence/phase13/packaging/`。
 
 ## systemd
 

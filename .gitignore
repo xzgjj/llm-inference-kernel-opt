@@ -136,3 +136,9 @@ tools/bench/out/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# 离线 vendor：只放说明与占位，上游头文件/.so 不入库
+!scripts/release/vendor/
+scripts/release/vendor/llama.cpp/
+!scripts/release/vendor/README.md
+!scripts/release/vendor/.gitkeep

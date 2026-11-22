@@ -1,6 +1,6 @@
 # SPEC-DEBUG2 生产化收口：缺陷优先、7 项必要功能与三条冻结边界
 
-> 版本：v1.1（对应阶段 13）｜状态：done（D2-01…D2-14 落地；D2-07 镜像构建 BLOCKED，取证条件见 D2-07 节与 `docs/deploy.md`）
+> 版本：v1.1（对应阶段 13）｜状态：done（D2-01…D2-14 全部落地，含 D2-07 真后端镜像实建与六项冒烟；CUDA 变体未验证）
 > 契约基线：C-01…C-13、D-01…D-09、C-P13-01…03（本文件定义）｜更新：2026-11-22
 > 上游输入：`docs/notes/项目复盘-2026-11-22.md`（基线 `3dba509`）、`docs/notes/项目整体评估-阶段12收口-2026-11-21.md`
 
@@ -132,7 +132,10 @@
 - 改动点：`scripts/release/Dockerfile` 增 `LLMOPT_ENABLE_LLAMA` 构建参数；builder 阶段编译 llama.cpp（固定 `b12557`），runtime 阶段只拷 `libllama.so*` / `libggml*.so*` + 设置 `LD_LIBRARY_PATH`；基础镜像与 builder 同发行版（避 glibc 不匹配）；CUDA 变体基于 `nvidia/cuda:12.x-runtime`；runtime 仍非 root（uid 10001）、模型只读挂载。
 - 验收：WSL docker `--gpus all` 内 8B Q3_K_M 六项冒烟 PASS（healthz / readyz / 非流式 / SSE / 断连取消 / `docker stop` rc=0）；容器内 `nvidia-smi` 可见 GPU；非 CUDA 变体 ≤350 MiB、CUDA 变体 ≤1.2 GB；证据 `evidence/phase13/packaging/`。
 - 测试：`docker_smoke.sh` 增 `--real` 模式（真模型路径 + `--ngl`），仍不進 PR 闸门；JSON 产物沿用现有 schema。
-- **状态：BLOCKED（2026-11-22）**。`scripts/release/Dockerfile` 已按上述改造（`LLMOPT_ENABLE_LLAMA`、`LLAMA_REVISION=b12557`、只拷 `*.so*`、`LD_LIBRARY_PATH=/app/lib`、label 带 backend/revision），但本机 Windows 没有 Docker、WSL 内也无 docker CLI，镜像构建与六项冒烟一次都没跑过。解除条件：在装好 Docker 的机器上执行 `docker build --build-arg LLMOPT_ENABLE_LLAMA=ON` + `docker_smoke.sh --real`，产物落 `evidence/phase13/packaging/`；在此之前 README/部署文档不得声称“真后端镜像已验证”。
+- **状态：done（2026-11-22，已实测）**。Dockerfile 走两条来源：能访问 GitHub 时容器内 clone `b12557` 并只编 `llama`/`ggml` 共享库；内网时 `LLMOPT_LLAMA_VENDOR` 提供已编根目录，脚本只把头文件与 `.so` 收进 `scripts/release/vendor/`（不入库），`cmake/deps.cmake` 用 `LLMOPT_LLAMA_REVISION_OVERRIDE` 声明 revision 且仍与期望值交叉校验。基础镜像统一 `ubuntu:26.04`（glibc 2.43 与本机同代，24.04 会因 `sqrtf@GLIBC_2.43` 链接失败）。
+  - 实测：WSL Docker 29.1.3 构建 `llmopt:0.13.0-llama`（132 MB，label `backend=ON` / `rev=b12557`），六项冒烟全 PASS（healthz / readyz / metrics 直方图 / completion / 非 root uid=10001 / `docker stop` rc=0），CPU 推理跑 Qwen3-8B Q3_K_M；证据 `evidence/phase13/packaging/real-backend-image.md`。
+  - 未覆盖：CUDA 变体（本机 WSL 容器无 GPU 直通），做法写在 `docs/deploy.md`；GPU 版 `nvidia-smi` 一条不列入本期验收。
+  - 顺带修掉两处构建缺陷：`-DLLMOPT_LLAMA_ROOT` 被静默吞成默认路径；`.dockerignore` 的 `vendor/` 把 `scripts/release/vendor/` 挡在上下文外；`LLMOPT_BUILD_TESTS=OFF` 时不再拉 doctest。
 
 #### D2-08 发布面
 
@@ -223,7 +226,7 @@
 | D2-04 | done | `2001e58` | GGUF 异常面 + 错误码全表 |
 | D2-05 | done | `cebe06f`、`ccb4014` | 契约文档入库；README 局限段对齐 |
 | D2-06 | done | `436800f` | 故障面扫描表 + 2 条新用例 |
-| D2-07 | **BLOCKED** | `b6d1b33` | Dockerfile 已改造，本机无 Docker，构建/冒烟未跑 |
+| D2-07 | done | `b6d1b33`、镜像取证 commit | WSL Docker 实建 132 MB 真后端镜像，六项冒烟 PASS；CUDA 变体未验证 |
 | D2-08 | done | `24d5eb4` | 版本 0.13.0、CHANGELOG、`unit_version` |
 | D2-09 | done | `230f9f2` | 三支直方图 + 告警样例 |
 | D2-10 | done | `54c721d` | 慢请求 dump + `dev.py trace` |
@@ -279,3 +282,4 @@
 ## 11 变更记录
 
 - v1.0 · 2026-11-22 · 首版：13 项（6 缺陷/证据债 + 7 功能）、三条冻结边界、不切分阶段、生产分口径与 7.0 目标、全局门禁与裁决记录。
+

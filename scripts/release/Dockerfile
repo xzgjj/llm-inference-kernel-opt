@@ -12,7 +12,7 @@
 #
 # 真后端版本固定为 llama.cpp tag b12557（与 cmake/deps.cmake 的
 # LLMOPT_LLAMA_EXPECTED_REVISION 一致）。改版本必须同时改两处。
-FROM ubuntu:24.04 AS builder
+FROM ubuntu:26.04 AS builder
 ENV DEBIAN_FRONTEND=noninteractive
 ARG APT_MIRROR=mirrors.aliyun.com
 ARG LLMOPT_ENABLE_LLAMA=OFF
@@ -32,14 +32,22 @@ COPY cmake ./cmake
 COPY include ./include
 COPY src ./src
 COPY third_party ./third_party
+# 离线 vendor：把上游 llama.cpp 的头文件与 libllama/libggml 共享库放在
+# scripts/release/vendor/llama.cpp 下（不入库、由 build_images.sh 准备），
+# 构建时直接复用，省掉 clone 与上游编译。存在即优先，不存在才走网络路径。
+COPY scripts/release/vendor ./vendor
 # 真后端：只编共享库（llama + ggml），不装示例与测试；最终只拷 .so 进 runtime。
 RUN set -eux; \
     if [ "${LLMOPT_ENABLE_LLAMA}" = "ON" ]; then \
-        git clone --depth 1 --branch "${LLAMA_REVISION}" "${LLAMA_GIT_URL}" /opt/llama.cpp; \
-        cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
-            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF; \
-        cmake --build /opt/llama.cpp/build --parallel --target llama ggml; \
+        if [ -d /src/vendor/llama.cpp ]; then \
+            cp -a /src/vendor/llama.cpp /opt/llama.cpp; \
+        else \
+            git clone --depth 1 --branch "${LLAMA_REVISION}" "${LLAMA_GIT_URL}" /opt/llama.cpp; \
+            cmake -S /opt/llama.cpp -B /opt/llama.cpp/build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \
+                -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF; \
+            cmake --build /opt/llama.cpp/build --parallel --target llama ggml; \
+        fi; \
     else \
         mkdir -p /opt/llama.cpp/build/bin; \
     fi
@@ -54,6 +62,9 @@ RUN set -eux; \
     llama=""; \
     if [ "${LLMOPT_ENABLE_LLAMA}" = "ON" ]; then \
         llama="-DLLMOPT_ENABLE_LLAMA=ON -DLLMOPT_LLAMA_ROOT=/opt/llama.cpp -DLLMOPT_LLAMA_EXPECTED_REVISION=${LLAMA_REVISION}"; \
+        if [ ! -d /opt/llama.cpp/.git ]; then \
+            llama="$llama -DLLMOPT_LLAMA_REVISION_OVERRIDE=${LLAMA_REVISION}"; \
+        fi; \
     fi; \
     cmake -S . -B /src/build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
@@ -63,7 +74,7 @@ RUN set -eux; \
     && cmake --build /src/build --parallel --target llmopt_server
 
 # runtime 阶段：非 root（uid 10001）；只带运行时必需库。
-FROM ubuntu:24.04 AS runtime
+FROM ubuntu:26.04 AS runtime
 ENV DEBIAN_FRONTEND=noninteractive
 ARG APT_MIRROR=mirrors.aliyun.com
 ARG LLMOPT_ENABLE_LLAMA=OFF

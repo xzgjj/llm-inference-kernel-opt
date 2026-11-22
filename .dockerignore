@@ -22,7 +22,10 @@ models/
 #      -build/-subbuild 是本机构建产物，必须排除。clean clone 无 _deps 时容器内联网拉取。
 third_party/_deps/*-build/
 third_party/_deps/*-subbuild/
-vendor/
+/vendor/
+
+# ---- 离线 llama.cpp 产物：scripts/release/vendor 必须进上下文（上面 /vendor 只排根目录）----
+!scripts/release/vendor/
 
 # ---- 发布镜像不需要的源码目录、文档、基准与工具 ----
 tests/

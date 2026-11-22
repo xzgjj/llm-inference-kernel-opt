@@ -21,23 +21,39 @@ FetchContent_Declare(nlohmann_json
 FetchContent_Declare(spdlog
     URL https://github.com/gabime/spdlog/archive/refs/tags/v1.17.0.tar.gz
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_Declare(doctest
-    URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.11.tar.gz
-    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
-FetchContent_MakeAvailable(httplib nlohmann_json spdlog doctest)
+# doctest 只有测试目标才需要：发布镜像用 -DLLMOPT_BUILD_TESTS=OFF 构建，
+# 若仍无条件拉取会多下载一次 GitHub 归档，构建机无外网时直接失败。
+if(LLMOPT_BUILD_TESTS)
+    FetchContent_Declare(doctest
+        URL https://github.com/doctest/doctest/archive/refs/tags/v2.4.11.tar.gz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(httplib nlohmann_json spdlog doctest)
+else()
+    FetchContent_MakeAvailable(httplib nlohmann_json spdlog)
+endif()
 
 # 真实 llama.cpp 后端：复用 WSL 侧已构建的共享库，不在此处重编依赖树。
 # 后端 revision 必须可核对：默认只告警（本机 WSL 目录未必是 tag），CI 设严格模式即失败。
 set(LLMOPT_LLAMA_EXPECTED_REVISION "b12557" CACHE STRING "期望的 llama.cpp tag/describe 前缀")
+# 离线/裁剪构建：vendor 目录只带头文件与 .so，不带 .git，revision 由构建参数声明。
+# 声明值仍与期望值交叉校验，严格模式照旧生效。
+set(LLMOPT_LLAMA_REVISION_OVERRIDE "" CACHE STRING "直接声明 llama.cpp revision（空=读 git describe）")
 option(LLMOPT_LLAMA_REVISION_STRICT "revision 不一致直接 FATAL_ERROR" OFF)
 function(add_llama_backend target)
-    set(LLAMA_ROOT "$ENV{LLMOPT_LLAMA_ROOT}" CACHE PATH "llama.cpp source root")
+    # 取值顺序：cmake -DLLMOPT_LLAMA_ROOT > 环境变量 LLMOPT_LLAMA_ROOT > 本机默认路径。
+    # Dockerfile 用 -D 传根目录，早期只读环境变量会把 -D 静默吞掉、退化成默认路径。
+    set(LLAMA_ROOT "${LLMOPT_LLAMA_ROOT}")
+    if(NOT LLAMA_ROOT)
+        set(LLAMA_ROOT "$ENV{LLMOPT_LLAMA_ROOT}")
+    endif()
     if(NOT LLAMA_ROOT)
         set(LLAMA_ROOT "/root/llm-src/llama.cpp")
     endif()
     # 版本出口：把实际 describe 写进编译定义，--version 与 /metrics 共用同一字符串。
     set(LLAMA_REVISION "unknown")
-    if(EXISTS "${LLAMA_ROOT}/.git")
+    if(LLMOPT_LLAMA_REVISION_OVERRIDE)
+        set(LLAMA_REVISION "${LLMOPT_LLAMA_REVISION_OVERRIDE}")
+    elseif(EXISTS "${LLAMA_ROOT}/.git")
         execute_process(COMMAND git -C "${LLAMA_ROOT}" describe --tags --always --dirty
                         OUTPUT_VARIABLE LLAMA_DESC OUTPUT_STRIP_TRAILING_WHITESPACE
                         ERROR_QUIET RESULT_VARIABLE LLAMA_GIT_RC)
