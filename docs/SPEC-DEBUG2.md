@@ -213,6 +213,27 @@
 - 验收：`CLI.md` 与 `--help` 输出、`tools/dev.py` 命令表、`docs/SPEC总览` 三处一致；新增 `ci` 检查“CLI.md 提到的每个参数在 `config.cpp` 的注册表里存在”，防止文档先漂。
 - 测试：`ci/test_ci_scripts.py` 增一条 CLI 文档一致性用例（解析 CLI.md 的命令块 → 比对 `tools/dev.py` 的 argparse 子命令名）。
 
+### 5.4 落地状态（2026-11-22，分支 10，未推送）
+
+| 编号 | 状态 | 提交 | 关键证据/备注 |
+| --- | --- | --- | --- |
+| D2-01 | done | `6e7f027` | matrix manifest 无 git 降级 |
+| D2-02 | done | `b917a2e` | run_ci env_check → exit 3 |
+| D2-03 | done | `7492070` | 四组矩阵 + seq_cp 缺陷修复 + `evidence/phase13/README.md` |
+| D2-04 | done | `2001e58` | GGUF 异常面 + 错误码全表 |
+| D2-05 | done | `cebe06f`、`ccb4014` | 契约文档入库；README 局限段对齐 |
+| D2-06 | done | `436800f` | 故障面扫描表 + 2 条新用例 |
+| D2-07 | **BLOCKED** | `b6d1b33` | Dockerfile 已改造，本机无 Docker，构建/冒烟未跑 |
+| D2-08 | done | `24d5eb4` | 版本 0.13.0、CHANGELOG、`unit_version` |
+| D2-09 | done | `230f9f2` | 三支直方图 + 告警样例 |
+| D2-10 | done | `54c721d` | 慢请求 dump + `dev.py trace` |
+| D2-11 | done | `46ffd33` | systemd 自愈 + probe + 5 类故障注入 |
+| D2-12 | done | `4113122` | 租户 token 小时/日预算 |
+| D2-13 | done | `b407570` | SLO/容量表 + CI perf 5% 闸门 |
+| D2-14 | done | `8e44b1b` | CLI 七节 + `--help` 同源 + 零漂移断言 |
+
+推送与打 tag 等用户明确同意；本表只记录本地提交。
+
 ## 7 证据与测试规范
 
 - 证据目录统一 `evidence/phase13/<item>/`：`D2-03 → perf-mixed|perf-static|perf-prefix-on|perf-prefix-off`、`D2-07 → packaging`、`D2-11 → fault-injection`、`D2-13 → slo`。
