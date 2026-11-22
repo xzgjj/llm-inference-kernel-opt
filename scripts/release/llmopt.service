@@ -21,8 +21,12 @@ ExecStart=/usr/local/bin/llmopt_server --config /etc/llmopt/config.json
 # SIGTERM 走 Draining：在飞请求收尾后退出 0，超 drain-deadline-seconds 强制停止。
 KillSignal=SIGTERM
 TimeoutStopSec=45
+# 崩溃自愈：失败后 5 s 重启；60 s 内最多 3 次，超过则进入 failed 由人介入，
+# 避免配置错误导致无限重启把机器拖垮（D2-11）。
 Restart=on-failure
-RestartSec=2
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
 LimitNOFILE=65535
 
 [Install]

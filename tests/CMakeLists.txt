@@ -142,6 +142,14 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(integration_tenant_quota PROPERTIES LABELS "integration;fast;hermetic")
     set_tests_properties(integration_tenant_quota PROPERTIES TIMEOUT 120)
 
+    # D2-11：四类故障注入（runner 挂死 / 慢客户端 / TLS 配置错 / dump 写失败）。
+    add_test(NAME integration_fault_injection
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_fault_injection.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_fault_injection PROPERTIES LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_fault_injection PROPERTIES TIMEOUT 180)
+
     # 6-G2：四层优先级与启动来源打印（CLI > env > file > default）。
     add_test(NAME integration_server_config_sources
              COMMAND ${Python3_EXECUTABLE}
