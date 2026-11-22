@@ -454,6 +454,21 @@ void inference_handler(const std::shared_ptr<AppContext>& ctx, const httplib::Re
         if (request.has_header("X-Request-Id")) {
             request_id = request.get_header_value("X-Request-Id");
         }
+        // D2-12：token 预算先于提交判定；超额回 429 并给 Retry-After（到下个窗口）。
+        const std::int64_t epoch_seconds = TenantTokenBudget::now_epoch_seconds();
+        const std::int64_t retry_after =
+                ctx->core->token_budget().retry_after(auth.tenant, auth.quota, epoch_seconds);
+        if (retry_after > 0) {
+            ctx->metrics->inc(MetricId::RateLimitedTotal);
+            logger()->warn("http tenant token budget exhausted tenant={} retry_after={}s",
+                           auth.tenant, retry_after);
+            ctx->tenant_metrics->inc_request(tenant, "error");
+            ctx->tenant_metrics->inc_rejected(tenant, "quota");
+            response.set_header("Retry-After", std::to_string(retry_after));
+            send_error(response, make_error(ErrCode::QuotaExceeded,
+                                            "租户 token 预算已用尽，请在下个窗口重试"));
+            return;
+        }
         InferenceRequest base;
         base.tenant = auth.tenant;
         base.tenant_quota = auth.quota;
@@ -604,8 +619,10 @@ void register_control_routes(httplib::Server& server, const std::shared_ptr<AppC
                         "application/json; charset=utf-8");
     });
     server.Get("/metrics", [ctx](const httplib::Request&, httplib::Response& res) {
+        const std::int64_t epoch_seconds = TenantTokenBudget::now_epoch_seconds();
         res.set_content(ctx->metrics->render() +
-                                ctx->tenant_metrics->render(ctx->core->tenant_stats()),
+                                ctx->tenant_metrics->render(ctx->core->tenant_stats()) +
+                                ctx->core->token_budget().render(epoch_seconds),
                         "text/plain; version=0.0.4");
     });
 }

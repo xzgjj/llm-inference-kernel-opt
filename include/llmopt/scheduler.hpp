@@ -9,6 +9,7 @@
 #include "llmopt/runner.hpp"
 #include "llmopt/sink.hpp"
 #include "llmopt/slow_dump.hpp"
+#include "llmopt/token_budget.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -50,6 +51,8 @@ struct SchedulerConfig {
     std::int64_t slow_request_ns = 0;
     // dump 目录；空串等于关闭。目录内保留最近 20 份、单文件上限 8 MB。
     std::string slow_dump_dir{};
+    // 预注册租户：token 预算与租户指标共用这份名单，避免运行期扩标签。
+    std::vector<std::string> tenant_ids{};
     // 批次策略：true=连续批（有空位立刻补，阶段 3 起默认）；false=静态批对照（一批跑空
     // 才准入下一批，用于隔离"槽位复用"这一项收益，只应出现在对照实验里）。
     bool continuous_batching = true;
@@ -306,6 +309,13 @@ public:
     std::int32_t waiting_count() const noexcept;
     // /metrics 抓取：tenant 计数快照；kv_used 逐个租户扫描块表。
     [[nodiscard]] std::vector<TenantStat> tenant_stats() const;
+    // D2-12：HTTP 准入判定与 /metrics 渲染共用同一份预算对象。
+    [[nodiscard]] TenantTokenBudget& token_budget() noexcept {
+        return token_budget_;
+    }
+    [[nodiscard]] const TenantTokenBudget& token_budget() const noexcept {
+        return token_budget_;
+    }
 
 private:
     enum class DeliverResult : std::uint8_t { Continue, Finished, Failed };
@@ -423,6 +433,8 @@ private:
     bool step_trace_open_ = false;
     // 慢请求 dump：默认关闭；开启且超过阈值时，在 finish 里落一条脱敏记录。
     SlowDumpWriter slow_dump_;
+    // 租户 token 预算：写入在 Core 线程（finish），读取在 HTTP 线程。
+    TenantTokenBudget token_budget_;
 };
 
 } // namespace llmopt

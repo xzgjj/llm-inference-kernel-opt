@@ -264,6 +264,7 @@ SchedulerCore::SchedulerCore(ModelRunner& runner, KVBlockManager& kv, MetricsReg
       mailbox_(config.max_concurrency + config.queue_capacity),
       executor_(runner, mailbox_, metrics), started_ns_(now_ns()) {
     slow_dump_ = SlowDumpWriter(config_.slow_dump_dir, config_.slow_request_ns);
+    token_budget_ = TenantTokenBudget(config_.tenant_ids);
     if (!config_.step_trace_path.empty()) {
         step_trace_.open(config_.step_trace_path, std::ios::out | std::ios::trunc);
         step_trace_open_ = step_trace_.is_open();
@@ -1518,6 +1519,8 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
         group->tenant_live_reserved = false;
         release_tenant_live(group->tenant);
     }
+    // D2-12：completion token 在收尾时一次性计费；窗口按 UTC 自然小时/日。
+    token_budget_.add(group->tenant, seq.num_output, TenantTokenBudget::now_epoch_seconds());
     // D2-10：超阈值才落一条脱敏记录；默认关闭，写盘失败不影响收尾。
     if (slow_dump_.enabled()) {
         const std::int64_t finish_ns = now_ns();

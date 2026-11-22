@@ -563,6 +563,19 @@ ErrCode parse_quota_int(const json& node, const char* key, std::int32_t& out,
     return ErrCode::Ok;
 }
 
+ErrCode parse_quota_int64(const json& node, const char* key, std::int64_t& out,
+                          std::string& message) {
+    if (!node.contains(key)) {
+        return ErrCode::Ok;
+    }
+    if (!node[key].is_number_integer()) {
+        message = std::string("api-keys 配额字段必须是整数: ") + key;
+        return ErrCode::ConfigInvalid;
+    }
+    out = node[key].get<std::int64_t>();
+    return ErrCode::Ok;
+}
+
 ErrCode parse_tenant_quota(const json& node, const ServerConfig& cfg, TenantQuota& quota,
                            std::string& message) {
     quota.max_concurrency = cfg.max_concurrency;
@@ -570,12 +583,15 @@ ErrCode parse_tenant_quota(const json& node, const ServerConfig& cfg, TenantQuot
     quota.rate_limit_rps = 0.0;
     quota.rate_limit_burst = 1;
     quota.kv_blocks = 0;
+    quota.tokens_per_hour = 0;
+    quota.tokens_per_day = 0;
     if (node.is_null()) {
         return ErrCode::Ok;
     }
     if (!node.is_object() ||
-        has_unknown_keys(node, {"max_concurrency", "queue_capacity", "rate_limit_rps",
-                                "rate_limit_burst", "kv_blocks"})) {
+        has_unknown_keys(node,
+                         {"max_concurrency", "queue_capacity", "rate_limit_rps", "rate_limit_burst",
+                          "kv_blocks", "tokens_per_hour", "tokens_per_day"})) {
         message = "api-keys 配额对象含未知字段或类型非法";
         return ErrCode::ConfigInvalid;
     }
@@ -588,6 +604,12 @@ ErrCode parse_tenant_quota(const json& node, const ServerConfig& cfg, TenantQuot
     }
     if (code == ErrCode::Ok) {
         code = parse_quota_int(node, "kv_blocks", quota.kv_blocks, message);
+    }
+    if (code == ErrCode::Ok) {
+        code = parse_quota_int64(node, "tokens_per_hour", quota.tokens_per_hour, message);
+    }
+    if (code == ErrCode::Ok) {
+        code = parse_quota_int64(node, "tokens_per_day", quota.tokens_per_day, message);
     }
     if (code != ErrCode::Ok) {
         return code;
@@ -617,6 +639,15 @@ ErrCode parse_tenant_quota(const json& node, const ServerConfig& cfg, TenantQuot
     }
     if (quota.kv_blocks < 0 || quota.kv_blocks > tenant_kv_limit(cfg)) {
         message = "api-keys kv_blocks 必须在 0..全局 KV 块数";
+        return ErrCode::ConfigInvalid;
+    }
+    constexpr std::int64_t kMaxTokensWindow = 1'000'000'000'000LL;
+    if (quota.tokens_per_hour < 0 || quota.tokens_per_hour > kMaxTokensWindow) {
+        message = "api-keys tokens_per_hour 必须在 0..1e12（0=不限）";
+        return ErrCode::ConfigInvalid;
+    }
+    if (quota.tokens_per_day < 0 || quota.tokens_per_day > kMaxTokensWindow) {
+        message = "api-keys tokens_per_day 必须在 0..1e12（0=不限）";
         return ErrCode::ConfigInvalid;
     }
     return ErrCode::Ok;
@@ -1250,6 +1281,16 @@ SchedulerConfig make_scheduler_config(const ServerConfig& cfg, std::int32_t conc
     scheduler_cfg.step_trace_path = cfg.step_trace_path;
     scheduler_cfg.slow_request_ns = static_cast<std::int64_t>(cfg.slow_request_ms) * 1'000'000;
     scheduler_cfg.slow_dump_dir = cfg.slow_dump_dir;
+    // 租户预注册：没有 key 文件时只有 default；有 key 文件时按 id 逐一登记。
+    const auto keys = cfg.api_keys.load();
+    const std::vector<ApiKeyEntry>& entries = keys ? keys->keys : cfg.api_keys.initial_entries();
+    scheduler_cfg.tenant_ids.clear();
+    for (const ApiKeyEntry& entry : entries) {
+        scheduler_cfg.tenant_ids.push_back(entry.id);
+    }
+    if (scheduler_cfg.tenant_ids.empty()) {
+        scheduler_cfg.tenant_ids.push_back("default");
+    }
     return scheduler_cfg;
 }
 

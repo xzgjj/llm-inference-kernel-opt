@@ -42,6 +42,7 @@ llmopt_add_doctest(unit_text "unit;fast;hermetic" SOURCES unit/text_test.cc)
 llmopt_add_doctest(unit_sink "unit;fast;hermetic" SOURCES unit/sink_test.cc)
 llmopt_add_doctest(unit_metrics "unit;fast;hermetic" SOURCES unit/metrics_test.cc)
 llmopt_add_doctest(unit_slow_dump "unit;fast;hermetic" SOURCES unit/slow_dump_test.cc)
+llmopt_add_doctest(unit_tenant_quota "unit;fast;hermetic" SOURCES unit/tenant_quota_test.cc)
 llmopt_add_doctest(unit_service "unit;fast;hermetic" SOURCES unit/service_test.cc)
 # DEBUG-04：线程 join 的 RAII 守卫，异常展开路径不得 terminate。
 llmopt_add_doctest(unit_thread_guard "unit;fast;hermetic" SOURCES unit/thread_guard_test.cc)
@@ -132,6 +133,14 @@ if(Python3_Interpreter_FOUND)
                      $<TARGET_FILE:llmopt_server>)
     set_tests_properties(integration_slow_request PROPERTIES LABELS "integration;fast;hermetic")
     set_tests_properties(integration_slow_request PROPERTIES TIMEOUT 120)
+
+    # D2-12：租户 token 预算，超限 429 + Retry-After。
+    add_test(NAME integration_tenant_quota
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/test_tenant_quota.py
+                     $<TARGET_FILE:llmopt_server>)
+    set_tests_properties(integration_tenant_quota PROPERTIES LABELS "integration;fast;hermetic")
+    set_tests_properties(integration_tenant_quota PROPERTIES TIMEOUT 120)
 
     # 6-G2：四层优先级与启动来源打印（CLI > env > file > default）。
     add_test(NAME integration_server_config_sources

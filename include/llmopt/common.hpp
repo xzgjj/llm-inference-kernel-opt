@@ -112,6 +112,9 @@ struct TenantQuota {
     double rate_limit_rps = 0.0;
     std::int32_t rate_limit_burst = 1;
     std::int32_t kv_blocks = 0;
+    // D2-12：completion token 预算；0=不限，窗口为 UTC 自然小时/自然日。
+    std::int64_t tokens_per_hour = 0;
+    std::int64_t tokens_per_day = 0;
 };
 
 // C-01
