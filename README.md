@@ -337,13 +337,14 @@ SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024
 局限，直说：
 
 - 单机单进程，实测覆盖 0.5B–8B 量化模型；27B 档只做容量与抢占验证，不出吞吐结论。
-- 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主。阶段 12 S5 的容器镜像（83 MB、非 root）与六项冒烟已在 Docker Desktop 实跑，镜像内为 stub 后端。
+- 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主。阶段 12 S5 的 stub 容器镜像（83 MB、非 root）与六项冒烟曾在装有 Docker 的机器上实跑；阶段 13 新增的真后端镜像构建参数未在本机验证（BLOCKED）。
 - llama.cpp 的 `llama_batch` 没有 slot 字段，cell 由内部 `find_slot` 选择且无公开 getter，块表与 cell 的对账依赖内部头文件，属于**源码耦合点**，升级 llama.cpp 必须复核。
-- 兼容面是最小集：阶段 11 支持静态 key 文件 → 租户 + 并发/队列/限流/KV 配额；阶段 12 S4 补同 id 多摘要轮换与 SIGHUP/轮询热加载（POSIX SIGHUP 已在 WSL 实测）。token 日配额仍未做，鉴权仍是进程内静态文件，公网多租户应前置网关。
+- 兼容面是最小集：阶段 11 支持静态 key 文件 → 租户 + 并发/队列/限流/KV 配额；阶段 12 S4 补同 id 多摘要轮换与 SIGHUP/轮询热加载（POSIX SIGHUP 已在 WSL 实测）。阶段 13 D2-12 补租户 token 小时/日预算（只计 completion tokens，超限 429 + `Retry-After`）。鉴权仍是进程内静态文件，公网多租户应前置网关。
 - 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
 - 阶段 9 增加 Completion watchdog（`--completion-timeout-ms`，默认 30 s）：执行线程不回投时先回 500，迟到回投后再释放 KV；永久挂死仍需 runner 级进程隔离。
 - `ci.yml` 的 `schedule` 触发器跑 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。
-- `/metrics` 不含直方图，p99 需离线复算；慢读退化已在真实后端记录，容器冒烟覆盖 stub 后端（真后端镜像需 `-DLLMOPT_ENABLE_LLAMA=ON` 并自带 llama.cpp 运行库，未在本期构建）。
+- `/metrics` 自 D2-09 起含三支延迟直方图（`llmopt_latency_queue_wait_ms` / `ttft_ms` / `itl_ms`），仅用于监控与告警；对外 p50/p99 仍由离线复算（C-P13-01）。慢读退化已在真实后端记录。
+- 真后端镜像（D2-07）的 Dockerfile 已具备 `LLMOPT_ENABLE_LLAMA=ON` 分支与运行库拷贝，但本机无 Docker，镜像构建与六项冒烟 **BLOCKED**，解除条件见 `docs/SPEC-DEBUG2.md` D2-07 节与 `docs/deploy.md`。
 - 基准噪声偏大：5 轮下 P4/P8 的 TTFT / ITL 轮间偏差仍 12–15%，结论只做同环境相对比较；吞吐平台值稳定。
 
 
