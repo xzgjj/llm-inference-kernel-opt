@@ -19,6 +19,14 @@ In plain terms: **this project does not train models or write CUDA kernels.** Mo
 
 The question is concrete: **on this machine, how much do batching, chunking and KV reuse actually buy, and at what cost?** The measured answer is counter-intuitive: throughput barely moves here while tail latency gets clearly worse. Each feature below states the problem it solves, how it works, then the measured number or boundary.
 
+## Version and rollback
+
+Current version **0.13.0** (`project(llmopt VERSION)` in `CMakeLists.txt` is the only source; `--version`, startup logs and `llmopt_build_info` all derive from it). See [CHANGELOG.md](CHANGELOG.md).
+
+Rollback in three steps: (1) code — `git revert <bad-commit>` or `git checkout <previous-tag>`, then rebuild; (2) deployment — swap the image/binary back and confirm `/readyz` returns 200 with the old `version` in `llmopt_build_info`; (3) data plane — no persistent state, KV and queues live in memory, so a restart is enough.
+
+Frozen boundaries (conclusions, not TODOs): 27B throughput is not enabled/tested/reported; single-instance limit is 8B fully resident on an 8 GB card with ctx 1024 and P≤8; scaling out means multiple instances behind a gateway and is out of scope.
+
 Stages 0–11 are landed (stage 10 = real-backend nightly reliability, stage 11 = static key file + per-tenant quotas + KV domain isolation). Stage 12 closed disconnect cancellation, a 30-minute soak, the batching re-baseline, key hot reload and packaging. On Linux/WSL the real llama.cpp backend serves both streaming and non-streaming with Qwen3-8B (S3 runs `Q3_K_M` fully resident; earlier L1 evidence used `Q4_K_M`); Qwen2.5-0.5B is the CI smoke tier. Windows mainly runs the stub backend for scheduling and API tests. The registered-case count is generated in [`docs/testing.md`](docs/testing.md).
 
 ## Key Features

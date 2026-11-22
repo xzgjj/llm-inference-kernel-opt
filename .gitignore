@@ -10,6 +10,13 @@ docs/*
 !docs/testing.md
 !docs/ci/
 !docs/ci/**
+# 契约类文档必须入库：它们是实现与验收的唯一事实来源（D2-05）
+!docs/SPEC总览.md
+!docs/SPEC-DEBUG1.md
+!docs/SPEC-DEBUG2.md
+!docs/错误面规范.md
+!docs/deploy.md
+!docs/CLI.md
 
 # ---------- 本地个人笔记 / 流程文件（按需生成，一律不入库） ----------
 CLAUDE.md
