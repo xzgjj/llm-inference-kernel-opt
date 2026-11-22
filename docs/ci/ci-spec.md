@@ -167,6 +167,7 @@ C++ 推理服务的两类高危缺陷（use-after-free、数据竞争）不会�
 | --- | --- | --- | --- | --- | --- |
 | CI-PRF-001 | 吞吐回归 | 自动 | 三组基准中位数回退 >5% 失败 | `workflow:nightly` | 基线更新需批准 |
 | CI-PRF-002 | 基准稳定性 | 自动 | 同机重复 3 次离散度 >8% 则该数据作废 | `workflow:nightly` | 无 |
+| CI-PRF-003 | 证据基线回归（D2-13） | 自动 | `evidence/phase13/perf-mixed` 的 P4 吞吐/TTFT 相对 `ci/baseline/perf-baseline.json` 劣化 >5% 失败；缺 CSV 记 SKIP 并说明 | `script:check_perf_baseline.py:compare` | 基线更新需在 PR 里单独说明硬件/配置未变 |
 
 性能数字默认不可信，直到它在同一台机器上稳定复现三次。GPU 队列用 self-hosted runner，PR 不跑，避免排队把反馈时延拉长到小时级。
 
@@ -230,9 +231,9 @@ docs/testing.md（登记表）
 
 | mode | 步骤 | 用途 |
 | --- | --- | --- |
-| `fast` | docs → tests → code | 提交前/pre-commit，≤30 s 级 |
-| `pr` | docs → tests → code → diff | PR 闸门 |
-| `nightly` | docs → tests → code → diff → coverage | 夜间全量 + 覆盖率 |
+| `fast` | docs → tests → code → perf | 提交前/pre-commit，≤30 s 级（perf 只读 CSV，不压测） |
+| `pr` | docs → tests → code → perf → diff | PR 闸门 |
+| `nightly` | docs → tests → code → perf → diff → coverage | 夜间全量 + 覆盖率 |
 
 基线规则：未传 `--base` 时取当前分支 upstream，回落 `origin/main`；分支开发必须显式传 `--base origin/<父分支>`，否则 diff 预算会被整条分支持平历史撑爆（CI-DIF-002 误报）。
 

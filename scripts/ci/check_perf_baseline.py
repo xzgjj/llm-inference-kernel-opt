@@ -1,5 +1,7 @@
 """性能回归闸门（D2-13）：拿当前矩阵 CSV 与入库基线比较，劣化 >5% 即失败。
 
+rule: CI-PRF-003
+
 为什么用离线 CSV 而不是现场压测：CI 机器没有 GPU、也没有固定模型，现场压测的
 数字本身不可比；矩阵 CSV 由固定 prompt 集/固定轮次/固定二进制采集，才是可复现基线。
 基线文件 `ci/baseline/perf-baseline.json` 记录 P4 混长档的 `ttft_p50_ms` 与 `total_tok_s`。

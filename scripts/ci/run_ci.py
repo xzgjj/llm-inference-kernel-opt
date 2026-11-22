@@ -100,7 +100,7 @@ def run_perf_gate() -> CheckResult:
         result.notes.append(f"SKIP: {output}")
         return result
     result.violations.append(
-        Violation(rule="CI-PERF-001", path="ci/baseline/perf-baseline.json",
+        Violation(rule="CI-PRF-003", path="ci/baseline/perf-baseline.json",
                   message=output or "性能劣化超过 5%"))
     return result
 
