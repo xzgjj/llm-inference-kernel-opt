@@ -43,6 +43,7 @@ llmopt_add_doctest(unit_sink "unit;fast;hermetic" SOURCES unit/sink_test.cc)
 llmopt_add_doctest(unit_metrics "unit;fast;hermetic" SOURCES unit/metrics_test.cc)
 llmopt_add_doctest(unit_slow_dump "unit;fast;hermetic" SOURCES unit/slow_dump_test.cc)
 llmopt_add_doctest(unit_tenant_quota "unit;fast;hermetic" SOURCES unit/tenant_quota_test.cc)
+llmopt_add_doctest(unit_version "unit;fast;hermetic" SOURCES unit/version_test.cc)
 llmopt_add_doctest(unit_service "unit;fast;hermetic" SOURCES unit/service_test.cc)
 # DEBUG-04：线程 join 的 RAII 守卫，异常展开路径不得 terminate。
 llmopt_add_doctest(unit_thread_guard "unit;fast;hermetic" SOURCES unit/thread_guard_test.cc)
