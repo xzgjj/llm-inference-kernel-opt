@@ -234,6 +234,8 @@
 
 推送与打 tag 等用户明确同意；本表只记录本地提交。
 
+收口衍生提交（不动功能语义）：`010a0b5` 本表自身、`f152674` CI-PRF-003 规则接线、`677ee72` CLI `--version` 示例区分真后端/stub、`3194430` 容量表 VRAM 与生成脚本同源、`f53b402` `docs/deploy.md` 去掉未实现的事件日志段。
+
 ## 7 证据与测试规范
 
 - 证据目录统一 `evidence/phase13/<item>/`：`D2-03 → perf-mixed|perf-static|perf-prefix-on|perf-prefix-off`、`D2-07 → packaging`、`D2-11 → fault-injection`、`D2-13 → slo`。
