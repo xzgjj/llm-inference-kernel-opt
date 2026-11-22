@@ -174,7 +174,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DLLMOPT_ENABLE_LLAMA=ON -DLLMOPT_LLAMA_ROOT=/root/llm-src/llama.cpp
 cmake --build build --parallel --target llmopt_server
 ./build/llmopt_server --version
-# 期望：llmopt 0.13.0 (llama revision b12557)
+# 真后端构建期望：llmopt 0.13.0 (llama revision b12557)
+# stub-only 构建显示 llama revision unknown —— 这是宏的合法取值，不是配置错误
 ```
 
 初始化（生成配置与 stub 自检）：
