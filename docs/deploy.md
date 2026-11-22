@@ -32,7 +32,7 @@ docker run --gpus all --rm -p 8080:8080 \
 
 ## systemd
 
-`scripts/release/llmopt.service` 是模板：`ExecStart` 读 `/etc/llmopt/config.json`，`KillSignal=SIGTERM`、`TimeoutStopSec=45`（比默认 drain 30 s 多留余量）。文本日志落 `logs/server/llmopt.log`（20 MB × 5 轮转）；事件日志落 `logs/server/events.jsonl`（50 MB × 7 轮转，成功请求 1/8 采样、失败全量）。两路合计上限 450 MB，由 `scripts/log_hygiene.py --limit-mb 450` 守护。也可用 journald 收 stdout。
+`scripts/release/llmopt.service` 是模板：`ExecStart` 读 `/etc/llmopt/config.json`，`KillSignal=SIGTERM`、`TimeoutStopSec=45`（比默认 drain 30 s 多留余量）。诊断日志落 `logs/server/llmopt.log`（spdlog 20 MB × 5 轮转）；`logs/` 总量上限 200 MB，由 `scripts/log_hygiene.py --limit-mb 200` 守护。也可用 journald 收 stdout。（结构化事件日志尚未实现，`docs/notes/` 里只作规划记录。）
 
 自愈（D2-11）：`Restart=on-failure` + `RestartSec=5` + `StartLimitIntervalSec=60` + `StartLimitBurst=3`。进程被 kill -9 或异常退出后 5 s 内拉起；60 s 内连挂 3 次进入 `failed`，避免配置错误无限重启。校验：
 
