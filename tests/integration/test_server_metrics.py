@@ -52,6 +52,13 @@ def main() -> int:
                     check(value == 1, "build_info 值必须为 1")
                     continue
                 family = name.split("{", 1)[0]
+                # 直方图样本以 _bucket/_sum/_count 结尾，family 要回落到 TYPE 行的基名；
+                # 同名的 counter（如 llmopt_ttft_ms_count）不会被误剥，因其基名不是 histogram。
+                for suffix in ("_bucket", "_sum", "_count"):
+                    base = family[: -len(suffix)]
+                    if family.endswith(suffix) and types.get(base) == "histogram":
+                        family = base
+                        break
                 check(family in types, f"指标 {name} 缺少 TYPE")
                 check(family in helps, f"指标 {name} 缺少 HELP")
                 check(value >= 0 or str(value) == "nan", f"指标 {name} 为负值 {value}")
@@ -76,6 +83,25 @@ def main() -> int:
             check(samples["llmopt_itl_ms_count"] >= 6, "ITL 计数至少 6")
             check(samples["llmopt_itl_ms_sum"] > 0, "ITL 累计应为正")
             check(samples["llmopt_decode_steps_total"] >= 6, "纯 decode 步数至少 6")
+
+            # D2-09 / 监控直方图：桶累计单调、+Inf 等于 count，三支都要有真实样本。
+            for histogram in ("llmopt_latency_queue_wait_ms", "llmopt_latency_ttft_ms",
+                              "llmopt_latency_itl_ms"):
+                check(types.get(histogram) == "histogram", f"{histogram} 应为 histogram")
+                buckets = {name: value for name, value in samples.items()
+                           if name.startswith(f"{histogram}_bucket")}
+                check(buckets, f"{histogram} 缺少 _bucket 样本")
+                cumulative = [value for _, value in sorted(buckets.items())]
+                check(all(a <= b for a, b in zip(cumulative, cumulative[1:])),
+                      f"{histogram} 桶累计必须单调不减")
+                total = samples[f"{histogram}_count"]
+                check(buckets[f'{histogram}_bucket{{le="+Inf"}}'] == total,
+                      f"{histogram} 的 +Inf 桶必须等于 _count")
+            check(samples["llmopt_latency_ttft_ms_count"] == 3, "每条请求一个 TTFT 样本")
+            check(samples["llmopt_latency_queue_wait_ms_count"] == 3, "每次准入一个排队样本")
+            check(samples["llmopt_latency_itl_ms_count"] >= 6, "ITL 样本与 llmopt_itl_ms_count 同步")
+            check(0 < samples["llmopt_latency_ttft_ms_sum"] <= 3 * samples["llmopt_ttft_ms_sum"],
+                  "直方图 TTFT 累计应与 KPI 累计同量级")
 
             # K-4 / K-6 / K-5：调度占比、运行峰值、KV 碎片率口径。
             check(0.0 <= samples["llmopt_sched_cpu_ratio"] <= 1.0, "调度占比应在 [0,1]")

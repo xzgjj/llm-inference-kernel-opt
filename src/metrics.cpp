@@ -344,6 +344,7 @@ void MetricsRegistry::reset_all() noexcept {
         slots_[index].gauge.store(0, std::memory_order_relaxed);
         slots_[index].gauge_float.store(0.0, std::memory_order_relaxed);
     }
+    histograms_.reset();
 }
 
 void MetricsRegistry::reset_counters() noexcept {
@@ -356,6 +357,11 @@ void MetricsRegistry::reset_counters() noexcept {
             slots_[index].floats.store(0.0, std::memory_order_relaxed);
         }
     }
+    histograms_.reset();
+}
+
+void MetricsRegistry::observe_hist(HistId id, double value) noexcept {
+    histograms_.observe_hist(id, value);
 }
 
 // 字符串键只用于冷路径：拼出带标签的完整序列名后查表，未登记的名字直接忽略。
@@ -464,6 +470,8 @@ std::string MetricsRegistry::expose_text() const {
         out += std::string(def.series) + " " +
                format_value(def.kind, get_float(static_cast<MetricId>(index))) + "\n";
     }
+    // 监控直方图统一排在 family 之后：独立的 TYPE histogram 行，不与 counter 家族混淆。
+    histograms_.render(out);
     return out;
 }
 
@@ -596,6 +604,119 @@ std::string TenantMetrics::render_gauges(const std::vector<TenantStat>& stats) c
 
 std::string TenantMetrics::render(const std::vector<TenantStat>& stats) const {
     return render_counters() + render_gauges(stats);
+}
+
+namespace {
+
+// 桶边界是全整数毫秒；预设值覆盖 ctx 1024 / P≤8 实测量级（TTFT 百毫秒、ITL 十毫秒级）。
+constexpr double kQueueWaitBounds[] = {5, 10, 20, 40, 80, 160, 320, 640};
+constexpr double kTtftBounds[] = {10, 20, 40, 80, 160, 320, 640, 1280};
+constexpr double kItlBounds[] = {5, 10, 20, 40, 80, 160, 320};
+
+constexpr std::size_t kQueueWaitBoundCount = sizeof(kQueueWaitBounds) / sizeof(kQueueWaitBounds[0]);
+constexpr std::size_t kTtftBoundCount = sizeof(kTtftBounds) / sizeof(kTtftBounds[0]);
+constexpr std::size_t kItlBoundCount = sizeof(kItlBounds) / sizeof(kItlBounds[0]);
+
+// le 标签统一走整数格式，保证同一系列里不会混出 "5" 与 "5.0" 两种写法。
+std::string format_bound(double bound) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%lld", static_cast<long long>(bound));
+    return buffer;
+}
+
+std::string format_sample(double value) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "%.4f", value);
+    return buffer;
+}
+
+} // namespace
+
+const std::array<HistogramDef, kHistCount> kHistogramDefs = {{
+        // 前缀刻意用 latency_：既有 llmopt_ttft_ms_sum/_count 仍是对外口径，
+        // 直方图的 _sum/_count 若同名会与它们撞成重复时间序列。
+        {"llmopt_latency_queue_wait_ms", "入队到准入的等待时间（毫秒），监控口径", kQueueWaitBounds,
+         kQueueWaitBoundCount},
+        {"llmopt_latency_ttft_ms", "请求入队到首 token（毫秒），监控口径", kTtftBounds,
+         kTtftBoundCount},
+        {"llmopt_latency_itl_ms", "纯 decode 步间 token 间隔（毫秒），监控口径", kItlBounds,
+         kItlBoundCount},
+}};
+
+void HistogramRegistry::observe_hist(HistId id, double value) noexcept {
+    const std::size_t histogram = static_cast<std::size_t>(id);
+    if (histogram >= kHistCount || !std::isfinite(value) || value < 0.0) {
+        return; // 时钟回拨/脏样本不进桶，避免拉低 p99
+    }
+    const HistogramDef& def = kHistogramDefs[histogram];
+    std::size_t index = def.bounds_count; // 默认落 +Inf 桶
+    for (std::size_t bound = 0; bound < def.bounds_count; ++bound) {
+        if (value <= def.bounds[bound]) {
+            index = bound;
+            break;
+        }
+    }
+    Slot& slot = slots_[histogram];
+    slot.buckets[index].fetch_add(1, std::memory_order_relaxed);
+    slot.count.fetch_add(1, std::memory_order_relaxed);
+    double expected = slot.sum.load(std::memory_order_relaxed);
+    while (!slot.sum.compare_exchange_weak(expected, expected + value, std::memory_order_relaxed,
+                                           std::memory_order_relaxed)) {
+    }
+}
+
+void HistogramRegistry::render(std::string& out) const {
+    for (std::size_t histogram = 0; histogram < kHistCount; ++histogram) {
+        const HistogramDef& def = kHistogramDefs[histogram];
+        const Slot& slot = slots_[histogram];
+        const std::int64_t total = slot.count.load(std::memory_order_relaxed);
+        out += "# HELP " + std::string(def.name) + " " + std::string(def.help) + "\n";
+        out += "# TYPE " + std::string(def.name) + " histogram\n";
+        std::int64_t cumulative = 0;
+        for (std::size_t bucket = 0; bucket < def.bounds_count; ++bucket) {
+            cumulative += slot.buckets[bucket].load(std::memory_order_relaxed);
+            out += std::string(def.name) + "_bucket{le=\"" + format_bound(def.bounds[bucket]) +
+                   "\"} " + std::to_string(cumulative) + "\n";
+        }
+        out += std::string(def.name) + "_bucket{le=\"+Inf\"} " + std::to_string(total) + "\n";
+        out += std::string(def.name) + "_sum " +
+               format_sample(slot.sum.load(std::memory_order_relaxed)) + "\n";
+        out += std::string(def.name) + "_count " + std::to_string(total) + "\n";
+    }
+}
+
+void HistogramRegistry::reset() noexcept {
+    for (Slot& slot : slots_) {
+        for (auto& bucket : slot.buckets) {
+            bucket.store(0, std::memory_order_relaxed);
+        }
+        slot.count.store(0, std::memory_order_relaxed);
+        slot.sum.store(0.0, std::memory_order_relaxed);
+    }
+}
+
+std::int64_t HistogramRegistry::bucket(HistId id, std::size_t index) const noexcept {
+    const std::size_t histogram = static_cast<std::size_t>(id);
+    if (histogram >= kHistCount || index > kHistMaxBuckets) {
+        return 0;
+    }
+    return slots_[histogram].buckets[index].load(std::memory_order_relaxed);
+}
+
+std::int64_t HistogramRegistry::count(HistId id) const noexcept {
+    const std::size_t histogram = static_cast<std::size_t>(id);
+    if (histogram >= kHistCount) {
+        return 0;
+    }
+    return slots_[histogram].count.load(std::memory_order_relaxed);
+}
+
+double HistogramRegistry::sum(HistId id) const noexcept {
+    const std::size_t histogram = static_cast<std::size_t>(id);
+    if (histogram >= kHistCount) {
+        return 0.0;
+    }
+    return slots_[histogram].sum.load(std::memory_order_relaxed);
 }
 
 } // namespace llmopt

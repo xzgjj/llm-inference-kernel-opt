@@ -101,6 +101,44 @@ enum class MetricId : std::uint16_t {
 
 constexpr std::size_t kMetricCount = static_cast<std::size_t>(MetricId::Count);
 
+// 监控专用直方图（C-P13-01）：只服务监控与告警，对外 p50/p99 仍由离线工具复算。
+// 固定桶、固定基数、无标签；桶边界与 help 由 kHistogramDefs 单一真源给出。
+enum class HistId : std::uint8_t { QueueWaitMs = 0, TtftMs, ItlMs, Count };
+
+constexpr std::size_t kHistCount = static_cast<std::size_t>(HistId::Count);
+constexpr std::size_t kHistMaxBuckets = 9;
+
+struct HistogramDef {
+    const char* name;         // 序列名前缀（llmopt_latency_*），渲染成 <name>_bucket/_sum/_count
+    const char* help;         // HELP 行文本
+    const double* bounds;     // 升序桶上界，不含 +Inf
+    std::size_t bounds_count; // 桶数（+Inf 桶另算）
+};
+
+extern const std::array<HistogramDef, kHistCount> kHistogramDefs;
+
+// 分片无关：直方图只在低频观测点调用（准入、首 token、步间），用原子加即可。
+class HistogramRegistry {
+public:
+    // 观测一个样本；负值/NaN 丢弃，桶位按"第一个 >= value 的边界"判定。
+    void observe_hist(HistId id, double value) noexcept;
+    // 追加渲染：<name>_bucket{le="..."} 累计值 / +Inf / _sum / _count。
+    void render(std::string& out) const;
+    void reset() noexcept;
+
+    [[nodiscard]] std::int64_t bucket(HistId id, std::size_t index) const noexcept;
+    [[nodiscard]] std::int64_t count(HistId id) const noexcept;
+    [[nodiscard]] double sum(HistId id) const noexcept;
+
+private:
+    struct Slot {
+        std::array<std::atomic<std::int64_t>, kHistMaxBuckets + 1> buckets{};
+        std::atomic<std::int64_t> count{0};
+        std::atomic<double> sum{0.0};
+    };
+    std::array<Slot, kHistCount> slots_{};
+};
+
 // 指标定义：family 用于 HELP/TYPE 去重，series 是含固定标签的完整序列名。
 struct MetricDef {
     const char* family;
@@ -188,6 +226,13 @@ public:
     void set(MetricId id, std::int64_t value) noexcept;
     void set_float(MetricId id, double value) noexcept;
 
+    // 监控直方图观测点；不影响 counter/gauge 口径。
+    void observe_hist(HistId id, double value) noexcept;
+    // 只读访问：给测试与冷路径诊断用，热路径不要走这里。
+    [[nodiscard]] const HistogramRegistry& histograms() const noexcept {
+        return histograms_;
+    }
+
     [[nodiscard]] std::int64_t get(MetricId id) const noexcept;
     [[nodiscard]] double get_float(MetricId id) const noexcept;
     // 冷路径/测试用：按完整序列名取值，未知名字返回 0。
@@ -225,6 +270,7 @@ private:
     [[nodiscard]] std::atomic<double>& float_counter(MetricId id) noexcept;
 
     std::array<Slot, kMetricCount> slots_{};
+    HistogramRegistry histograms_{};
 };
 
 // 完整序列名 → ID；未登记返回 MetricId::Count，供冷路径与测试共用。

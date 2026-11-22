@@ -1,0 +1,71 @@
+# prometheus-rules.yml — D2-09 监控告警样例。
+#
+# 口径说明（重要）：
+#   - 告警只看监控直方图 llmopt_latency_*（桶边界见 src/metrics.cpp 的 kHistogramDefs）；
+#   - 对外 KPI 仍是 llmopt_ttft_ms_sum/_count 与 llmopt_itl_ms_sum/_count，
+#     两者的分位数由离线工具复算，不在线算，避免"监控口径≠对外口径"。
+#   - 阈值来自 ctx_tokens=1024 / 并发 P<=8 的实测上限（见 docs/性能结论.md），
+#     不适用于更大上下文或更大并发，改配置时必须同步改这里。
+#
+# 用法：promtool check rules scripts/release/prometheus-rules.yml
+groups:
+  - name: llmopt-latency
+    rules:
+      - alert: LlmoptTtftP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(llmopt_latency_ttft_ms_bucket[5m]))) > 350
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TTFT p99 超过 350 ms"
+          description: "近 5 分钟 TTFT p99 = {{ $value }} ms，超出 ctx 1024 / P<=8 的 SLO。"
+
+      - alert: LlmoptItlP99High
+        expr: histogram_quantile(0.99, sum by (le) (rate(llmopt_latency_itl_ms_bucket[5m]))) > 200
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ITL p99 超过 200 ms"
+          description: "近 5 分钟 step 间隔 p99 = {{ $value }} ms，流式体验已明显抖动。"
+
+      - alert: LlmoptQueueWaitP95High
+        expr: histogram_quantile(0.95, sum by (le) (rate(llmopt_latency_queue_wait_ms_bucket[5m]))) > 160
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "排队等待 p95 超过 160 ms"
+          description: "近 10 分钟准入排队 p95 = {{ $value }} ms；先看 llmopt_queue_depth 与 KV 水位。"
+
+      - alert: LlmoptQueueWaitStarving
+        expr: >-
+          sum(rate(llmopt_latency_queue_wait_ms_count[10m])) > 0
+          and
+          histogram_quantile(0.95, sum by (le) (rate(llmopt_latency_queue_wait_ms_bucket[10m]))) > 640
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "排队等待已进入 +Inf 尾部"
+          description: "有请求排队超过 640 ms 且仍在持续，检查后端拥塞或单实例已到容量上限。"
+
+      - alert: LlmoptErrorRateHigh
+        expr: >-
+          sum(rate(llmopt_requests_total{status="error"}[5m]))
+          / clamp_min(sum(rate(llmopt_requests_total{status="accepted"}[5m])), 0.001) > 0.001
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "执行错误率超过 0.1%"
+          description: "错误率 = {{ $value | humanizePercentage }}；对照 docs/错误面规范.md 定位错误码。"
+
+      - alert: LlmoptKvNearFull
+        expr: llmopt_kv_internal_frag_ratio > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV 内部碎片率超过 0.85"
+          description: "碎片率 = {{ $value }}；考虑 q8_0 KV 或降低 max-concurrency。"

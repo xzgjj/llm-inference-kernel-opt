@@ -32,7 +32,7 @@ C++ 用例由 CTest 登记，`Args` 使用仓库根的 `build/`（CI 与本机�
 CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构建后枚举 `--list-test-cases`，一个 `TEST_CASE` 注册成一条 CTest（形如 `unit_config.端口、上下文…`）。
 
 <!-- test-counts:start -->
-测试基线（脚本生成，勿手改）：`ctest -N` **230** 注册；`-L fast` **229**（156 unit / 52 contract / 21 integration）；`-L e2e` 1。
+测试基线（脚本生成，勿手改）：`ctest -N` **233** 注册；`-L fast` **232**（159 unit / 52 contract / 21 integration）；`-L e2e` 1。
 <!-- test-counts:end -->
 
 因此 `ctest -N` 的数字就是用例数，`-R unit_config.` 可以单跑一个用例，`-j` 可以并行：unit / contract 并行跑；integration 共用 `RESOURCE_LOCK llmopt_integration`，会被 CTest 串行化——它们都要起真实进程、抢临时端口，`free_port()` 的 bind/close 之间存在竞态，不串行会偶发假失败。

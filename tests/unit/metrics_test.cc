@@ -131,10 +131,12 @@ TEST_CASE("expose_text 每个 family 恰好一组 TYPE/HELP") {
     for (std::size_t index = 0; index < llmopt::kMetricCount; ++index) {
         families.insert(llmopt::kMetricDefs[index].family);
     }
-    CHECK(count_lines(text, "# HELP ") == families.size());
-    CHECK(count_lines(text, "# TYPE ") == families.size());
+    // 直方图是独立 family：每个 HistId 各一组 TYPE/HELP，且不进 MetricId 表。
+    CHECK(count_lines(text, "# HELP ") == families.size() + llmopt::kHistCount);
+    CHECK(count_lines(text, "# TYPE ") == families.size() + llmopt::kHistCount);
     CHECK(text.find("# TYPE llmopt_requests_total counter") != std::string::npos);
     CHECK(text.find("# TYPE llmopt_queue_depth gauge") != std::string::npos);
+    CHECK(text.find("# TYPE llmopt_latency_ttft_ms histogram") != std::string::npos);
 
     std::size_t sample_lines = 0;
     std::size_t pos = 0;
@@ -154,10 +156,97 @@ TEST_CASE("expose_text 每个 family 恰好一组 TYPE/HELP") {
             CHECK(std::strtod(value.c_str(), nullptr) >= 0.0);
         }
     }
-    // 固定指标表之外还有一条静态构建信息（llmopt_build_info），它不属于 MetricId 表。
-    CHECK(sample_lines == llmopt::kMetricCount + 1);
+    // 固定指标表之外还有一条静态构建信息（llmopt_build_info），它不属于 MetricId 表；
+    // 每个直方图固定输出 bounds_count 个 le 桶 + +Inf + _sum + _count，基数不随样本变化。
+    std::size_t expected = llmopt::kMetricCount + 1;
+    for (std::size_t index = 0; index < llmopt::kHistCount; ++index) {
+        expected += llmopt::kHistogramDefs[index].bounds_count + 3;
+    }
+    CHECK(sample_lines == expected);
     CHECK(text.find("llmopt_build_info{version=\"") != std::string::npos);
     CHECK(text.find("llmopt_vram_peak_mib NaN") != std::string::npos);
+}
+
+TEST_CASE("直方图定义有序、基数受限且不与既有序列撞名") {
+    for (std::size_t index = 0; index < llmopt::kHistCount; ++index) {
+        const llmopt::HistogramDef& def = llmopt::kHistogramDefs[index];
+        REQUIRE(def.name != nullptr);
+        REQUIRE(def.help != nullptr);
+        REQUIRE(def.bounds != nullptr);
+        CHECK(std::string(def.name).rfind("llmopt_", 0) == 0);
+        CHECK(def.bounds_count > 0);
+        CHECK(def.bounds_count <= llmopt::kHistMaxBuckets);
+        for (std::size_t bound = 1; bound < def.bounds_count; ++bound) {
+            // 升序，否则 accumulate 顺序与 le 语义都会错。
+            CHECK(def.bounds[bound - 1] < def.bounds[bound]);
+        }
+        // 直方图会输出 <name>_sum/_count；这些名字若与 MetricId 表重合就是重复时间序列。
+        const std::string sum_series = std::string(def.name) + "_sum";
+        for (std::size_t metric = 0; metric < llmopt::kMetricCount; ++metric) {
+            CHECK(std::string(llmopt::kMetricDefs[metric].series) != sum_series);
+        }
+    }
+    CHECK(std::string(llmopt::kHistogramDefs[0].name) == "llmopt_latency_queue_wait_ms");
+    CHECK(std::string(llmopt::kHistogramDefs[1].name) == "llmopt_latency_ttft_ms");
+    CHECK(std::string(llmopt::kHistogramDefs[2].name) == "llmopt_latency_itl_ms");
+}
+
+TEST_CASE("直方图观测落桶、+Inf 收尾与脏样本丢弃") {
+    llmopt::HistogramRegistry hist;
+    const llmopt::HistId id = llmopt::HistId::QueueWaitMs;
+    const std::size_t inf_slot = llmopt::kHistogramDefs[0].bounds_count;
+
+    hist.observe_hist(id, 3.0);    // <= 5，落第 0 桶
+    hist.observe_hist(id, 5.0);    // 恰在边界，按 le 语义仍落第 0 桶
+    hist.observe_hist(id, 21.0);   // > 20 且 <= 40，落第 3 桶（bounds: 5/10/20/40）
+    hist.observe_hist(id, 2000.0); // 超过最大边界，落 +Inf
+    hist.observe_hist(id, -1.0);   // 时钟回拨/脏样本丢弃
+    hist.observe_hist(id, std::nan(""));
+    hist.observe_hist(id, INFINITY);
+
+    CHECK(hist.bucket(id, 0) == 2);
+    CHECK(hist.bucket(id, 1) == 0);
+    CHECK(hist.bucket(id, 2) == 0);
+    CHECK(hist.bucket(id, 3) == 1);
+    CHECK(hist.bucket(id, inf_slot) == 1);
+    CHECK(hist.count(id) == 4);
+    CHECK(hist.sum(id) == doctest::Approx(3.0 + 5.0 + 21.0 + 2000.0));
+    // 空直方图不产出样本，但桶槽位仍然存在。
+    CHECK(hist.count(llmopt::HistId::ItlMs) == 0);
+
+    std::string text;
+    hist.render(text);
+    CHECK(text.find("# TYPE llmopt_latency_queue_wait_ms histogram") != std::string::npos);
+    // le 一律用整数写法，避免同一系列出现 "5" 与 "5.0" 两种标签。
+    CHECK(text.find("le=\"5.0\"") == std::string::npos);
+    CHECK(text.find("llmopt_latency_queue_wait_ms_bucket{le=\"5\"} 2") != std::string::npos);
+    CHECK(text.find("llmopt_latency_queue_wait_ms_bucket{le=\"10\"} 2") != std::string::npos);
+    CHECK(text.find("llmopt_latency_queue_wait_ms_bucket{le=\"20\"} 2") != std::string::npos);
+    CHECK(text.find("llmopt_latency_queue_wait_ms_bucket{le=\"40\"} 3") != std::string::npos);
+    CHECK(text.find("llmopt_latency_queue_wait_ms_bucket{le=\"+Inf\"} 4") != std::string::npos);
+    CHECK(text.find("llmopt_latency_queue_wait_ms_sum 2029.0000") != std::string::npos);
+    CHECK(text.find("llmopt_latency_queue_wait_ms_count 4") != std::string::npos);
+}
+
+TEST_CASE("reset_counters 与 reset_all 一并清空直方图") {
+    llmopt::MetricsRegistry metrics;
+    metrics.observe_hist(llmopt::HistId::TtftMs, 120.0);
+    metrics.observe_hist(llmopt::HistId::QueueWaitMs, 30.0);
+    metrics.observe_hist(llmopt::HistId::QueueWaitMs, 70.0);
+    metrics.set(llmopt::MetricId::QueueDepth, 3);
+    CHECK(metrics.histograms().count(llmopt::HistId::QueueWaitMs) == 2);
+
+    metrics.reset_counters();
+    CHECK(metrics.histograms().count(llmopt::HistId::QueueWaitMs) == 0);
+    CHECK(metrics.histograms().count(llmopt::HistId::TtftMs) == 0);
+    CHECK(metrics.get(llmopt::MetricId::QueueDepth) == 3); // reset_counters 不动 gauge
+
+    metrics.observe_hist(llmopt::HistId::ItlMs, 12.0);
+    metrics.reset_all();
+    CHECK(metrics.histograms().count(llmopt::HistId::ItlMs) == 0);
+    CHECK(metrics.get(llmopt::MetricId::QueueDepth) == 0);
+    const std::string text = metrics.render();
+    CHECK(text.find("llmopt_latency_itl_ms_bucket{le=\"+Inf\"} 0") != std::string::npos);
 }
 
 TEST_CASE("snapshot 覆盖全部指标且数值与 get 一致") {

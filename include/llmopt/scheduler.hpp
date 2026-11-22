@@ -112,6 +112,9 @@ struct SequenceGroup {
     bool scheduled_this_pump = false;
     std::int64_t last_progress_ns = 0;
     std::int64_t enqueued_ns = 0;
+    // 本次"在等待队列里排队"的起点：入队时取 enqueued_ns，被抢占回队时重置；
+    // 只服务 queue_wait 直方图，不参与 deadline 与公平性判定。
+    std::int64_t wait_started_ns = 0;
     // 上一个成立 token 的到达时刻；只用于纯 decode 步的 ITL 样本。
     std::int64_t last_token_ns = 0;
     // Completion 超时已向客户端推过错误：保持运行态等执行线程回投，避免提前释放 KV。

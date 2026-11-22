@@ -313,6 +313,7 @@ ErrCode SchedulerCore::submit(InferenceRequest req, std::vector<std::int32_t> pr
         group->seq.sampling = group->sampling;
         group->enqueued_ns = now_ns();
         group->last_progress_ns = group->enqueued_ns;
+        group->wait_started_ns = group->enqueued_ns;
         if (!reserve_request_id(group->req_id)) {
             release_tenant_live(req.tenant);
             release_admission();
@@ -1072,6 +1073,13 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
     group->admitted = true;
     group->admit_order = ++admit_seq_;
     group->last_progress_ns = now_ns();
+    // 排队时长只算"本次在 waiting_ 里等"的那一段；抢占回队的起点在 apply_preemption 重置。
+    if (group->wait_started_ns > 0 && group->last_progress_ns >= group->wait_started_ns) {
+        metrics_.observe_hist(
+                HistId::QueueWaitMs,
+                static_cast<double>(group->last_progress_ns - group->wait_started_ns) / 1e6);
+    }
+    group->wait_started_ns = 0;
     group->has_reserved_slice = false;
     group->tenant_running_slot = true;
     tenant_running_acquire(group->tenant);
@@ -1150,6 +1158,7 @@ void SchedulerCore::apply_preemption(const PreemptDecision& decision, PreemptTri
             continue;
         }
         waiting_.push_front(group);
+        group->wait_started_ns = now_ns();
         metrics_.set(MetricId::QueueDepth, static_cast<std::int64_t>(waiting_.size()));
         metrics_.set(MetricId::RequestsQueued, static_cast<std::int64_t>(waiting_.size()));
     }
@@ -1374,10 +1383,12 @@ void SchedulerCore::record_token_metrics(const std::shared_ptr<SequenceGroup>& g
         const double ttft_ms = static_cast<double>(token_ns - group->enqueued_ns) / 1e6;
         metrics_.add_float(MetricId::TtftMsSum, ttft_ms);
         metrics_.inc(MetricId::TtftMsCount);
+        metrics_.observe_hist(HistId::TtftMs, ttft_ms);
     } else if (pending_pure_decode_) {
         const double itl_ms = static_cast<double>(token_ns - group->last_token_ns) / 1e6;
         metrics_.add_float(MetricId::ItlMsSum, itl_ms);
         metrics_.inc(MetricId::ItlMsCount);
+        metrics_.observe_hist(HistId::ItlMs, itl_ms);
     }
     group->last_token_ns = token_ns;
     if (previous < seq.prompt_len && seq.num_computed >= seq.prompt_len) {
