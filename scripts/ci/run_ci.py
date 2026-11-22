@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +32,31 @@ MODES = {
     "pr": ["docs", "tests", "code", "diff"],
     "nightly": ["docs", "tests", "code", "diff", "coverage"],
 }
+
+MIN_PYTHON = (3, 10)
+
+# 每个模式真正会用到的外部工具：缺了就 exit 3（环境缺失），不要等到闸门中途报错。
+MODE_REQUIREMENTS = {
+    "fast": ["clang-format"],
+    "pr": ["clang-format", "git"],
+    "nightly": ["clang-format", "git", "cmake", "ctest"],
+}
+
+
+def env_check(mode: str) -> tuple[list[str], list[str]]:
+    """返回 (缺失项, 警告项)；缺失项非空时入口以 3 退出，不跑任何闸门。"""
+    missing: list[str] = []
+    warnings: list[str] = []
+    if sys.version_info < MIN_PYTHON:
+        missing.append(f"python>=3.10（当前 {sys.version.split()[0]}）")
+    for tool in MODE_REQUIREMENTS.get(mode, []):
+        if shutil.which(tool) is None:
+            missing.append(tool)
+    if os.name == "nt" and "ucrt64" not in os.environ.get("PATH", "").lower():
+        warnings.append(
+            "Windows 未把 C:\\msys64\\ucrt64\\bin 放进 PATH：直接跑 ctest 时服务端与集成用例会以"
+            " 0xC0000135（STATUS_DLL_NOT_FOUND）退出，详见 docs/testing.md §2.3")
+    return missing, warnings
 
 
 def default_base() -> str:
@@ -72,6 +99,14 @@ def main(argv: list[str] | None = None) -> int:
         for mode, steps in MODES.items():
             print(f"{mode}: {' -> '.join(steps)}")
         return 0
+
+    missing, warnings = env_check(args.mode)
+    for note in warnings:
+        print(f"[env] WARN: {note}")
+    if missing:
+        print(f"[env] 缺少前置工具：{', '.join(missing)}")
+        print("[env] 退出码 3 = 环境缺失（与 tools/dev.py 约定一致）；补齐 PATH 后重跑")
+        return 3
 
     if args.base is None:
         args.base = default_base()

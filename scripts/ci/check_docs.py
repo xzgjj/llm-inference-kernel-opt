@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -234,6 +235,9 @@ def rule_implementation_map(result: CheckResult) -> None:
 
 def test_counts(result: CheckResult) -> None:
     """rule: CI-DOC-008 —— 文档计数块必须与 CTest 注册表一致，禁止手写数字。"""
+    if shutil.which("ctest") is None:
+        result.notes.append("[SKIP] 计数校验：ctest 不在 PATH（见 docs/testing.md §2.4）")
+        return
     script = REPO_ROOT / "scripts/ci/gen_test_counts.py"
     proc = subprocess.run([sys.executable, str(script), "--check"],
                           capture_output=True, text=True, cwd=REPO_ROOT)

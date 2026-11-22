@@ -23,7 +23,12 @@ def count(label: str | None, build_dir: str) -> int:
     cmd = ["ctest", "--test-dir", build_dir, "-N"]
     if label:
         cmd += ["-L", label]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    except (FileNotFoundError, OSError) as exc:
+        raise SystemExit(
+            f"ctest 不可用（{exc}）：把 CMake bin 加入 PATH，或用 --build-dir 指向有效构建目录"
+        ) from None
     if result.returncode != 0:
         raise SystemExit(f"ctest -N 失败: {result.stderr.strip() or result.stdout.strip()}")
     match = TOTAL_RE.search(result.stdout)

@@ -67,6 +67,27 @@ CTest 粒度是**用例**不是可执行文件：`doctest_discover_tests` 在构
 
 
 
+### 2.3 运行时前置（2026-11-22）
+
+注册表只写 Runner 与 Args，不写"机器上得先装什么"。这一段补上，缺任何一项都会得到**看起来像代码失败**的假红：
+
+| 平台 | 必需 | 缺了会怎样 |
+| --- | --- | --- |
+| 全平台 | `git`（`--mode pr` 及以上需要）、`clang-format`（code 闸门）、Python ≥3.10 | `run_ci.py` 以 **3** 退出并指名缺什么（环境缺失，不是代码失败） |
+| Windows | `C:\msys64\ucrt64\bin` 必须在 `PATH` 里（MinGW UCRT 运行库：`libstdc++-6.dll` / `libgcc_s_seh-1.dll` / `libwinpthread-1.dll`） | 服务端与集成用例以 `0xC0000135`（STATUS_DLL_NOT_FOUND）退出，`ctest` 一片红 |
+| Windows | CMake bin（`cmake` / `ctest`）在 `PATH` 里 | 计数校验 CI-DOC-008 降级为 SKIP（有明确提示），其余 docs 闸门照跑 |
+| Linux / WSL | `cmake`、`ctest`；`--mode nightly` 另需 `gcovr` | 同上；覆盖率为 SKIP 时 nightly 不算通过 |
+
+一条命令自查：
+
+```bash
+python scripts/ci/run_ci.py --mode pr     # 缺工具 → 退出码 3，并打印缺失清单
+```
+
+本机 2026-11-22 实测教训：默认 PATH 缺 UCRT64 与 git 时，`ctest -L fast` 有 **13 条**用例失败（服务端 DLL 缺失 11 条 + 矩阵用例 `FileNotFoundError: git` 2 条）；补 PATH 后一次 `219/219`。这类失败**不是**代码回归，别再花时间 bisect。
+
+
+
 ## 3 分层策略
 
 | Level | 覆盖什么 | 数量预期 | 运行位置 |

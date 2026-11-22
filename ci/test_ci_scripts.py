@@ -10,6 +10,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts" / "ci"))
@@ -18,6 +19,7 @@ import check_diff  # noqa: E402
 import check_docs  # noqa: E402
 import check_tests  # noqa: E402
 import ci_common  # noqa: E402
+import run_ci  # noqa: E402
 
 
 def _load_coverage_gate():
@@ -117,13 +119,51 @@ class ScopeWhitelistTest(unittest.TestCase):
         self.assertEqual(self._violations({"CLI.md": "M", "README.md": "M"}), [])
 
     def test_new_top_level_directory_is_rejected(self) -> None:
-        self.assertTrue(self._violations({"bench/recompute.py": "A"}))
+        self.assertTrue(self._violations({"application/recompute.py": "A"}))
 
     def test_git_quoted_chinese_path_is_decoded(self) -> None:
         # git 默认把非 ASCII 路径转成 "docs/\346\226\207..."，白名单不能把它当新顶层目录。
         quoted = '"docs/\\346\\226\\207\\346\\241\\243.md"'
         self.assertEqual(check_diff._decode_git_path(quoted), "docs/文档.md")
         self.assertEqual(check_diff._decode_git_path("docs/ascii.md"), "docs/ascii.md")
+
+
+class EnvCheckTest(unittest.TestCase):
+    """D2-02 回归：缺前置工具时入口以 3 退出，而不是让集成用例报 13 条假失败。
+
+    修复前的症状：PATH 里没有 clang-format/git/ctest 时，run_ci 在闸门中途才失败，
+    或者 ctest 直接起不来服务（rc=0xC0000135），看起来像代码坏了。
+    """
+
+    def test_missing_tool_exits_with_three(self) -> None:
+        with mock.patch.object(run_ci.shutil, "which", return_value=None), \
+             mock.patch.object(run_ci, "run_step") as step:
+            self.assertEqual(run_ci.main(["--mode", "pr"]), 3)
+        step.assert_not_called()
+
+    def test_requirements_follow_mode(self) -> None:
+        self.assertNotIn("git", run_ci.MODE_REQUIREMENTS["fast"])
+        self.assertIn("git", run_ci.MODE_REQUIREMENTS["pr"])
+        self.assertIn("ctest", run_ci.MODE_REQUIREMENTS["nightly"])
+
+    def test_all_tools_present_reports_no_missing(self) -> None:
+        with mock.patch.object(run_ci.shutil, "which", return_value="/usr/bin/tool"):
+            missing, _ = run_ci.env_check("pr")
+        self.assertEqual(missing, [])
+
+    def test_docs_count_check_skips_without_ctest(self) -> None:
+        """没有 ctest 时计数校验记 SKIP，而不是抛 traceback 判文档违规。"""
+        result = ci_common.CheckResult("docs-count")
+        with mock.patch.object(check_docs.shutil, "which", return_value=None):
+            check_docs.test_counts(result)
+        self.assertTrue(any("SKIP" in note for note in result.notes))
+        self.assertFalse(any(v.rule == "CI-DOC-008" for v in result.violations))
+
+    def test_windows_missing_ucrt_is_warned(self) -> None:
+        with mock.patch.object(run_ci.os, "name", "nt"), \
+             mock.patch.dict(run_ci.os.environ, {"PATH": "C:\\Windows\\System32"}):
+            _, warnings = run_ci.env_check("fast")
+        self.assertTrue(any("ucrt64" in note for note in warnings))
 
 
 if __name__ == "__main__":
