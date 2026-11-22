@@ -21,6 +21,8 @@
 
 以 Qwen3-8B 为主力档（S3 用 `Q3_K_M` 全驻留，早期 L1 证据用 `Q4_K_M`）；Windows 侧主要跑 stub 后端做调度与接口测试。它既可以当学习 continuous batching 的可运行参考，也可以当 llama.cpp 之上的最小 OpenAI 兼容服务骨架。注册数见下方统计块。
 
+并且提供项目运行情况的可视化和观测且接口 OpenAI 兼容的，现成客户端直接能连：Open WebUI、LibreChat、Chatbox 填个 base_url 就能对话 
+
 
 
 ## 版本

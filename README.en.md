@@ -19,6 +19,8 @@ What the project does: model loading and math go straight to llama.cpp / ggml; t
 
 Qwen3-8B is the main tier (S3 runs `Q3_K_M` fully resident; earlier L1 evidence used `Q4_K_M`); on Windows the stub backend covers scheduling and API tests. It works both as a runnable reference for learning continuous batching and as a minimal OpenAI-compatible service skeleton on top of llama.cpp. The registered-case count appears in the block below.
 
+Runtime status is visualized and observable, and because the API is OpenAI-compatible, existing clients connect directly: point Open WebUI, LibreChat or Chatbox at the base URL and start chatting.
+
 ## Version
 
 - Current version **0.13.0** (`project(llmopt VERSION)` in `CMakeLists.txt` is the only source; `--version`, startup logs and `llmopt_build_info` all derive from it). Changelog: [CHANGELOG.md](CHANGELOG.md).
