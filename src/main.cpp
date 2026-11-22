@@ -416,11 +416,15 @@ std::int32_t run(ServerConfig& cfg) {
 
 // 入口：先解析配置再初始化日志，保证日志级别尽早生效。
 int main(int argc, char** argv) {
-    // S6：--version 在 load_config 之前扫 argv；只输出版本一行后退出 0。
+    // S6：--version / --help 在 load_config 之前扫 argv；输出一行或用法后退出 0。
     for (int index = 1; index < argc; ++index) {
         if (std::string(argv[index]) == "--version") {
             std::cout << "llmopt " << llmopt::kVersion << " (llama revision "
                       << llmopt::kLlamaRevision << ")\n";
+            return kExitOk;
+        }
+        if (std::string(argv[index]) == "--help") {
+            std::cout << llmopt::render_cli_usage();
             return kExitOk;
         }
     }

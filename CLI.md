@@ -1,472 +1,271 @@
-# CLI 与接口契约（阶段 1 冻结版 v1.1 / 阶段 3 chunk-size / 阶段 5 预研工具）
+# CLI 与接口契约专册（v0.13.0）
 
-> 状态：阶段 1 参数已实现并冻结；阶段 3 新增 `--chunk-size`，2026-11-20 经用户确认纳入冻结契约；阶段 8 新增 `--model-profile` / `--capacity-only`（容量档位，待本轮 review 确认）。阶段 5 只新增只读判据工具，不改服务 CLI。对应 SPEC-1（C-01…C-13）、SPEC-3 F-04、SPEC-5 §1.7。
-> 与 SPEC 冲突处已记录在 `implementation-notes.md`。适用进程：`llmopt_server`。`tools/dev.py` 参数命名独立，见第 8 节。
-
-
+> 状态：**D2-14 专册，已按用户确认的四项契约（入口模式命名、命令清单与退出码语义、key 文件 `tokens_per_hour`/`tokens_per_day`、`--slow-request-ms`）定稿**。
+> 唯一事实来源：`src/config.cpp` 的键注册表（`--help` 与本文由同一份表渲染，`unit_config` 有断言守住两者一致）。改参数必须同时改注册表、本文与 `docs/SPEC-DEBUG2.md`。
+> 适用进程：`llmopt_server`（服务本体）与 `tools/dev.py`（开发工具链）。两者参数命名各自独立，不要混用。
 
 ## 1 入口模式
 
-| 模式 | 命令 | 用途 | 后端要求 |
+| 模式 | 命令 | 用途 | 退出方式 |
 | --- | --- | --- | --- |
-| 服务进程 | `llmopt_server` | 常驻 HTTP/SSE 推理服务 | `--backend llama` 或 `stub` |
-| 一次性自检 | `llmopt_server --model <gguf> --port 0` 之外的任意端口 + `/healthz` | 部署前探活 | 同上 |
-| 开发工具 | `python tools/dev.py <子命令>` | 构建、测试、诊断 | 不涉及推理 |
+| 服务模式 | `llmopt_server --model <gguf> ...` | 常驻 HTTP/SSE 推理服务 | SIGTERM/SIGINT 排空后 0 |
+| 一次性容量模式 | `llmopt_server --model-profile <json> --capacity-only` | 权重未落盘时只算预算，不监听端口 | 0 可启动 / 3 硬阻塞 / 4 软超预算被拒 |
+| 信息模式 | `llmopt_server --version`、`llmopt_server --help` | 版本与全部参数清单（由键注册表渲染） | 0 |
+| 工具模式 | `python tools/dev.py <子命令>` | 构建、测试、诊断、按 req_id 回放 | 见第 2 节 |
 
-本阶段不提供 `serve/bench/replay` 子命令；服务只有一个入口，避免两套参数。
+没有 `serve` / `bench` / `replay` 子命令：服务只有一个二进制入口，避免两套参数各自演化。
 
+## 2 命令列表
 
-
-## 2 启动参数
-
-```bash
-llmopt_server [--config <json>] [--model <gguf> | --model-profile <json> --capacity-only] \
-              [--host 127.0.0.1] [--port 8080] \
-              [--ctx-tokens 2048] [--max-concurrency 8] \
-              [--max-num-batched-tokens 2048] [--queue-capacity 32] \
-              [--batch-policy continuous|static] \
-              [--block-size 16] [--watermark-ratio 0.05] [--disable-prefix-cache] \
-              [--chunk-size 128] \
-              [--mode off|auto|force_on] [--safety-ratio 0.80] [--allow-force-on] \
-              [--threads 0] [--n-gpu-layers 0] [--backend llama|stub] \
-              [--rate-limit-rps 0] [--rate-limit-burst 32] \
-              [--drain-deadline-seconds 30] [--request-deadline-seconds 120] \
-              [--completion-timeout-ms 30000] [--api-key ""] [--api-keys-file ""] \
-              [--step-trace-rate 0] \
-              [--control-port 0] [--tls-cert ""] [--tls-key ""] \
-              [--log-level info|debug|warn]
-```
-
-
-
-| 参数 | 环境变量 | 默认 | 取值/校验 | 说明 |
-| --- | --- | --- | --- | --- |
-| `--config` | `LLMOPT_CONFIG` | 空 | 可读 JSON 文件 | 文件层参数；未知键/越界/坏 JSON 启动即退出 2 |
-| `--model` | `LLMOPT_MODEL` | 无（必填） | 存在的 GGUF 文件 | 只读元数据做预算，不在此处加载权重 |
-| `--host` | `LLMOPT_HOST` | `127.0.0.1` | 任意可绑定地址 | 默认只本机 |
-| `--port` | `LLMOPT_PORT` | `8080` | 1–65535 | 占用时退出 3 |
-| `--ctx-tokens` | `LLMOPT_CTX_TOKENS` | `2048` | 128–131072 | 同时决定 KV 估算与上下文拒绝阈值 |
-| `--max-concurrency` | `LLMOPT_MAX_CONCURRENCY` | `8` | 1–64 | 连续批调度的运行序列上限，超出的请求进 waiting 队列 |
-| `--max-num-batched-tokens` | `LLMOPT_MAX_NUM_BATCHED_TOKENS` | `2048` | 1–8192，且 ≥ `max-concurrency` | 单步调度 token 预算；chunked prefill 后允许小于 `ctx-tokens`，长 prompt 按 chunk 推进 |
-| `--queue-capacity` | `LLMOPT_QUEUE_CAPACITY` | `32` | 1–1024，且 `max-concurrency + queue-capacity + 3 ≤ 256` | waiting 队列上限；满即 429 `QUEUE_FULL`。上限与数据面线程预算绑定，避免"队列容量写了但永远触发不到" |
-| `--batch-policy` | `LLMOPT_BATCH_POLICY` | `continuous` | `continuous` / `static` | 批次策略。`continuous`=完成即补位（生产默认）；`static`=整批跑空才准入下一批，只用于隔离"槽位复用"收益的对照实验，生产环境不要设置 |
-| `--block-size` | `LLMOPT_BLOCK_SIZE` | `16` | 4–128 | KV 逻辑块 token 数，同时决定前缀命中粒度 |
-| `--watermark-ratio` | `LLMOPT_WATERMARK_RATIO` | `0.05` | 0–0.2 | 准入预留的空闲块比例，按块池总量折算 |
-| `--chunk-size` | `LLMOPT_CHUNK_SIZE` | `128` | 仅 `32`/`64`/`128`/`256` | chunked prefill 的单步宽度；末块才采样，中间块只推进 KV |
-| `--fairness-aging` | `LLMOPT_FAIRNESS_AGING` | `false` | 布尔开关，不带值 | 开启等待老化豁免：无进展超阈值的请求不再被选为 victim |
-| `--aging-threshold-ms` | `LLMOPT_AGING_THRESHOLD_MS` | `30000` | 1–3600000 | 老化阈值（毫秒），仅 `--fairness-aging` 开启后生效 |
-| `--max-consecutive-preemptions` | `LLMOPT_MAX_CONSECUTIVE_PREEMPTIONS` | `3` | 1–32 | 同一请求连续被抢占上限；达到即转 `Error`，防饿死 |
-| `--preempt-trace` | `LLMOPT_PREEMPT_TRACE` | 空 | 可写路径 | 每次抢占写一行 CSV：victim/块数/重算 token/路径/代价 |
-| `--step-trace` | `LLMOPT_STEP_TRACE` | 空 | 可写路径 | 每个调度 step 写一行 JSONL（ts/steps/tokens/prefill/decode/ns）；步级 p99 只离线复算，不写回 `/metrics` |
-| `--disable-prefix-cache` | `LLMOPT_DISABLE_PREFIX_CACHE` | `false` | 布尔开关，不带值 | 关闭满块哈希与前缀复用；后端不能安全借用 KV 时也会自动关闭。共享的是逻辑块元数据，物理 KV 仍由后端 `seq_cp`/预留写入目标槽，不是物理零拷贝 |
-| `--mode` | `LLMOPT_MODE` | `off` | `off`/`auto`/`force_on` | 门控三档，见第 5 节 |
-| `--safety-ratio` | `LLMOPT_SAFETY_RATIO` | `0.80` | 0.80–0.95 | 软预算系数 |
-| `--allow-force-on` | `LLMOPT_ALLOW_FORCE_ON` | `false` | 布尔开关，不带值 | `force_on` 的二次确认 |
-| `--threads` | `LLMOPT_THREADS` | `0` | 0–256 | 0 交给 llama.cpp 决定；负值与超上限启动即拒绝 |
-| `--n-gpu-layers` | `LLMOPT_N_GPU_LAYERS` | `0` | ≥0 | 0 为纯 CPU；负值拒绝（全层卸载请显式填层数），预算与后端共用同一解释 |
-| `--model-profile` | `LLMOPT_MODEL_PROFILE` | 空 | 可读 JSON，含 `file_bytes/block_count/head_count/head_count_kv/key_length/value_length` 正整数（后五项 ≤ INT32_MAX） | 权重未落盘时，用声明值替代 GGUF 文件元数据做启动预算；只允许与 `--capacity-only` 搭配，不加载权重、不产出吞吐 |
-| `--capacity-only` | `LLMOPT_CAPACITY_ONLY` | `false` | 布尔开关，不带值 | 打印 `estimate`/`decision`/`capacity-only: allow_start` 后退出：可启动回 0，软超预算回 4，硬阻塞回 3；不监听端口 |
-| `--backend` | `LLMOPT_BACKEND` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
-| `--log-level` | `LLMOPT_LOG_LEVEL` | `info` | spdlog 级别 | 跑基准建议 `warn` |
-| `--rate-limit-rps` | `LLMOPT_RATE_LIMIT_RPS` | `0` | 0–1e6 | 全局令牌桶速率；0=关，>0 时超额回 429（行为已接入） |
-| `--rate-limit-burst` | `LLMOPT_RATE_LIMIT_BURST` | `32` | 1–1024 | 桶容量；突发额度，回填不超过该值 |
-| `--drain-deadline-seconds` | `LLMOPT_DRAIN_DEADLINE_SECONDS` | `30` | 1–300 | SIGTERM 排空上限；超时强制停止 |
-| `--request-deadline-seconds` | `LLMOPT_REQUEST_DEADLINE_SECONDS` | `120` | 1–3600 | 请求级总时限，从入队起算；流式/非流式共享，到期由 Scheduler 以 `TIMEOUT` 收尾 |
-| `--completion-timeout-ms` | `LLMOPT_COMPLETION_TIMEOUT_MS` | `30000` | 0–86400000 | 单步 Completion 回投超时；超时先回 `EXECUTION_FAILED`，迟到回投后再释放 KV；0=关闭 |
-| `--api-key` | `LLMOPT_API_KEY` | 空 | ≤512 字符 | 可选单 token Bearer；空=不鉴权，不打印值；与 `--api-keys-file` 互斥 |
-| `--api-keys-file` | `LLMOPT_API_KEYS_FILE` | 空 | JSON 路径 | 阶段 11 静态 key 文件：`version:1` + `keys[]`（`id`/`sha256`/`quota`）；key 只存 SHA-256，不存明文；Linux 权限必须 0600 |
-| `--step-trace-rate` | `LLMOPT_STEP_TRACE_RATE` | `0` | 0–64 | 每步 trace 1/N 采样；0=关（行为在 7-5 接入） |
-| `--control-port` | `LLMOPT_CONTROL_PORT` | `0` | 0–65535，且不得等于 `--port` | `>0` 时在 `127.0.0.1` 另起独立控制面 listener（独立 4 线程池），只提供 `/healthz`、`/readyz`、`/metrics`；`0` 保持旧行为 |
-| `--tls-cert` | `LLMOPT_TLS_CERT` | 空 | PEM 证书链路径 | 与 `--tls-key` 必须成对；需 `-DLLMOPT_ENABLE_TLS=ON` 构建，否则启动退出 3 |
-| `--tls-key` | `LLMOPT_TLS_KEY` | 空 | PEM 私钥路径 | 不打印内容；证书/私钥无效时启动退出 3 |
-
-阶段 3 起支持 chunked prefill，`ctx-tokens` 不再受单步预算限制；`chunk-size` 取四档，其他值启动即拒绝。调度顺序固定为：在跑 decode 保位 → 在跑 prefill 的下一 chunk → 预算内补新请求，合计 token 不超过 `max-num-batched-tokens`。
-
-并发口径：数据面 HTTP 线程池大小 = `max-concurrency + queue-capacity + 3`。每个 running / waiting 请求都会一直占住一个 handler 线程直到整条响应回写完（SSE 也是同一线程），所以线程数必须覆盖准入预算 `max-concurrency + queue-capacity`；否则超出部分会卡在 accept 层，`QUEUE_FULL` 永远不会发出。额外 3 个线程留给 `healthz` / `readyz` / `metrics`，避免探针排在长请求后面。线程池的任务队列分两段：前 `queue-capacity` 条正常等待，随后 `queue-capacity` 条进入 shed 位，由 pre-routing 直接回 **503 `SERVICE_UNAVAILABLE` + `Retry-After: 1`**（不读业务 body、不占调度预算，`/healthz`、`/readyz`、`/metrics` 仍放行）；再超出“线程 + 2×队列”的极端连接才由 cpp-httplib 直接关闭，作为防止无界 backlog 的最后一道内存保护。调度准入仍保留 **429 `QUEUE_FULL`**：429 表示“排队位也满了”，503 表示“连接连排队位都没进”。控制端点仍保留在数据面端口以兼容旧探针；配置 `--control-port>0` 后，额外起一个只绑 `127.0.0.1` 的控制面 listener，使用独立的 4 线程池，只提供 `/healthz`、`/readyz`、`/metrics`，数据面长流占满时不会饿死探针。一个连接由 cpp-httplib 串行处理，单连接并发恒为 1。
-
-优先级固定：**CLI > `LLMOPT_*` > `--config` 文件 > 内置默认**。启动第一行打印生效配置，随后逐行打印 `config source: <键>=cli|env|file|default`，第三行打印预算与门控结论，便于复核。
-
-`--model` 默认必填；只有 `--capacity-only` + `--model-profile` 同时出现时允许缺省。此时 `estimate: ...` 的 `kv` 已按 `--kv-cache-type` 折算（f16=2 B、q8_0≈1.0625 B、f32=4 B），不再按 f16 高估 2 倍。
-
-配置文件键与 CLI 同名，允许 kebab-case 或 snake_case（`ctx-tokens` / `ctx_tokens` 等价）；未知键、类型不符、越界与坏 JSON 一律退出 2，不静默取默认。文件本身 **≤ 16 MiB**，超限按配置错误退出 2（不再整文件读入后 `bad_alloc`）。`donor-slots` 与 `kv-cache-type` 自阶段 12 起同样可从文件设置，CLI/env/file 三入口语义一致。`api-key` 可来自文件或 env，但启动摘要只打印 `set/unset`。`api-keys-file` 同样支持文件/env，启动摘要只打印来源，不打印路径内容与 key。
-
-被拒绝的参数：
-
-- `--seed` / `--max-tokens`：属于请求级字段，不做全局默认，避免“服务默认值”与“请求默认值”两套事实。
-- 重复参数：后者覆盖前者，不报错。
-
-
-
-## 3 HTTP 契约
-
-| 方法 | 路径 | 行为 | 备注 |
+| 命令 | 语法 | 说明 | 退出码 |
 | --- | --- | --- | --- |
-| POST | `/v1/completions` | 文本补全；`stream=true` 走 SSE | 主端点 |
-| POST | `/completion` | 与上者同一解析路径 | 兼容 llama.cpp 客户端 |
-| POST | `/v1/chat/completions` | `messages` → 模型 chat template → 同一条调度路径 | 仅纯文本；流式 `delta.content` |
-| GET | `/v1/models` | 返回 `{"object":"list","data":[{"id":...}]}` | id 取模型文件名去扩展名 |
-| GET | `/healthz` | 存活探针，始终 200，body 带当前状态 | `{"status":"ready"}` |
-| GET | `/readyz` | 就绪探针，仅 `ready` 返回 200；启动中/排空/停止一律 503 | 6-G3 |
-| GET | `/metrics` | Prometheus 文本，仅 counter/gauge | 启动即预置 0 值序列 |
+| 启动服务 | `llmopt_server --model <gguf> [参数]` | 加载模型并监听数据面端口 | 0 正常 / 1 启动失败 / 2 用法错误 / 3 资源不足 / 4 门控拒绝 |
+| 打印版本 | `llmopt_server --version` | 输出 `llmopt <ver> (llama revision <rev>)` | 0 |
+| 打印用法 | `llmopt_server --help` | 键注册表逐项列出（开关会标 `(开关)`） | 0 |
+| 容量试算 | `llmopt_server --model-profile <json> --capacity-only` | 只打印 `estimate`/`decision`/`capacity-only: allow_start` | 0 / 3 / 4 |
+| 构建 | `python tools/dev.py build [--target X]` | 包装 CMake+Ninja，带进度与 ETA | 0 成功 / 非 0 编译失败 |
+| 测试 | `python tools/dev.py test [-L fast]` | ctest 包装，失败汇总到 junit | 0 全绿 / 1 失败 |
+| 诊断 | `python tools/dev.py diagnose` | 扫描日志，输出「现象/原因/下一步命令」 | 0 |
+| 环境体检 | `python tools/dev.py env` | 工具链/GPU/内存探测，写 `build/env.json` | 0 |
+| 同步清单 | `python tools/dev.py sync` | 校验依赖清单与目录骨架 | 0 / 非 0 |
+| 启动并跟随 | `python tools/dev.py run [--attach]` | 起服务；`--attach` 轮询 `/healthz` 并跟随日志 | 0 / 2（无二进制） |
+| 慢请求回放 | `python tools/dev.py trace <req_id> [--dir D] [--json]` | 读 `logs/slow/<req_id>.jsonl`，打印四段耗时 | 0 找到 / 2 找不到 / 3 参数错 |
+| 调试脚本 | `python tools/dev.py debug [--pid N]` | 生成 gdb 脚本；Windows 无 gdb 时给 WSL 命令 | 0 / 2 |
+| 清理 | `python tools/dev.py clean [--yes]` | 默认 dry-run，`--yes` 才删，models/vendor 排除 | 0 |
 
-请求体（`application/json`，上限 4 MB）：
+退出码语义（服务进程）：`1`=模型不可读/后端未编译；`2`=用法错误（缺 `--model`、未知参数、缺取值、`--config` 未知键/坏 JSON/越界）；`3`=`required > free`、端口被占、TLS 配置不可用；`4`=门控拒绝（`auto` 软超预算、`force_on` 未带 `--allow-force-on`、快照缺字段）。
 
-| 字段 | 类型 | 默认 | 约束 |
+## 3 子命令与参数
+
+### 3.1 服务参数（按用途分组）
+
+启动与规模：
+
+| 参数 | 默认 | 合法范围 | 说明 |
 | --- | --- | --- | --- |
-| `prompt` | string | 必填 | 非空；分词后不能为空 |
-| `id` | string | 自动 `req-<hex>` | 回显在同一响应的 `id` 中 |
-| `stream` | bool | `false` | 非布尔即 400 |
-| `model` | string | `""` | 仅回显，不校验 |
-| `max_tokens` / `n_predict` | int | `128` | 1–4096，两者同名同义 |
-| `top_k` | int | `40` | 0–256，0 表示关闭 |
-| `temperature` | number | `0.7` | 0.0–2.0 |
-| `top_p` | number | `0.95` | 0.0–1.0 |
-| `min_p` | number | `0.05` | 0.0–1.0 |
-| `repeat_penalty` | number | `1.0` | 0.5–2.0 |
-| `seed` | int | `-1` | -1 为随机；否则 0–1e9 |
-| `stop` | string / string[] | 无 | 最多 4 条，每条 1–32 字符；命中即截断并按 `stop` 收尾 |
-| `n` | int | `1` | 1–4；仅非流式，`stream=true` 且 `n>1` 返回 400 |
+| `--model` | 必填 | 存在的 GGUF | 只读元数据做预算，不在此加载权重 |
+| `--model-profile` | 空 | JSON，6 个正整数键 | 权重不在本机时声明元数据；只能与 `--capacity-only` 搭配 |
+| `--capacity-only` | 关（开关） | — | 打印预算结论后退出，不监听 |
+| `--host` | `127.0.0.1` | 可绑定地址 | 默认只听本机 |
+| `--port` | `8080` | 1–65535 | 被占用退出 3 |
+| `--ctx-tokens` | `2048` | 128–131072 | 单序列上下文，同时是拒绝阈值 |
+| `--max-concurrency` | `8` | 1–64 | running 序列上限 |
+| `--queue-capacity` | `32` | 1–1024，且 `max-concurrency+queue-capacity+3 ≤ 256` | waiting 上限，满即 429 `QUEUE_FULL` |
+| `--max-num-batched-tokens` | `2048` | 1–8192，且 ≥ `max-concurrency` | 单步 token 预算，可小于 `ctx-tokens` |
+| `--chunk-size` | `128` | 仅 32/64/128/256 | chunked prefill 宽度 |
 
-chat 端点额外约束：
+调度与 KV：
 
-| 字段 | 类型 | 约束 |
+| 参数 | 默认 | 合法范围 | 说明 |
+| --- | --- | --- | --- |
+| `--batch-policy` | `continuous` | `continuous`/`static` | `static` 仅用于对照实验 |
+| `--block-size` | `16` | 4–128 | KV 逻辑块 token 数，也是前缀命中粒度 |
+| `--watermark-ratio` | `0.05` | 0–0.2 | 准入预留空闲块比例 |
+| `--disable-prefix-cache` | 关（开关） | — | 关闭满块哈希与前缀复用 |
+| `--donor-slots` | `4` | ≥0 | 前缀复用 donor 槽数；仅 GPU 层数与前缀复用都开启时生效 |
+| `--kv-cache-type` | `f16` | `f16`/`q8_0`/`f32` | 预算按 2 / ≈1.0625 / 4 B 折算 |
+| `--fairness-aging` | 关（开关） | — | 无进展超阈值的请求不再被抢占 |
+| `--aging-threshold-ms` | `30000` | 1–3600000 | 老化阈值 |
+| `--max-consecutive-preemptions` | `3` | 1–32 | 连续被抢占上限，达到转 `Error` |
+| `--preempt-trace` | 空 | 可写路径 | 每次抢占写一行 CSV |
+
+时间与保护：
+
+| 参数 | 默认 | 合法范围 | 说明 |
+| --- | --- | --- | --- |
+| `--request-deadline-seconds` | `120` | 1–3600 | 请求总时限，到点由调度以 `TIMEOUT` 收尾 |
+| `--completion-timeout-ms` | `30000` | 0–86400000 | 单步后端回投超时；0=关 |
+| `--drain-deadline-seconds` | `30` | 1–300 | SIGTERM 排空上限 |
+| `--rate-limit-rps` | `0` | 0–1e6 | 全局令牌桶，0=关；超额 429 `RATE_LIMITED` |
+| `--rate-limit-burst` | `32` | 1–1024 | 桶容量 |
+
+后端与门控：
+
+| 参数 | 默认 | 合法范围 | 说明 |
+| --- | --- | --- | --- |
+| `--backend` | `llama` | `llama`/`stub` | `stub` 需 `LLMOPT_ALLOW_STUB=1` |
+| `--threads` | `0` | 0–256 | 0 交给 llama.cpp |
+| `--n-gpu-layers` | `0` | ≥0 | 0=纯 CPU，负数退出 2 |
+| `--mode` | `off` | `off`/`auto`/`force_on` | 预算门控三档 |
+| `--safety-ratio` | `0.80` | 0.80–0.95 | 软预算系数 |
+| `--allow-force-on` | 关（开关） | — | `force_on` 的二次确认 |
+
+鉴权、安全与可观测：
+
+| 参数 | 默认 | 合法范围 | 说明 |
+| --- | --- | --- | --- |
+| `--api-key` | 空 | ≤512 字符 | 单 token Bearer；与 `--api-keys-file` 互斥 |
+| `--api-keys-file` | 空 | JSON 路径 | 多租户 key 文件，只存 SHA-256，POSIX 权限必须 0600 |
+| `--api-keys-reload-seconds` | `0` | ≥0 | Windows 无 SIGHUP 时按秒轮询热加载 |
+| `--slow-request-ms` | `0` | 0–600000 | 慢请求阈值；>0 时命中即强制落 dump |
+| `--slow-dump-dir` | `logs/slow` | 可写目录 | dump 目录，单文件 8 MB、保留 20 份 |
+| `--step-trace` | 空 | 可写路径 | 每 step 一行 JSONL |
+| `--step-trace-rate` | `0` | 0–64 | 每 N 步采样；0=关 |
+| `--log-level` | `info` | spdlog 级别 | 压测建议 `warn` |
+| `--control-port` | `0` | 0–65535，≠`--port` | >0 时另起 loopback 控制面 |
+| `--tls-cert` / `--tls-key` | 空 | PEM 路径，必须成对 | 需 `-DLLMOPT_ENABLE_TLS=ON`，否则退出 3 |
+
+`--config` 单独属于文件层，见第 4 节。被拒绝的参数：`--seed` / `--max-tokens`（请求级字段不做服务默认）；重复参数后者覆盖前者，不报错。
+
+### 3.2 请求字段（约束摘要）
+
+| 字段 | 默认 | 约束 |
 | --- | --- | --- |
-| `messages` | array | 非空；`role` 仅 `system`/`user`/`assistant` |
-| `messages[].content` | string / array | 数组仅接受 `{"type":"text","text":...}` 分片 |
+| `prompt` | 必填 | 非空，分词后不能为空 |
+| `id` | 自动 `req-<hex>` | 1–64，仅 `[A-Za-z0-9._:-]`；活跃期重复即 400 |
+| `stream` | `false` | 非布尔即 400 |
+| `max_tokens` / `n_predict` | `128` | 1–4096 |
+| `temperature` / `top_p` / `min_p` / `repeat_penalty` / `top_k` / `seed` | `0.7` / `0.95` / `0.05` / `1.0` / `40` / `-1` | 见附录 A |
+| `stop` | 无 | 最多 4 条，每条 1–32 字符 |
+| `n` | `1` | 1–4；`stream=true` 且 `n>1` 返回 400 `UNSUPPORTED_FIELD` |
 
-`tools` / `tool_choice` / `functions` / `logprobs` / `logit_bias` / `response_format` / 图片分片等兼容面之外的字段返回 400 `UNSUPPORTED_FIELD`（D6-1），不静默忽略。模板读不到时回退 `role: content\n` 拼接并记 warn。
+## 4 Profile 与配置加载
 
-采样链固定为：**惩罚 → top-k → top-p → min-p → 温度 → dist**。顺序写死在 `runner_llama.cpp`，请求不能改顺序。
+这里的 "Profile" 有两层含义，不要混：
 
-上下文判定：`tokenize(prompt).size() + max_tokens > ctx_tokens` 即 400 `CONTEXT_OVERFLOW`。
+1. **配置分层**（R-07）：`CLI > LLMOPT_* 环境变量 > --config 文件 > 内置默认`。文件先于 env 应用，CLI 最后覆盖；启动第一行打印生效配置，随后逐项打印 `config source: <键>=cli|env|file|default`，可直接复核每个值从哪来。
+2. **模型容量 Profile**（`--model-profile`）：一份 JSON 声明 `file_bytes / block_count / head_count / head_count_kv / key_length / value_length`，在权重未落盘时替代 GGUF 元数据做预算；只允许与 `--capacity-only` 同时使用。
 
-流式帧：
+配置文件的规则：
 
-```text
-data: {"choices":[{"finish_reason":null,"index":0,"text":"A","token_id":323}],"id":"req-1","object":"text_completion"}
+- 顶层平铺键，与 CLI 同名去 `--`；kebab 与 snake 等价（`ctx-tokens` ≡ `ctx_tokens`）。
+- 未知键、类型不符、越界、坏 JSON 一律退出 2，即使后面 CLI 能覆盖也不静默放行。
+- 文件 ≤ 16 MiB，超限按配置错误退出 2。
+- `api-key` 只打印 `set/unset`；`api-keys-file` 只打印来源，不打印路径内容与 key。
 
-data: [DONE]
+## 5 插件与后端管理
 
-```
+- 推理后端是**编译期开关**，不是运行期插件：`-DLLMOPT_ENABLE_LLAMA=ON` 编入真实 llama.cpp（固定 tag `b12557`），`OFF` 只保留 stub。
+- 没有动态库加载、没有插件目录扫描，避免运行期 ABI 与版本漂移；想换后端就是重新构建 + 切 `--backend`。
+- 第三方依赖由 CMake FetchContent 拉到 `third_party/_deps`（不入库），版本清单在 `cmake/deps.cmake`；`tools/dev.py sync` 校验清单与实际目录一致。
+- 发布镜像同口径：`scripts/release/Dockerfile` 的 `--build-arg LLMOPT_ENABLE_LLAMA=ON` 在 builder 内编 llama.cpp 并只把 `libllama*`/`libggml*` 拷进 runtime（`LD_LIBRARY_PATH=/app/lib`），runtime 仍是非 root uid 10001。
 
-chat 流式帧的结构是 `object=chat.completion.chunk`，文本放在 `choices[].delta.content`；两条路径都以 `data: [DONE]` 结束。
-
-- 增量帧每帧一个 token，`text` 是该 token 的 detokenize 结果。
-- `id` 取请求里的 `req_id`，长度 1–64，仅允许 `[A-Za-z0-9._:-]`；同一进程内活跃请求重复 id 返回 400 `INVALID_JSON`，重试请换新 id。请求结束后 id 可复用：服务端内部 `BackendId` 永不复用，旧 donor 保留旧内部 key，新请求可正常命中前缀而不会把旧 donor 当成活跃重复。
-- `X-Request-Id` 头优先于请求体 `id`，并写入该请求的日志行。
-- 末帧 `finish_reason` 取 `stop` / `length` / `abort` / `error`，随后补 `data: [DONE]`。
-- `stop` 跨 provider 回调、跨 token 命中时都先下发截断前文本，再补 `finish_reason=stop` 和 `data: [DONE]`，不静默断流。
-- `data: [DONE]\n\n` 实测 14 字节；SPEC-1 C-02 写 15 字节是笔误，以本文与实现为准。
-
-非流式响应（`n>1` 时 `choices` 按 `index` 排列，`usage` 汇总全部候选）：
-
-```json
-{"choices":[{"finish_reason":"length","index":0,"text":"..."}],"id":"req-1",
- "object":"text_completion",
- "usage":{"completion_tokens":3,"prompt_tokens":5,"total_tokens":8}}
-```
-
-chat 非流式用 `object=chat.completion` 与 `choices[].message={"role":"assistant","content":...}`；`usage` 口径与文本端点一致。
-
-错误响应统一为 `{"error":{"code":"QUEUE_FULL","message":"...","retryable":true}}`，HTTP 映射见第 4 节。
-
-
-
-## 4 错误码与退出码
-
-| ErrCode | HTTP | code | 可重试 |
-| --- | --- | --- | --- |
-| `InvalidJson` | 400 | `INVALID_JSON` | 否 |
-| `ConfigInvalid` | 400 | `CONFIG_INVALID` | 否 |
-| `ModelNotLoaded` | 503 | `MODEL_NOT_LOADED` | 是 |
-| `PromptTooLong` | 400 | `PROMPT_TOO_LONG` | 否 |
-| `ContextOverflow` | 400 | `CONTEXT_OVERFLOW` | 否 |
-| `PayloadTooLarge` | 413 | `PAYLOAD_TOO_LARGE` | 否 |
-| `KvInsufficient` | 507 | `KV_INSUFFICIENT` | 否 |
-| `KvBelowWatermark` | 429 | `KV_BELOW_WATERMARK` | 是 |
-| `Cancelled` | 499 | `REQUEST_CANCELLED` | 否 |
-| `ExecutionFailed` | 500 | `EXECUTION_FAILED` | 否 |
-| `QueueFull` | 429 | `QUEUE_FULL` | 是 |
-| `NotSupported` | 404 | `NOT_SUPPORTED` | 否 |
-| `ResourceInsufficient` | 507 | `RESOURCE_INSUFFICIENT` | 否 |
-| `UnsupportedField` | 400 | `UNSUPPORTED_FIELD` | 否 |
-| `Unavailable` | 503 | `SERVICE_UNAVAILABLE` | 是 |
-| `RateLimited` | 429 | `RATE_LIMITED` | 是 |
-| `QuotaExceeded` | 429 | `QUOTA_EXCEEDED` | 是 |
-| `Unauthorized` | 401 | `UNAUTHORIZED` | 否 |
-
-鉴权语义（D6-2，默认关）：配置 `--api-key` 后，`/v1/completions`、`/v1/chat/completions`、`/v1/models` 必须带 `Authorization: Bearer <api-key>`；缺失或错误回 401 `UNAUTHORIZED` + `WWW-Authenticate: Bearer`。`/healthz`、`/readyz`、`/metrics` 不校验，供探针与 Prometheus 抓取。
-
-多租户鉴权（阶段 11）：`--api-keys-file` 指向只含 `version`/`keys` 的 JSON。每个条目为 `{"id":"tenant-a","sha256":"<64 hex>","quota":{...}}`，`id` 限 `[a-z0-9-]{1,32}`，`sha256` 是客户端 key 的 SHA-256，**文件不存明文 key**。客户端仍用 `Authorization: Bearer <key>`，服务端算摘要后定长比较。文件权限（POSIX）必须是 0600，否则启动退出 3；Windows 跳过权限检查。`--api-key` 是单租户 `default` 的简写，二者不能同时设置；旧 `--api-key` 启动时等价于一条 `id=default` 的 SHA-256 条目。
-
-租户配额字段：`max_concurrency`（1..全局并发）、`queue_capacity`（0..全局队列）、`rate_limit_rps`（0..1e6）、`rate_limit_burst`（1..1024）、`kv_blocks`（0..全局块数，0=不限）。`max_concurrency + queue_capacity` 构成该租户的 live 准入上限，超限立即 429 `QUOTA_EXCEEDED`；`kv_blocks` 是该租户可占用的 KV 块总量，单请求需求超限直接终态拒绝，缓存可先回收本租户留置块。未知 key 401；租户限流 429 `RATE_LIMITED`；全局队列满 429 `QUEUE_FULL`。日志只写 `tenant=<id>`，不写 key 或摘要。
-
-TLS 语义（阶段 9）：`--tls-cert/--tls-key` 同时设置时，数据面以 `https` 提供服务；需 `-DLLMOPT_ENABLE_TLS=ON` 构建，默认构建配置证书会在启动时退出 3。证书/私钥无效、不可读同样退出 3。控制面仍为 loopback 明文，跨机控制面由前置代理终止 TLS。
-
-控制面隔离（阶段 9）：`--control-port>0` 时另起 `127.0.0.1` listener，独立 4 线程池，只提供 `/healthz`、`/readyz`、`/metrics`；数据面仍保留这三个端点。控制端口绑定失败退出 3。
-
-限流语义（6-G4）：`--rate-limit-rps > 0` 时先过令牌桶再解析；超额回 429 `RATE_LIMITED` + `Retry-After: 1`，不进队列、不占调度预算，并累加 `llmopt_rate_limited_total`。
-
-排空语义（6-G3）：SIGTERM/SIGINT 后状态转 `draining`，`/readyz` 与新请求立即 503；在飞请求在 `--drain-deadline-seconds` 内自然收尾，超时记 `llmopt_drain_timeout_total` 并强制停止，进程退出码仍为 0。`/healthz` 始终 200，body 的 `status` 反映 `starting|ready|draining|stopped`。
-
-进程退出码：
-
-| 码 | 含义 | 触发 |
-| --- | --- | --- |
-| 0 | 正常退出 | SIGINT/SIGTERM 后 HTTP 停止、调度排空 |
-| 1 | 启动失败 | 模型文件不可读/元数据缺失、取值非法、后端未编译 |
-| 2 | 用法错误 | 缺 `--model`、未知参数、缺少取值、`--config` 未知键/类型不符/越界/坏 JSON |
-| 3 | 资源不足 | `required > free`，或数据面/控制面端口被占用，或 TLS 证书/私钥无效/构建未启用 TLS |
-| 4 | 门控拒绝 | `auto` 软超预算、`force_on` 未带开关、快照字段缺失 |
-
-
-
-## 5 门控与预算
-
-1. L1 探测：RAM 总量/可用、GPU 型号与空闲显存、逻辑核数、是否 WSL。
-2. L2 估算：`required = GGUF 文件字节 + KV 估算`；KV = `block_count × ctx × head_count_kv × (key_len + value_len) × 2`。
-3. L3 判据：有 GPU 时用显存空闲值，否则用 RAM 可用值。
-   - `required ≤ free × safety_ratio`：`ELIGIBLE`。
-   - `free × safety_ratio < required ≤ free`：`DEGRADED`。`off` 放行；`auto` 拒绝（退出 4）；`force_on` 需 `--allow-force-on`，放行时并发减半并打印横幅。
-   - `required > free`：`BLOCKED`，任何模式都退出 3。
-   - 快照/元数据缺字段：`BLOCKED`，退出 4。
-
-
-
-## 6 配置加载机制（Profile）
-
-阶段 6 起支持 `--config`，没有命名 profile/合并多个文件的概念；一次只读一个平铺 JSON。
-
-- 优先级固定：**CLI > `LLMOPT_*` > file > 默认**（R-07）。文件层先于 env 应用；CLI 最后覆盖。
-- JSON 顶层为平铺键，与参数名同名去 `--` 前缀，kebab 与 snake 均可：`{"port": 8080, "ctx_tokens": 2048}`。
-- 启动摘要逐项打印来源：`config source: port=cli` 等；未出现的字段为 `default`。
-- 未知键、类型不符、越界、坏 JSON 一律退出 2（R-08）；即使后续 CLI 能覆盖也不静默放行。
-- `--config` 的路径本身可来自 CLI 或 `LLMOPT_CONFIG`；两者同时存在时 CLI 决定读哪个文件。
-- `api-key` 只打印 `set/unset`，不打印值；日志同样不落明文。
-
-
-
-## 7 插件与依赖
-
-- 推理后端不是运行期插件，而是编译期开关：`-DLLMOPT_ENABLE_LLAMA=ON` 编入真实 llama.cpp，`OFF` 只留 stub。
-- 第三方依赖由 CMake FetchContent 拉到 `third_party/_deps`（不入库），版本见 `cmake/deps.cmake`。
-- 无动态加载、无插件目录扫描；避免运行期 ABI 风险。
-
-
-
-## 8 环境变量、权限与资源上限
+## 6 环境变量与权限控制
 
 | 变量 | 作用 | 默认 |
 | --- | --- | --- |
-| `LLMOPT_*` | 见第 2 节 | 见第 2 节 |
-| `LLMOPT_ALLOW_STUB=1` | 允许 stub 后端，供测试与 CI | 未设置即拒绝 |
-| `LLMOPT_LLAMA_ROOT` | CMake 查 llama.cpp 头/库的根 | `/root/llm-src/llama.cpp` |
+| `LLMOPT_<参数名大写、连字符变下划线>` | 与 CLI 同名同义，如 `LLMOPT_CTX_TOKENS`、`LLMOPT_SLOW_REQUEST_MS`、`LLMOPT_SLOW_DUMP_DIR` | 见第 3 节 |
+| `LLMOPT_CONFIG` | 配置文件路径（CLI `--config` 优先） | 空 |
+| `LLMOPT_ALLOW_STUB=1` | 允许 stub 后端（测试/CI 用） | 未设置即拒绝 |
+| `LLMOPT_LLAMA_ROOT` | CMake 查 llama.cpp 头/库的根 | 由构建参数传入 |
 
-- 默认只绑 `127.0.0.1`；`--api-key` 提供单 token Bearer，`--api-keys-file` 提供多 key/租户与每 key 配额（默认关，空值不校验）。阶段 9 起可选用进程内 TLS；公网仍建议反向代理承担 TLS、mTLS 与更强认证。
-- 请求体上限 4 MB；读超时 5 s；写超时 120 s；单请求非流式排空上限 120 s。
-- 队列容量 32，满即 429；等待中的请求只占分词后的 token 数组，不占 KV。
-- 控制面独立端口只绑 loopback；不要把 `--control-port` 暴露到公网，除非前置代理做了访问控制。
+权限边界：
 
+- 默认只绑 `127.0.0.1`；对公网必须前置反向代理承担 TLS/mTLS。
+- 单 token 模式 `--api-key`；多租户用 `--api-keys-file`：`version:1` + `keys[]`，每项 `id`（`[a-z0-9-]{1,32}`）/`sha256`（64 hex）/`quota`。文件不存明文 key，POSIX 权限必须 0600，否则退出 3（Windows 跳过权限检查）。
+- `quota` 字段：`max_concurrency`、`queue_capacity`、`rate_limit_rps`、`rate_limit_burst`、`kv_blocks`，以及 **`tokens_per_hour` / `tokens_per_day`**（整数 ≥0，0 或省略=不限；只计 completion tokens，按自然小时/日固定窗口滚动；超限 429 `QUOTA_EXCEEDED` + `Retry-After`）。未知键仍拒绝。
+- 控制面 `--control-port>0` 只绑 loopback；不要把控制端口暴露到公网。
+- 日志与 dump：不打 key 明文，`/healthz`、`/readyz`、`/metrics` 免鉴权供探针抓取。
 
+## 7 可直接复制的示例
 
-## 9 可直接执行的示例
-
-安装/构建（Windows，stub 档）：
+安装（Windows，stub 档，无需 GPU）：
 
 ```powershell
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build --parallel
-ctest --test-dir build --output-on-failure
+python tools/dev.py test -L fast
 ```
 
-真实后端（WSL/Linux，需先编好 llama.cpp）：
+安装（Linux/WSL，真后端）：
 
 ```bash
-cmake -S . -B build-wsl -DCMAKE_BUILD_TYPE=Release \
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
   -DLLMOPT_ENABLE_LLAMA=ON -DLLMOPT_LLAMA_ROOT=/root/llm-src/llama.cpp
-cmake --build build-wsl --parallel
+cmake --build build --parallel --target llmopt_server
+./build/llmopt_server --version
+# 期望：llmopt 0.13.0 (llama revision b12557)
 ```
 
-TLS 构建（可选；需要 OpenSSL 开发包）：
-
-```bash
-cmake -S . -B build-tls -DCMAKE_BUILD_TYPE=Release -DLLMOPT_ENABLE_TLS=ON
-cmake --build build-tls --parallel
-./build-tls/llmopt_server --model model.gguf \
-  --tls-cert server.pem --tls-key server.key \
-  --control-port 8081
-```
-
-启动（真实模型，CPU）：
-
-```bash
-LLMOPT_LLAMA_ROOT=/root/llm-src/llama.cpp \
-./build-wsl/llmopt_server --model /root/llm-src/models/qwen2.5-0.5b-q4.gguf \
-  --port 8080 --ctx-tokens 2048 --max-num-batched-tokens 512 --chunk-size 64 \
-  --mode auto --threads 8 --log-level warn
-```
-
-启动（stub 自检，无模型权重也能跑通路由）：
+初始化（生成配置与 stub 自检）：
 
 ```powershell
 python tests\fixtures\models\make_fake_gguf.py tests\fixtures\models\fake.gguf
-$env:LLMOPT_ALLOW_STUB="1"
+$env:LLMOPT_ALLOW_STUB = "1"
 .\build\llmopt_server.exe --model tests\fixtures\models\fake.gguf --backend stub `
   --port 18080 --ctx-tokens 512 --mode off --log-level warn
+# 另一终端：curl -s http://127.0.0.1:18080/readyz
 ```
 
-批次策略对照（只用于实验，生产保持默认 `continuous`）：
+日常操作（真实模型 + 流式调用 + 探活）：
 
 ```bash
-# 静态批基线：整批跑空才准入下一批，用来隔离"完成即补位"这一项收益
-./build-wsl/llmopt_server --model /root/models/qwen2.5-0.5b-q4.gguf \
-  --max-concurrency 4 --queue-capacity 8 --batch-policy static --port 18080
+LLMOPT_LLAMA_ROOT=/root/llm-src/llama.cpp ./build/llmopt_server \
+  --model /root/models/Qwen3-8B-Q3_K_M.gguf --ctx-tokens 1024 \
+  --max-num-batched-tokens 1024 --queue-capacity 32 \
+  --n-gpu-layers 37 --threads 0 --mode auto --log-level warn \
+  --control-port 8081 --slow-request-ms 1000
 
-# 连续批（默认）
-./build-wsl/llmopt_server --model /root/models/qwen2.5-0.5b-q4.gguf \
-  --max-concurrency 4 --queue-capacity 8 --batch-policy continuous --port 18081
-```
-
-`static` 与 `continuous` 的吞吐差异只在混长负载下显现；等长输出时两者应基本一致。
-
-流式调用：
-
-```bash
 curl -N -X POST http://127.0.0.1:8080/completion \
   -H 'Content-Type: application/json' \
   -d '{"prompt":"用一句话解释 KV cache","stream":true,"max_tokens":64}'
+
+curl -s http://127.0.0.1:8081/readyz
+curl -s http://127.0.0.1:8081/metrics | grep -E 'llmopt_latency_(ttft|itl)_ms_count'
 ```
 
-非流式 + 脚本化取文本：
+脚本化调用（非流式取文本 + 失败即非零）：
+
+```bash
+set -euo pipefail
+text=$(curl -sf -X POST http://127.0.0.1:8080/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"hello","max_tokens":8}' | jq -r '.choices[0].text')
+[ -n "$text" ] && echo "ok: $text"
+```
+
+脚本化排障（慢请求 → 按 req_id 回放）：
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/v1/completions \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"hello","max_tokens":8}' | jq -r '.choices[0].text'
+  -d '{"id":"req-demo-1","prompt":"长文本...","max_tokens":128}'
+python tools/dev.py trace req-demo-1 --dir logs/slow --json
+# 退出 0=有 dump；2=没有该 req_id 的 dump
 ```
 
-探活与指标：
+租户 token 预算（key 文件片段 + 超限验证）：
+
+```json
+{"version":1,"keys":[{"id":"tenant-a","sha256":"<64 hex>",
+  "quota":{"max_concurrency":2,"queue_capacity":4,"tokens_per_hour":10000,"tokens_per_day":100000}}]}
+```
 
 ```bash
-curl -s http://127.0.0.1:8080/healthz
-curl -s http://127.0.0.1:8080/readyz
-curl -s http://127.0.0.1:8080/metrics | grep llmopt_requests_total
+LLMOPT_ALLOW_STUB=1 ./build/llmopt_server --model fake.gguf --backend stub --port 18080 \
+  --api-keys-file keys.json
+# 超额时：HTTP 429，body {"error":{"code":"QUOTA_EXCEEDED",...}}，头带 Retry-After
 ```
 
-容量档位（权重未落盘，只看“这档模型 + 这张卡”进不进预算，不监听端口）：
+容器（stub / 真后端两档）：
 
 ```bash
-./llmopt_server --model-profile scripts/bench/capacity/qwen3-27b-dense-q4.json \
-  --backend stub --capacity-only --mode auto \
-  --n-gpu-layers 16 --ctx-tokens 1024 --max-concurrency 4 \
-  --max-num-batched-tokens 1024 --kv-cache-type q8_0 --disable-prefix-cache
-# 退出 0=可启动，3=硬阻塞，4=软超预算被 auto 拒绝
+docker build -f scripts/release/Dockerfile -t llmopt:0.13.0 .
+docker build -f scripts/release/Dockerfile --build-arg LLMOPT_ENABLE_LLAMA=ON -t llmopt:0.13.0-llama .
+docker run --rm llmopt:0.13.0 --version
 ```
 
-一次跑多档并落 CSV：
+## 附录 A 接口契约与错误面
 
-```bash
-python3 scripts/bench/capacity_check.py --server ./llmopt_server \
-  --profile scripts/bench/capacity/qwen3-27b-dense-q4.json \
-  --ngl 0,8,16,24,32 --out evidence/capacity_27b.csv
-```
+端点：`POST /v1/completions`、`POST /completion`（同解析路径）、`POST /v1/chat/completions`（纯文本消息）、`GET /v1/models`、`GET /healthz`、`GET /readyz`、`GET /metrics`。请求体上限 4 MB；读超时 5 s；写超时 120 s。
 
-实验矩阵（短档 / 长档 / KV 压力档共用，配置决定规模）：
+流式帧：每 token 一帧增量，末帧 `finish_reason` 取 `stop|length|abort|error`，随后补 `data: [DONE]`。chat 帧的 `object` 是 `chat.completion.chunk`，文本在 `choices[].delta.content`。
 
-```bash
-python3 scripts/bench/matrix_runner.py \
-  --config scripts/bench/matrix/phase8b_long.json \
-  --out bench/results/phase8b_long
-```
+错误响应统一为 `{"error":{"code":"...","message":"...","retryable":true|false}}`，映射以 `src/common.cpp` 为准：
 
-长档或压力档可能出现“请求长时间无新记录”，用独立监控进程 tail 进度，不要靠肉眼盯 `/metrics`：
+| ErrCode | HTTP | code | 可重试 |
+| --- | --- | --- | --- |
+| InvalidJson / ConfigInvalid / PromptTooLong / ContextOverflow / UnsupportedField | 400 | `INVALID_JSON` 等 | 否 |
+| Unauthorized | 401 | `UNAUTHORIZED` | 否 |
+| NotSupported | 404 | `NOT_SUPPORTED` | 否 |
+| PayloadTooLarge | 413 | `PAYLOAD_TOO_LARGE` | 否 |
+| QueueFull / RateLimited / QuotaExceeded / KvBelowWatermark | 429 | `QUEUE_FULL` 等 | 是 |
+| Cancelled | 499 | `REQUEST_CANCELLED` | 否 |
+| ExecutionFailed | 500 | `EXECUTION_FAILED` | 否 |
+| ModelNotLoaded / Unavailable | 503 | `MODEL_NOT_LOADED` / `SERVICE_UNAVAILABLE` | 是 |
+| Timeout | 504 | `TIMEOUT` | 是 |
+| KvInsufficient / ResourceInsufficient | 507 | `KV_INSUFFICIENT` / `RESOURCE_INSUFFICIENT` | 否 |
 
-```bash
-python3 scripts/bench/watch_matrix.py \
-  --out bench/results/phase8b_long \
-  --log bench/results/phase8b_long/progress.log \
-  --interval 10 --until-report
-# 输出：rows=... ok=... failed=... p1/long/r1=10 last_event=3.4s report=no
-# 超过 --stall-after（默认 120 s）无新请求会追加 STALL，而不是静默等待
-```
+429 与 503 的分界：**429 = 排队位满**（进了准入预算）；**503 = 连接连排队位都没进**（传输层 shed，带 `Retry-After: 1`，不读 body、不占调度预算，`/healthz`、`/readyz`、`/metrics` 仍放行）。
 
-脚本化压测（重用阶段 0 采集器，指向本服务时只需改端口与路径）：
-
-```bash
-python -m tools.bench.collect --config tools/bench/config/phase0_smoke.json \
-  --out tools/bench/results/phase1/smoke
-```
-
-
-
-## 10 已冻结与待确认的契约点
-
-1. 阶段 0+1 共用整数分支 `1`，下一阶段从 `2` 开始。
-2. 采样链顺序见第 3 节。
-3. **历史冻结（阶段 1 语境，已作废）**：当时只做 CLI、`--config` 推迟到阶段 2；阶段 2 起 `--config` 已生效（见第 6 节），本条的"推迟"结论不再适用。
-4. **历史冻结（阶段 1 语境，已作废）**：当时 `/v1/chat/completions` 恒 404；阶段 6 起已实现纯文本 system/user/assistant 消息，`/completion` 保留，两条路径均在服务中。
-5. 双档后端：`LLMOPT_ENABLE_LLAMA=ON` 才编真实后端；Windows/CI 用 stub。
-6. 退出码 3/4 语义见第 4 节。
-7. 阶段 2 调度参数默认值：`max-num-batched-tokens=2048`、`queue-capacity=32`、`block-size=16`、`watermark-ratio=0.05`、前缀缓存默认开。
-8. 阶段 3 新增 `--chunk-size`，默认 128，仅 32/64/128/256；`max-num-batched-tokens` 可小于 `ctx-tokens`（chunked prefill 承接）。
-9. 分支约定：阶段 2 用 `2`，阶段 3 用 `3`；每阶段结束需用户 review 后才允许推送。
-10. **待用户确认（阶段 8 新增）**：`--model-profile <json>` 允许权重不在本机时只声明模型元数据；仅在 `--capacity-only` 下可替代 `--model`；默认关闭。env 同名键 `LLMOPT_MODEL_PROFILE` / `LLMOPT_CAPACITY_ONLY` 等价。
-11. **待用户确认（阶段 8 根地址口径）**：e2e `LLMOPT_REAL_BASE` 只接受 `scheme://host:port`，禁止带路径；探活固定 `/healthz` + `/readyz`（`status=ready`），`/metrics` 仅作证据抓取。
-12. **已冻结（阶段 8 证据口径）**：`matrix_report.csv` 新增 `tok_accounting`，`total_tok_s` 的 prompt 部分必须用 `llmopt_prefill_tokens_total + llmopt_prefix_hit_tokens_total`，不得用字符数估算。
-13. **已冻结（阶段 12 S0）**：`--threads` 允许 0（=自动）到 256；`--n-gpu-layers` 必须 ≥0，负数报用法错误（退出码 2），"全层卸载"要显式填层数；`--config` 文件上限 16 MiB；`donor-slots`、`kv-cache-type` 两个 JSON 键生效。
-14. **阶段 12 S4 约定**：key 文件同一 `id` 允许多条 `sha256`（轮换期并存），配额必须一致，重复摘要拒绝加载；POSIX 下 SIGHUP 触发原子热加载，失败保留旧表并累加 `llmopt_api_keys_reload_failed_total`；Windows 无 SIGHUP，用 `--api-keys-reload-seconds <n>` 轮询（0=关闭）。token 日配额本阶段不做。
-15. **P1 修复约定（2026-11-22）**：`--batch-policy` 默认 `continuous`，`static` 仅供对照实验；数据面线程预算 `max-concurrency + queue-capacity + 3 ≤ 256` 启动即校验，超出报用法错误（退出码 2），保证 `QUEUE_FULL` 在入口可达。
-
-
-
-## 11 预研判据工具（阶段 5，非服务 CLI）
-
-`scripts/spec5/recompute_spec5.py` 只读 SPEC-4 产物，不启服务、不写 KV、不执行 PD/投机路径。它没有环境变量、没有 profile、没有插件；权限与普通脚本相同（读输入目录、写 `--out`）。
-
-| 子命令 | 语法 | 作用 |
-| --- | --- | --- |
-| （无子命令） | `python scripts/spec5/recompute_spec5.py --csv <file> [options]` | 复算判据表，输出 `criteria.csv` / `criteria.md`，可选评估报告 |
-
-| 参数 | 默认 | 说明 |
-| --- | --- | --- |
-| `--csv` | 必填 | `matrix_report.csv`，SPEC-4 十二列；缺列即退出 1 |
-| `--traces` | CSV 同目录 | `steps-p<N>.jsonl` 所在目录；缺档记 `trace_missing` |
-| `--chunk-csv` | 无 | 同 P 同档的调参后十二列报告；缺档时 PD 停在候选 |
-| `--spec-csv` | 无 | 草稿模型实测行（`baseline_tok_s`/`draft_tok_s`/`alpha`/`k`/`cost_ratio`/`itl_p99_delta_pct`） |
-| `--out` | `<csv 目录>/spec5` | 输出目录 |
-| `--report` | 仅触发时写 | 评估报告路径；未触发也可显式写一页“不支持翻案” |
-| `--slo-itl-ms` | `50` | D5-1 SLO |
-| `--share-threshold` | `0.50` | prefill 占比阈值 |
-| `--chunk-gain-threshold` | `0.10` | chunk 调参最小改善 |
-| `--spec-gain-threshold` | `0.10` | 投机最小增益 |
-| `--spec-itl-tolerance` | `0.07` | 投机 ITL p99 允许恶化 |
-| `--min-samples` | `30` | 少于此记 `数据不足` |
-| `--kv-kib-per-token` | `12` | B_kv 估算系数 |
-| `--ctx-tokens` | `4096` | 迁移估算上下文 |
-| `--link-gibps` | `0` | 链路实测带宽；0 表示未测，不给 PD 结论 |
-| `--delta-stall-ms` | 无 | 混批−隔离 ITL 差；缺省不给 PD 结论 |
-| `--route-ms` / `--overlap-ms` | `0` | 路由与重叠开销 |
-| `--quiet` | 关 | 不打印摘要 |
-
-退出码：`0` 计算完成（含数据不足/不触发）、`1` 输入不可用（路径/缺列）、`2` 参数用法错误。判定值固定为 `pd_triggered` / `candidate_pending_chunk` / `candidate_pending_migration` / `negative_gain` / `batch_decay` / `not_triggered` / `data_insufficient`。
-
-**典型用法**
-
-```bash
-# 仓库自带的官方 14 行样例（hermetic）
-python scripts/spec5/recompute_spec5.py \
-  --csv tests/data/spec5/matrix_report.csv --traces tests/data/spec5 \
-  --out /tmp/spec5
-
-# 真机矩阵复算，并落一页评估报告
-python scripts/spec5/recompute_spec5.py \
-  --csv docs/evidence/phase4-official/matrix_report.csv \
-  --traces docs/evidence/phase4-official \
-  --out docs/evidence/phase5 --report docs/notes/phase5_预研评估.md
-
-# 有调参后矩阵时，才可能从候选变成触发
-python scripts/spec5/recompute_spec5.py --csv base.csv --chunk-csv tuned.csv \
-  --link-gibps 10 --delta-stall-ms 8 --out out/
-```
-
-脚本化调用只看退出码与 `criteria.csv` 的 `row_verdict` 列，不要解析人读的 `criteria.md`。
+完整错误面语义见 `docs/错误面规范.md`，逐条回归用例见 `docs/testing.md`。

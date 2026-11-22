@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <map>
 #include <set>
 #include <string>
@@ -1145,6 +1146,30 @@ std::string canonical_config_key(const std::string& key) {
     }
     std::replace(normalized.begin(), normalized.end(), '_', '-');
     return known_key(normalized) ? normalized : std::string{};
+}
+
+std::size_t config_key_count() noexcept {
+    return std::size(kConfigKeys);
+}
+
+const char* config_key_at(std::size_t index) noexcept {
+    return index < std::size(kConfigKeys) ? kConfigKeys[index] : "";
+}
+
+bool is_flag_config_key(const std::string& key) noexcept {
+    return is_flag_key(key);
+}
+
+std::string render_cli_usage() {
+    std::string text = "用法: llmopt_server --model <gguf> [--参数 取值 | --开关]\n";
+    text += "       llmopt_server --model-profile <json> --capacity-only\n";
+    text += "       llmopt_server --version | --help\n\n";
+    text += "可选参数（--config <json> 单独位于文件层，见 CLI.md 第 4 节）:\n";
+    for (std::size_t index = 0; index < std::size(kConfigKeys); ++index) {
+        const std::string key = std::string("--") + kConfigKeys[index];
+        text += "  " + key + (is_flag_key(kConfigKeys[index]) ? "  (开关)" : "  <取值>") + "\n";
+    }
+    return text;
 }
 
 bool is_valid_chunk_size(std::int32_t value) noexcept {

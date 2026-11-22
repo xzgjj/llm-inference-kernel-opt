@@ -992,3 +992,26 @@ TEST_CASE("阶段 12 S4：key 文件权限校验（POSIX 0600；Windows perm 分
 TEST_CASE("阶段 12 S4：reload 失败指标已登记") {
     CHECK(find_metric("llmopt_api_keys_reload_failed_total") != MetricId::Count);
 }
+
+// D2-14：--help 由键注册表渲染，新增参数只要进表就自动出现在用法里。
+TEST_CASE("D2-14：render_cli_usage 覆盖全部注册键且区分开关") {
+    const std::string usage = render_cli_usage();
+    CHECK(usage.find("用法: llmopt_server") != std::string::npos);
+    CHECK(usage.find("--slow-request-ms") != std::string::npos);
+    CHECK(usage.find("--slow-dump-dir") != std::string::npos);
+    CHECK(usage.find("--api-keys-file") != std::string::npos);
+    CHECK(config_key_count() > 30);
+    bool seen_flag = false;
+    bool seen_value = false;
+    for (std::size_t index = 0; index < config_key_count(); ++index) {
+        const std::string key = std::string("--") + config_key_at(index);
+        CHECK(usage.find(key) != std::string::npos);
+        seen_flag = seen_flag || is_flag_config_key(config_key_at(index));
+        seen_value = seen_value || !is_flag_config_key(config_key_at(index));
+    }
+    CHECK(seen_flag);
+    CHECK(seen_value);
+    CHECK(usage.find("--port  <取值>") != std::string::npos);
+    CHECK(usage.find("--disable-prefix-cache  (开关)") != std::string::npos);
+    CHECK(is_flag_config_key("port") == false);
+}

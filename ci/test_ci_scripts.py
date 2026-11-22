@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -164,6 +165,49 @@ class EnvCheckTest(unittest.TestCase):
              mock.patch.dict(run_ci.os.environ, {"PATH": "C:\\Windows\\System32"}):
             _, warnings = run_ci.env_check("fast")
         self.assertTrue(any("ucrt64" in note for note in warnings))
+
+
+class CliDocTest(unittest.TestCase):
+    """D2-14：CLI.md 与实现零漂移。
+
+    两边各自解析：CLI.md 取第 3.1 节参数表的首列，config.cpp 取 kConfigKeys 注册表。
+    少写一个参数、写了不存在的参数，都会在 CI 里直接红，不用等人肉 review。
+    """
+
+    @staticmethod
+    def _registry_keys() -> set[str]:
+        text = (REPO / "src" / "config.cpp").read_text(encoding="utf-8")
+        block = text.split("kConfigKeys[] = {", 1)[1].split("};", 1)[0]
+        return set(re.findall(r'"([a-z0-9-]+)"', block))
+
+    @staticmethod
+    def _doc_keys() -> set[str]:
+        text = (REPO / "CLI.md").read_text(encoding="utf-8")
+        section = text.split("### 3.1", 1)[1].split("### 3.2", 1)[0]
+        keys: set[str] = set()
+        for line in section.splitlines():
+            # 一行可以写多个同义参数（如 --tls-cert / --tls-key），全部收集。
+            if line.startswith("| `--"):
+                keys.update(re.findall(r"--([a-z0-9-]+)", line))
+        return keys
+
+    def test_doc_and_registry_match(self) -> None:
+        registry = self._registry_keys()
+        self.assertIn("slow-request-ms", registry)
+        documented = self._doc_keys()
+        self.assertEqual(sorted(registry - documented), [], "CLI.md 漏写参数")
+        self.assertEqual(sorted(documented - registry), [], "CLI.md 写了未注册参数")
+
+    def test_dev_commands_documented(self) -> None:
+        commands: set[str] = set()
+        for path in (REPO / "tools" / "dev_commands").glob("*.py"):
+            found = re.search(r'^NAME\s*=\s*"([a-z]+)"', path.read_text(encoding="utf-8"), re.MULTILINE)
+            if found:
+                commands.add(found.group(1))
+        self.assertIn("trace", commands)
+        doc = (REPO / "CLI.md").read_text(encoding="utf-8")
+        for name in commands:
+            self.assertIn(f"dev.py {name}", doc, f"CLI.md 未收录 dev.py 子命令 {name}")
 
 
 if __name__ == "__main__":

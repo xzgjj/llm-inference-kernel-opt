@@ -101,6 +101,11 @@ bool effective_prefix_cache(bool requested, bool backend_supports) noexcept;
 const char* server_backend_env();
 // JSON 配置键（kebab 或 snake）到规范 CLI 键；未知键返回空。供加载与打印共用。
 std::string canonical_config_key(const std::string& key);
+// D2-14：--help 与 CLI.md 共用同一份键注册表，避免两边各写一份后漂移。
+std::size_t config_key_count() noexcept;
+const char* config_key_at(std::size_t index) noexcept;
+bool is_flag_config_key(const std::string& key) noexcept;
+std::string render_cli_usage();
 
 // 单一真源派生：main 不再逐字段手工搬运，默认值/单位换算只在这里定义一次。
 [[nodiscard]] SchedulerConfig make_scheduler_config(const ServerConfig& cfg,
