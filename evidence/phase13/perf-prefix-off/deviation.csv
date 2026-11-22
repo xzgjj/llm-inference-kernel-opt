@@ -1,0 +1,4 @@
+concurrency_p,prompt_tier,ttft_p50_dev_pct,itl_p50_dev_pct,total_tok_s_dev_pct,verdict
+1,shared512,1.576,0.529,0.648,ok
+4,shared512,1.068,28.947,3.187,high
+8,shared512,3.083,28.016,2.933,high

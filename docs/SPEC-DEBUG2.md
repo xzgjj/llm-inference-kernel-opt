@@ -1,6 +1,6 @@
 # SPEC-DEBUG2 生产化收口：缺陷优先、7 项必要功能与三条冻结边界
 
-> 版本：v1.0（对应阶段 13）｜状态：approved（2026-11-22，待开工）
+> 版本：v1.1（对应阶段 13）｜状态：done（D2-01…D2-14 落地；D2-07 镜像构建 BLOCKED，取证条件见 D2-07 节与 `docs/deploy.md`）
 > 契约基线：C-01…C-13、D-01…D-09、C-P13-01…03（本文件定义）｜更新：2026-11-22
 > 上游输入：`docs/notes/项目复盘-2026-11-22.md`（基线 `3dba509`）、`docs/notes/项目整体评估-阶段12收口-2026-11-21.md`
 
@@ -94,6 +94,8 @@
 - 边界：8 GB 卡若 OOM 降到 P≤4 并在报告注明；轮间偏差 >15% 标 `high`，单点不作为结论。
 - 出口：四个产物目录（各含 `matrix_report.csv` / `deviation.csv` / `step_summary.csv` / `repro_manifest.json` / `metrics_p*_r*.prom` / `plots/`）+ §5.1 后一张“四组对照表”+ 一段结论（翻案或定上限）。
 - 测试：不产生新代码路径；`tests/tools/test_matrix.py` 增一条断言四份配置的关键字段（`output_lengths`、`batch_policy`、`prefix` 开关）不被误改。
+- **结论（2026-11-22 实测，`evidence/phase13/README.md` 为唯一引用入口）**：static vs continuous 在 P8 把 TTFT p50 从 6970 ms 压到 307 ms，但吞吐 57.1 → 62.4 tok/s（+9.3%），**不达 1.3× 翻案线**；continuous 的 ITL p99 在 P8 为 208.9 ms，超过 200 ms SLO，故**交互式容量上限定为 P=4**（TTFT 168 ms / ITL 112 ms）。四组配置的关键字段由 `tests/tools/test_matrix.py` 守护。
+- **缺陷（D2-03 顺带修复）**：prefix_on 首轮暴露 `seq_cp` 位置重叠 → llama `GGML_ASSERT(is_full)` 崩溃；修复为 `src/runner_llama.cpp` 里先按块表前缀长度裁 donor KV 再整段复制，`tests/e2e/nightly_real_backend.py` 新增 `prefix_reuse` 回归。
 
 #### D2-04 覆盖率弱项补齐
 
@@ -130,6 +132,7 @@
 - 改动点：`scripts/release/Dockerfile` 增 `LLMOPT_ENABLE_LLAMA` 构建参数；builder 阶段编译 llama.cpp（固定 `b12557`），runtime 阶段只拷 `libllama.so*` / `libggml*.so*` + 设置 `LD_LIBRARY_PATH`；基础镜像与 builder 同发行版（避 glibc 不匹配）；CUDA 变体基于 `nvidia/cuda:12.x-runtime`；runtime 仍非 root（uid 10001）、模型只读挂载。
 - 验收：WSL docker `--gpus all` 内 8B Q3_K_M 六项冒烟 PASS（healthz / readyz / 非流式 / SSE / 断连取消 / `docker stop` rc=0）；容器内 `nvidia-smi` 可见 GPU；非 CUDA 变体 ≤350 MiB、CUDA 变体 ≤1.2 GB；证据 `evidence/phase13/packaging/`。
 - 测试：`docker_smoke.sh` 增 `--real` 模式（真模型路径 + `--ngl`），仍不進 PR 闸门；JSON 产物沿用现有 schema。
+- **状态：BLOCKED（2026-11-22）**。`scripts/release/Dockerfile` 已按上述改造（`LLMOPT_ENABLE_LLAMA`、`LLAMA_REVISION=b12557`、只拷 `*.so*`、`LD_LIBRARY_PATH=/app/lib`、label 带 backend/revision），但本机 Windows 没有 Docker、WSL 内也无 docker CLI，镜像构建与六项冒烟一次都没跑过。解除条件：在装好 Docker 的机器上执行 `docker build --build-arg LLMOPT_ENABLE_LLAMA=ON` + `docker_smoke.sh --real`，产物落 `evidence/phase13/packaging/`；在此之前 README/部署文档不得声称“真后端镜像已验证”。
 
 #### D2-08 发布面
 

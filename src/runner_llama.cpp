@@ -448,7 +448,21 @@ private:
             if (donor == states_.end() || !ctx_ || !donor->second.retained) {
                 return -1;
             }
-            // 只从已截断到前缀的 donor 借：cross-stream 的 seq_cp 只支持整段复制。
+            // donor 的 KV 尾部虽然被 keep_tokens 逻辑截断，内存里可能仍留着更长的位置；
+            // 而块表给出的可复用前缀（prefix_tokens）可能比 donor 实际保留的短，
+            // 直接整段 seq_cp 会让目标序列出现重叠位置，llama 报 inconsistent sequence
+            // positions。先把 donor 裁到正好 prefix_tokens 再整段复制：
+            // cross-stream seq_cp 只接受连续、填满的序列（GGML_ASSERT
+            // is_full），传区间会被断言拦下。
+            const llama_pos donor_max =
+                    llama_memory_seq_pos_max(llama_get_memory(ctx_.get()), donor->second.slot);
+            if (donor_max + 1 < data.prefix_tokens) {
+                return -1; // donor 已短于可复用前缀，不能假装命中
+            }
+            if (donor_max + 1 > data.prefix_tokens) {
+                llama_memory_seq_rm(llama_get_memory(ctx_.get()), donor->second.slot,
+                                    data.prefix_tokens, -1);
+            }
             llama_memory_seq_cp(llama_get_memory(ctx_.get()), donor->second.slot, state.slot, -1,
                                 -1);
             state.n_past = data.prefix_tokens;

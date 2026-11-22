@@ -13,7 +13,7 @@
 | [SPEC-6 软件与服务完成度](SPEC-6_软件与服务完成度.md) | 把实验床补成单机可用小服务：最小兼容面、配置分层、drain/ready、限流背压、指标格式、部署与 sanitizer；不改调度语义 | SPEC-4（指标口径必须先冻结） | done | `compat_frames.txt`、`drain_report.json`、`metrics_format.txt`、`deploy_smoke.log` |
 | [SPEC-9 安全隔离与可运维性](SPEC-9_安全隔离与可运维性.md) | 补 TLS、控制面隔离、Completion watchdog、静态 key 文件与租户配额 | SPEC-6 | done | TLS 握手日志、控制面端口证据、租户配额用例 |
 | [SPEC-DEBUG1 缺陷修复与算力入口封堵](SPEC-DEBUG1.md) | 以项目现状为准收口 13 项缺陷与 9 项文档漂移，并完成断连取消、soak、batching 重基线、key 生命周期、打包运维、计数自动化 | SPEC-9 | done（S0–S6 已落地；S7 收口并入 SPEC-DEBUG2） | `evidence/phase12/**` |
-| [SPEC-DEBUG2 生产化收口](SPEC-DEBUG2.md) | 缺陷优先 + 7 项必要功能，把单实例生产分从 4.4–4.8 推到 ≥7.0；同时冻结 27B、写死 ctx 1024 / P≤8、把扩容移出仓库 | SPEC-DEBUG1 | approved（2026-11-22，待开工，不切分阶段） | `evidence/phase13/**`、`docs/容量与SLO` |
+| [SPEC-DEBUG2 生产化收口](SPEC-DEBUG2.md) | 缺陷优先 + 7 项必要功能，把单实例生产分从 4.4–4.8 推到 ≥7.0；同时冻结 27B、写死 ctx 1024 / P≤8、把扩容移出仓库 | SPEC-DEBUG1 | done（D2-01…D2-14 全部落地，2026-11-22；D2-07 镜像构建 BLOCKED） | `evidence/phase13/**`、`docs/容量与SLO` |
 
 
 

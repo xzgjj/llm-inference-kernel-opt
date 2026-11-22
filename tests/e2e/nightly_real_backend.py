@@ -231,6 +231,18 @@ def main() -> int:
 
             checks["kv_released"], kv_used_after = wait_kv_zero(base, 5.0)
 
+            # D2-03 回归：两条同前缀长请求连发，第二条必须真正复用 KV 而不是报
+            # “inconsistent sequence positions”。修复前这里是 500 + empty_stream。
+            shared_prompt = "前缀复用回归：" + "kv cache 命中测试 " * 40
+            status_a, first = http_json(base, "/completion", {"prompt": shared_prompt, "max_tokens": 4, "seed": 3})
+            status_b, second = http_json(base, "/completion", {"prompt": shared_prompt, "max_tokens": 4, "seed": 4})
+            checks["prefix_reuse"] = (
+                status_a == 200 and status_b == 200
+                and bool(first.get("choices")) and bool(second.get("choices"))
+            )
+            if not checks["prefix_reuse"]:
+                print(f"前缀复用失败：a={status_a} b={status_b}")
+
             evidence = {
                 "checks": checks,
                 "metrics": {
@@ -248,7 +260,7 @@ def main() -> int:
             failed = [name for name, ok in checks.items() if not ok]
             if failed:
                 return fail("失败项: " + ", ".join(failed))
-            print("PASS: real backend nightly 5 组（health+ready/non-stream/SSE/cancel/metrics）")
+            print("PASS: real backend nightly 6 组（health+ready/non-stream/SSE/cancel/metrics/prefix-reuse）")
             return 0
         finally:
             if process.poll() is None:

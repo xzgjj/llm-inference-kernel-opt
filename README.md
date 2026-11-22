@@ -319,12 +319,19 @@ SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024
 | perf-mixed | 2 | 70.9 | 51.7 | 51.5 | 4461 | high† |
 | perf-mixed | 4 | 168.3 | 112.0 | 61.2 | 4614 | high† |
 | perf-mixed | 8 | 307.2 | 208.9 | 62.4 | 4920 | high† |
+| perf-prefix-on | 1 | 34.4 | 22.7 | 265.5 | 4384 | insufficient† |
+| perf-prefix-on | 4 | 349.1 | 71.8 | 281.0 | 4614 | insufficient† |
+| perf-prefix-on | 8 | 654.5 | 134.1 | 332.6 | 4920 | insufficient† |
+| perf-prefix-off | 1 | 102.1 | 23.2 | 242.4 | 4079 |  |
+| perf-prefix-off | 4 | 411.1 | 73.3 | 290.4 | 4308 | high† |
+| perf-prefix-off | 8 | 792.3 | 119.1 | 317.1 | 4614 | high† |
 
 判读：
 
 - **交互式容量上限 P=4**：P=8 的 ITL p99 208.9 ms 已越过 200 ms 目标，TTFT 仍达标；P=4 的 ITL p99 112 ms、TTFT 168 ms 都在目标内，是当前单卡可承诺的档位。
 - **static 批的 P2/P4 TTFT 爆炸**（744 ms / 2160 ms）是"整批跑空才补位"的必然代价；continuous 在 P=8 把 TTFT 压到 307 ms，补位净收益成立，但吞吐只从 57.1 涨到 62.4 tok/s（+9%），**没有 1.3×**，因此不翻案吞吐结论。
-- `deviation_flag=high` 表示该项目按固定阈值判为偏差（不是失败），用于提示"该点与相邻档差异过大，引用时要看原始 `deviation.csv`"。
+- **前缀缓存的收益在 TTFT**：384-token 共享前缀下 P1 从 102 ms 降到 34 ms（3×）、P8 从 792 ms 降到 654 ms；吞吐 P1 +9.5%（242.4 → 265.5 tok/s），P4 基本持平，P8 +5%。代价是 P8 的 ITL p99 从 119 ms 升到 134 ms（仍在 200 ms 内）。首轮 prefix_on 曾因 `seq_cp` 位置重叠崩溃，已修复并保留回归用例，详见 `evidence/phase13/README.md`。
+- `deviation_flag=high` 表示该项目按固定阈值判为偏差（不是失败），用于提示"该点与相邻档差异过大，引用时要看原始 `deviation.csv`"；`insufficient` 表示该组按当前阈值样本不足，只作趋势参考。
 - 27B 吞吐、ctx>1024、P>8、多实例 + 网关一律不在本期结论内（见文末边界）。
 
 局限，直说：
