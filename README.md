@@ -17,25 +17,31 @@
 
 
 
-项目不训练模型，也不写 CUDA 算子。模型加载和计算直接交给 llama.cpp / ggml，只在做“交通调度”：谁先算、几个一起算、显存不够时让谁等、KV 缓存怎么分块和复用。仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 GPU kernel；项目不做分布式与训练，规模限定在单机、单进程、0.5B–27B 量化模型。要回答的问题也很具体：**把请求拼批、切块、复用 KV，究竟能快多少、代价是。**
+项目主要完成 ：模型加载和计算直接交给 llama.cpp / ggml，只在做“交通调度”：谁先算、几个一起算、显存不够时让谁等、KV 缓存怎么分块和复用。仓库名里的 `kernel` 指**服务内核**（调度与 KV 管理），不是 GPU kernel；项目不做分布式与训练，规模限定在单机、单进程、0.5B–27B 量化模型。：**请求拼批、切块、复用 KV，究竟能快多少**； 不训练模型，也不写 CUDA 算子。
 
-阶段 11 已落地静态 key + 租户配额 + KV 域隔离；阶段 12 收口了断连取消、30 分钟长稳、batching 重基线、key 热加载和打包运维。Linux/WSL 侧接真 llama.cpp 后端，以 Qwen3-8B 为主力档（S3 用 `Q3_K_M` 全驻留，早期 L1 证据用 `Q4_K_M`）；Windows 侧主要跑 stub 后端做调度与接口测试。它既可以当学习 continuous batching 的可运行参考，也可以当 llama.cpp 之上的最小 OpenAI 兼容服务骨架。注册数见下方统计块。
+以 Qwen3-8B 为主力档（S3 用 `Q3_K_M` 全驻留，早期 L1 证据用 `Q4_K_M`）；Windows 侧主要跑 stub 后端做调度与接口测试。它既可以当学习 continuous batching 的可运行参考，也可以当 llama.cpp 之上的最小 OpenAI 兼容服务骨架。注册数见下方统计块。
 
 
 
-## 版本与回滚
+## 版本
 
-当前版本 **0.13.0**（`CMakeLists.txt` 里 `project(llmopt VERSION)` 是唯一来源，`--version`、启动日志、`/metrics` 的 `llmopt_build_info` 同源）。变更记录见 [CHANGELOG.md](CHANGELOG.md)。
+- 当前版本 **0.13.0**（`CMakeLists.txt` 里 `project(llmopt VERSION)` 是唯一来源，`--version`、启动日志、`/metrics` 的 `llmopt_build_info` 同源）。变更记录见
 
-回滚三步：
+
+- 回滚三步：
+
 
 1. 代码：`git revert <坏提交>` 或 `git checkout <上一个 tag>`，重新 `cmake --build build`；
 2. 部署：把镜像/二进制换回上一版本，确认 `/readyz` 回 200 且 `llmopt_build_info` 的 version 已变；
 3. 数据面：无持久状态，KV 与队列都在内存里，回滚只需重启进程；慢请求 dump 与证据目录可直接保留。
 
+
+
 ## 核心功能
 
-每条先说明“解决什么问题”，再说怎么做，最后给实测数字或边界。
+
+
+- 目前本机与实际测试位置：暂时先实现小团队内部使用
 
 1. **Continuous Batching（请求拼批）**——解决“一次只能服务一个请求、GPU 总在等人”的问题。把多个请求按 token 拼进同一批，每步有 token 预算上限（`max-num-batched-tokens`），跑不下的进等待队列，队列满直接回 429。实测（8B 全驻留、等长短输出、单执行线程）：1 路 77.1 tok/s，8 路 80.7 tok/s，**只快 5%**；但单请求尾延迟 ITL p99 从 23.3 ms 涨到 171.3 ms。所以”拼批一定提吞吐”在这台机器上、这个负载形状下不成立，瓶颈是单执行线程串行 + 显存带宽封顶，控制面本身只占 0.01–0.02% CPU。等长负载抹掉了「短请求先完、槽位立刻复用」这一项；混长/静态批/前缀开关四组对照已于 D2-03 跑完（见第 8 节与 `evidence/phase13/README.md`）：混长并发在 TTFT 上收益巨大（P8 6970→307 ms），但吞吐只从 57.1 提到 62.4 tok/s（+9.3%），未达 1.3× 翻案线。
 
@@ -85,7 +91,7 @@
 
 
 
-### 1. 构建与测试（stub 后端，无需模型权重）
+### 构建与测试（stub 后端，无需模型权重）
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
@@ -97,7 +103,7 @@ ctest --test-dir build -L fast --output-on-failure
 
 
 
-### 2. stub 自检（跑通 HTTP → 调度 → SSE）
+###  stub 自检（跑通 HTTP → 调度 → SSE）
 
 ```powershell
 python tests\fixtures\models\make_fake_gguf.py tests\fixtures\models\fake.gguf
@@ -105,6 +111,8 @@ $env:LLMOPT_ALLOW_STUB = "1"
 .\build\llmopt_server.exe --model tests\fixtures\models\fake.gguf --backend stub `
   --port 18080 --ctx-tokens 512 --mode off --log-level warn
 ```
+
+
 
 ```bash
 curl -s http://127.0.0.1:18080/healthz
@@ -115,7 +123,11 @@ curl -N -X POST http://127.0.0.1:18080/completion \
 
 
 
-### 3. 真实后端（Linux / WSL，需先编好 llama.cpp）
+### 后端
+
+
+
+- Linux / WSL，需先编好 llama.cpp
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -131,7 +143,7 @@ cmake --build build --parallel
 
 
 
-### 4. 开发工具单入口
+### 开发工具单入口
 
 | 命令 | 作用 |
 | --- | --- |
@@ -209,6 +221,8 @@ llm-inference-kernel-opt/
 
 ## 使用说明
 
+
+
 ### 请求与流式响应
 
 ```bash
@@ -229,7 +243,7 @@ Chat 端点只支持纯文本 `system / user / assistant`；`tools`、`tool_choi
 
 
 
-### 错误与探针
+### 错误
 
 错误统一为 `{"error":{"code":"QUEUE_FULL","message":"...","retryable":true}}`。
 
@@ -244,6 +258,8 @@ Chat 端点只支持纯文本 `system / user / assistant`；`tools`、`tool_choi
 | 鉴权失败 | 401 | `UNAUTHORIZED` |
 | KV 或资源不足 | 507 | `KV_INSUFFICIENT` / `RESOURCE_INSUFFICIENT` |
 | 执行失败 | 500 | `EXECUTION_FAILED` |
+
+
 
 ```bash
 curl -s http://127.0.0.1:8080/healthz   # 存活，始终 200，body 带 starting|ready|draining|stopped
@@ -275,7 +291,8 @@ python scripts/spec5/recompute_spec5.py \
 
 
 
-已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额、阶段 12 缺陷面修复（S0，3 项 P1 + 9 项 P2）；阶段 5 只做预研判据，不落实现。真服务 e2e 10 项另行通过。
+- 已完成的验证面：阶段 0 基线采集、阶段 1 串行闭环、阶段 2 连续批处理与 KV 复用、阶段 3 chunked prefill 与抢占、阶段 4 指标与实验矩阵、阶段 6 服务完成度、阶段 8 8B 真服务证据、阶段 9 TLS/控制面隔离与 Completion watchdog、阶段 10 真后端 nightly 可靠性收口、阶段 11 静态 key 与租户配额、阶段 12 缺陷面修复（S0，3 项 P1 + 9 项 P2）；阶段 5 只做预研判据，不落实现。真服务 e2e 10 项另行通过。
+
 
 <!-- test-counts:start -->
 测试基线由脚本从 CTest 注册表生成，见 [docs/testing.md](docs/testing.md) §2.1（勿手改）。
@@ -296,9 +313,25 @@ python scripts/spec5/recompute_spec5.py \
 
 **这条结论的边界**：负载是等长 32-token 短解码、prompt 单档、P=1/2/4/8，且没有"静态批"对照。它证明的是"把并发从 1 拉到 8 不再涨吞吐、只涨尾延迟"，不能推出"continuous batching 本身没有收益"——等长输出恰好抹掉了槽位复用，而没有静态批基线就无法把这 1.05× 精确归因到"补位"这一机制。混长输出、static/continuous 对照、前缀缓存开/关三组配置已落在 `scripts/bench/matrix/phase12_s3_*.json`，跑出来之前不要引用更宽的结论。
 
-### 容量与 SLO（D2-13）
 
-SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024、P≤8 成立）：
+
+- **局限：**只能做到初步的生产级别部署 ，暂时存在SLA级别性能和冗余差距 ：
+
+无法任何 99.9% 及以上的可用性——没有第二份算力；
+
+并发 > 4 的交互式延迟承诺——P8 的 ITL p99 实测已越线；
+
+目前上下文 > 1024 / 8B 以上——容量判据会直接判 BLOCKED；
+
+“长 prompt 低延迟”——8B 全驻留时显存峰值已到 7.5 GB / 8.19 GB。
+
+
+
+### 容量与 SLO
+
+
+
+- SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024、P≤8 成立）：
 
 | 指标 | 目标 | 判定口径 |
 | --- | --- | --- |
@@ -326,6 +359,8 @@ SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024
 | perf-prefix-off | 4 | 411.1 | 73.3 | 290.4 | 4308 | high† |
 | perf-prefix-off | 8 | 792.3 | 119.1 | 317.1 | 4614 | high† |
 
+
+
 判读：
 
 - **交互式容量上限 P=4**：P=8 的 ITL p99 208.9 ms 已越过 200 ms 目标，TTFT 仍达标；P=4 的 ITL p99 112 ms、TTFT 168 ms 都在目标内，是当前单卡可承诺的档位。
@@ -334,24 +369,17 @@ SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024
 - `deviation_flag=high` 表示该项目按固定阈值判为偏差（不是失败），用于提示"该点与相邻档差异过大，引用时要看原始 `deviation.csv`"；`insufficient` 表示该组按当前阈值样本不足，只作趋势参考。
 - 27B 吞吐、ctx>1024、P>8、多实例 + 网关一律不在本期结论内（见文末边界）。
 
-局限，直说：
 
-- 单机单进程，实测覆盖 0.5B–8B 量化模型；27B 档只做容量与抢占验证，不出吞吐结论。
-- 真实 llama.cpp 后端只在 Linux / WSL 编译与验证；Windows 侧以 stub 后端与路由测试为主。阶段 12 S5 的 stub 容器镜像（83 MB、非 root）与六项冒烟曾在装有 Docker 的机器上实跑；阶段 13 的真后端镜像已在 WSL Docker 实建（`llmopt:0.13.0-llama`，132 MB）并跑通六项冒烟（CPU 推理）。
-- llama.cpp 的 `llama_batch` 没有 slot 字段，cell 由内部 `find_slot` 选择且无公开 getter，块表与 cell 的对账依赖内部头文件，属于**源码耦合点**，升级 llama.cpp 必须复核。
-- 兼容面是最小集：阶段 11 支持静态 key 文件 → 租户 + 并发/队列/限流/KV 配额；阶段 12 S4 补同 id 多摘要轮换与 SIGHUP/轮询热加载（POSIX SIGHUP 已在 WSL 实测）。阶段 13 D2-12 补租户 token 小时/日预算（只计 completion tokens，超限 429 + `Retry-After`）。鉴权仍是进程内静态文件，公网多租户应前置网关。
-- 阶段 9 起可选进程内 TLS（`-DLLMOPT_ENABLE_TLS=ON` + `--tls-cert/--tls-key`），控制面可 `--control-port` 独立到 loopback；默认仍为明文/同端口。公网与多租户仍应前置反向代理。
-- 阶段 9 增加 Completion watchdog（`--completion-timeout-ms`，默认 30 s）：执行线程不回投时先回 500，迟到回投后再释放 KV；永久挂死仍需 runner 级进程隔离。
-- `ci.yml` 的 `schedule` 触发器跑 `real-backend` 作业：固定 Qwen2.5-0.5B Q4_K_M + sha256，CPU 跑 healthz/readyz、非流式、SSE、断连取消、`/metrics` 五组。
-- `/metrics` 自 D2-09 起含三支延迟直方图（`llmopt_latency_queue_wait_ms` / `llmopt_latency_ttft_ms` / `llmopt_latency_itl_ms`），仅用于监控与告警；对外 p50/p99 仍由离线复算（C-P13-01）。慢读退化已在真实后端记录。
-- 真后端镜像（D2-07）：`scripts/release/build_images.sh . real`（离线可用 `LLMOPT_LLAMA_VENDOR=<已编 llama.cpp>`），产物 `llmopt:0.13.0-llama` 在 WSL Docker 实建并通过六项冒烟；CUDA 变体本机无 GPU 直通，未构建（做法见 `docs/deploy.md`）。
-- 基准噪声偏大：5 轮下 P4/P8 的 TTFT / ITL 轮间偏差仍 12–15%，结论只做同环境相对比较；吞吐平台值稳定。
+
+
 
 
 
 ## 演进规划
 
-按现有 SPEC 与证据推进，不新开架构方向：
+
+
+- 功能演进与能力保证为主
 
 1. **chunk 调参验证**：SPEC-5 判据把当前数据判为 `candidate_pending_chunk`，需要在同一硬件上补调参后矩阵，才可能从候选转为触发。
 2. **基线稳定性**：重测阶段 0 基线，缩小轮间漂移；GPU 路径目前只透传 `n-gpu-layers`，未做显存水位下的调度策略。
@@ -378,20 +406,19 @@ docker run --rm -p 8080:8080 -e LLMOPT_ALLOW_STUB=1 \
 
 镜像默认 `LLMOPT_ENABLE_LLAMA=OFF`（只带 stub）；真后端需构建时打开开关并准备 llama.cpp。模型不进镜像，运行时挂载。多阶段构建、runtime 非 root（uid 10001）、实测 83 MB；`bash scripts/release/docker_smoke.sh` 六项全 PASS（healthz / readyz / 非流式 / SSE / 断连取消 / `docker stop` 退出码 0），证据在 `evidence/phase12/packaging/`。
 
+
+
 ### systemd
 
 `scripts/release/llmopt.service` 是模板：`ExecStart` 读 `/etc/llmopt/config.json`，`WorkingDirectory=/var/lib/llmopt` 固定崩溃 dump 与相对日志锚点，`KillSignal=SIGTERM`，`TimeoutStopSec=45`，比默认 30 s drain 多留余量；日志按 20 MB × 5 轮转，部署层再用 `scripts/release/logrotate/llmopt` 兜底。`systemd-analyze verify` 已通过。
 
-### 健康检查与排空
-
-- 就绪探针用 `/readyz`，存活探针用 `/healthz`；
-- SIGTERM / SIGINT 后状态转 `draining`，`/readyz` 与新请求立即 503，在飞请求在 `--drain-deadline-seconds` 内收尾，超时计数后强制停止，退出码仍为 0。
 
 
 
-### 夜间作业
 
-`.github/workflows/nightly.yml` 定时跑：TSan fast 套件 10 轮（0 race 才通过）、ASan/UBSan 一轮、`scripts/release/soak.py` 30 分钟持续请求（无非 200、RSS 增长受限）。CI 闸门分 L0 预提交（10 s）、L1 每次 push（3 min）、L2 PR 构建与覆盖率（15 min）、L3 sanitizer（30 min）、L4 nightly（2 h）。
+
+
+
 
 ## License
 
