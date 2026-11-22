@@ -322,7 +322,7 @@ SLO 目标（写死，只对单实例、单卡、8B Q3_K_M、`ngl 37`、ctx 1024
 | perf-prefix-on | 1 | 34.4 | 22.7 | 265.5 | 4384 | insufficient† |
 | perf-prefix-on | 4 | 349.1 | 71.8 | 281.0 | 4614 | insufficient† |
 | perf-prefix-on | 8 | 654.5 | 134.1 | 332.6 | 4920 | insufficient† |
-| perf-prefix-off | 1 | 102.1 | 23.2 | 242.4 | 4079 |  |
+| perf-prefix-off | 1 | 102.1 | 23.2 | 242.4 | 4078 |  |
 | perf-prefix-off | 4 | 411.1 | 73.3 | 290.4 | 4308 | high† |
 | perf-prefix-off | 8 | 792.3 | 119.1 | 317.1 | 4614 | high† |
 
