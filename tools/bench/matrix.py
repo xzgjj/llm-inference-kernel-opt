@@ -15,6 +15,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -705,12 +706,17 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _git_commit() -> str:
-    result = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=False,
-    )
-    return result.stdout.strip() if result.returncode == 0 else "unknown"
+def _git_commit() -> str | None:
+    """取 HEAD 哈希；git 未安装/不在 PATH 时返回 None，让 manifest 降级而不是崩掉整轮矩阵。"""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError) as exc:
+        print(f"[matrix] warn: git 不可用（{exc}）；git_commit 记为 null", file=sys.stderr)
+        return None
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
 
 
 def _peak_dict(peak: Any) -> dict:
@@ -839,9 +845,11 @@ def run_matrix(cfg: MatrixConfig, out_dir: Path, run_id: str) -> int:
     write_report(out_dir / "deviation.csv", deviations, DEVIATION_FIELDS)
     write_report(out_dir / "step_summary.csv", step_rows,
                  ["concurrency_p", "steps_total", "step_ns_p50_ms", "step_ns_p99_ms"])
+    git_commit = _git_commit()
     manifest = {
         "run_id": run_id,
-        "git_commit": _git_commit(),
+        "git_commit": git_commit,
+        "git_available": git_commit is not None,
         "seed": cfg.seed,
         "config_hash": cfg.config_hash(),
         "model_path": str(cfg.model),

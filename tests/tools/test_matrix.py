@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tempfile
 import time
 import unittest
@@ -298,6 +299,33 @@ class MixedWorkloadConfigTest(unittest.TestCase):
                       {"shared_prefix_tokens": -1}, {"shared_prefix_tokens": 4097}):
             with self.assertRaises(SystemExit):
                 self.load(extra)
+
+
+class GitCommitDegradeTest(unittest.TestCase):
+    """D2-01 回归：git 不在 PATH 时 manifest 降级为 null，整轮矩阵不得崩。
+
+    修复前症状：`_git_commit()` 直接 subprocess.run(["git", …])，PATH 无 git 抛
+    FileNotFoundError，整轮矩阵 exit 1，证据链看起来是"跑失败"而不是"缺 git"。
+    """
+
+    def test_missing_git_degrades_to_none(self) -> None:
+        with mock.patch.object(matrix.subprocess, "run", side_effect=FileNotFoundError("git")):
+            self.assertIsNone(matrix._git_commit())
+
+    def test_nonzero_exit_degrades_to_none(self) -> None:
+        failed = subprocess.CompletedProcess(["git"], 128, "", "fatal: not a repo")
+        with mock.patch.object(matrix.subprocess, "run", return_value=failed):
+            self.assertIsNone(matrix._git_commit())
+
+    def test_head_hash_is_returned(self) -> None:
+        ok = subprocess.CompletedProcess(["git"], 0, "abc1234\n", "")
+        with mock.patch.object(matrix.subprocess, "run", return_value=ok):
+            self.assertEqual(matrix._git_commit(), "abc1234")
+
+    def test_empty_output_degrades_to_none(self) -> None:
+        empty = subprocess.CompletedProcess(["git"], 0, "  \n", "")
+        with mock.patch.object(matrix.subprocess, "run", return_value=empty):
+            self.assertIsNone(matrix._git_commit())
 
 
 if __name__ == "__main__":
