@@ -68,6 +68,8 @@ constexpr FieldSpec kFields[] = {
         {"api-key", false},
         {"api-keys-file", false},
         {"api-keys-reload-seconds", false},
+        {"slow-request-ms", false},
+        {"slow-dump-dir", false},
         {"step-trace-rate", false},
         {"control-port", false},
         {"tls-cert", false},
@@ -111,6 +113,8 @@ constexpr const char* kConfigKeys[] = {
         "api-key",
         "api-keys-file",
         "api-keys-reload-seconds",
+        "slow-request-ms",
+        "slow-dump-dir",
         "step-trace-rate",
         "control-port",
         "tls-cert",
@@ -310,6 +314,10 @@ ErrCode apply_service_arg(ServerConfig& cfg, const std::string& key, const std::
         return parse_int(value, cfg.api_keys_reload_seconds) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--step-trace-rate") {
         return parse_int(value, cfg.step_trace_rate) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--slow-request-ms") {
+        return parse_int(value, cfg.slow_request_ms) ? ErrCode::Ok : ErrCode::InvalidJson;
+    } else if (key == "--slow-dump-dir") {
+        cfg.slow_dump_dir = value;
     } else if (key == "--control-port") {
         return parse_int(value, cfg.control_port) ? ErrCode::Ok : ErrCode::InvalidJson;
     } else if (key == "--tls-cert") {
@@ -411,6 +419,10 @@ ErrCode validate_service_limits(const ServerConfig& cfg, std::string& message) {
     }
     if (cfg.step_trace_rate < 0 || cfg.step_trace_rate > 64) {
         message = "step-trace-rate 必须在 0..64";
+        return ErrCode::InvalidJson;
+    }
+    if (cfg.slow_request_ms < 0 || cfg.slow_request_ms > 600'000) {
+        message = "slow-request-ms 必须在 0..600000（0=关闭）";
         return ErrCode::InvalidJson;
     }
     if (cfg.api_key.size() > 512) {
@@ -798,6 +810,7 @@ ErrCode load_env_strings(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sour
             {"LLMOPT_BACKEND", "backend", &cfg.backend},
             {"LLMOPT_PREEMPT_TRACE", "preempt-trace", &cfg.preempt_trace_path},
             {"LLMOPT_STEP_TRACE", "step-trace", &cfg.step_trace_path},
+            {"LLMOPT_SLOW_DUMP_DIR", "slow-dump-dir", &cfg.slow_dump_dir},
             {"LLMOPT_API_KEY", "api-key", &cfg.api_key},
             {"LLMOPT_API_KEYS_FILE", "api-keys-file", &cfg.api_keys_file},
             {"LLMOPT_TLS_CERT", "tls-cert", &cfg.tls_cert_path},
@@ -839,6 +852,7 @@ ErrCode load_env_ints(ServerConfig& cfg, std::vector<ConfigSourceEntry>* sources
              &cfg.drain_deadline_seconds},
             {"LLMOPT_REQUEST_DEADLINE_SECONDS", "request-deadline-seconds",
              &cfg.request_deadline_seconds},
+            {"LLMOPT_SLOW_REQUEST_MS", "slow-request-ms", &cfg.slow_request_ms},
             {"LLMOPT_STEP_TRACE_RATE", "step-trace-rate", &cfg.step_trace_rate},
             {"LLMOPT_CONTROL_PORT", "control-port", &cfg.control_port},
             {"LLMOPT_COMPLETION_TIMEOUT_MS", "completion-timeout-ms", &cfg.completion_timeout_ms},
@@ -1234,6 +1248,8 @@ SchedulerConfig make_scheduler_config(const ServerConfig& cfg, std::int32_t conc
             static_cast<std::int64_t>(cfg.completion_timeout_ms) * 1'000'000;
     scheduler_cfg.preempt_trace_path = cfg.preempt_trace_path;
     scheduler_cfg.step_trace_path = cfg.step_trace_path;
+    scheduler_cfg.slow_request_ns = static_cast<std::int64_t>(cfg.slow_request_ms) * 1'000'000;
+    scheduler_cfg.slow_dump_dir = cfg.slow_dump_dir;
     return scheduler_cfg;
 }
 

@@ -8,6 +8,7 @@
 #include "llmopt/metrics.hpp"
 #include "llmopt/runner.hpp"
 #include "llmopt/sink.hpp"
+#include "llmopt/slow_dump.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -45,6 +46,10 @@ struct SchedulerConfig {
     std::string step_trace_path{};
     // 单步 Completion 回投超时；<=0 关闭。超时只把请求判失败，不强杀执行线程。
     std::int64_t completion_timeout_ns = 30'000'000'000LL;
+    // 慢请求阈值：从入队到收尾超过该值就落一条脱敏 dump；<=0 关闭（默认）。
+    std::int64_t slow_request_ns = 0;
+    // dump 目录；空串等于关闭。目录内保留最近 20 份、单文件上限 8 MB。
+    std::string slow_dump_dir{};
     // 批次策略：true=连续批（有空位立刻补，阶段 3 起默认）；false=静态批对照（一批跑空
     // 才准入下一批，用于隔离"槽位复用"这一项收益，只应出现在对照实验里）。
     bool continuous_batching = true;
@@ -112,6 +117,10 @@ struct SequenceGroup {
     bool scheduled_this_pump = false;
     std::int64_t last_progress_ns = 0;
     std::int64_t enqueued_ns = 0;
+    // 生命周期时间戳：只给慢请求 dump 做四段计时，不参与任何判定。
+    std::int64_t admit_ns = 0;
+    std::int64_t prefill_done_ns = 0;
+    std::int64_t first_token_ns = 0;
     // 本次"在等待队列里排队"的起点：入队时取 enqueued_ns，被抢占回队时重置；
     // 只服务 queue_wait 直方图，不参与 deadline 与公平性判定。
     std::int64_t wait_started_ns = 0;
@@ -412,6 +421,8 @@ private:
     // 步级 trace：可选，默认关闭；开启时每步一行 JSONL，供离线复算 p99。
     std::ofstream step_trace_;
     bool step_trace_open_ = false;
+    // 慢请求 dump：默认关闭；开启且超过阈值时，在 finish 里落一条脱敏记录。
+    SlowDumpWriter slow_dump_;
 };
 
 } // namespace llmopt

@@ -47,6 +47,7 @@ add_library(llmopt_core STATIC
     src/scheduler.cpp
     src/sink.cpp
     src/metrics.cpp
+src/slow_dump.cpp
     src/resource.cpp
     src/text.cpp
     src/gate.cpp

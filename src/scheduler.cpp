@@ -263,6 +263,7 @@ SchedulerCore::SchedulerCore(ModelRunner& runner, KVBlockManager& kv, MetricsReg
       trace_(std::make_unique<PreemptTrace>(config.preempt_trace_path)),
       mailbox_(config.max_concurrency + config.queue_capacity),
       executor_(runner, mailbox_, metrics), started_ns_(now_ns()) {
+    slow_dump_ = SlowDumpWriter(config_.slow_dump_dir, config_.slow_request_ns);
     if (!config_.step_trace_path.empty()) {
         step_trace_.open(config_.step_trace_path, std::ios::out | std::ios::trunc);
         step_trace_open_ = step_trace_.is_open();
@@ -1080,6 +1081,7 @@ bool SchedulerCore::admit(const std::shared_ptr<SequenceGroup>& group, TokenBudg
                 static_cast<double>(group->last_progress_ns - group->wait_started_ns) / 1e6);
     }
     group->wait_started_ns = 0;
+    group->admit_ns = group->last_progress_ns;
     group->has_reserved_slice = false;
     group->tenant_running_slot = true;
     tenant_running_acquire(group->tenant);
@@ -1384,6 +1386,7 @@ void SchedulerCore::record_token_metrics(const std::shared_ptr<SequenceGroup>& g
         metrics_.add_float(MetricId::TtftMsSum, ttft_ms);
         metrics_.inc(MetricId::TtftMsCount);
         metrics_.observe_hist(HistId::TtftMs, ttft_ms);
+        group->first_token_ns = token_ns;
     } else if (pending_pure_decode_) {
         const double itl_ms = static_cast<double>(token_ns - group->last_token_ns) / 1e6;
         metrics_.add_float(MetricId::ItlMsSum, itl_ms);
@@ -1393,6 +1396,7 @@ void SchedulerCore::record_token_metrics(const std::shared_ptr<SequenceGroup>& g
     group->last_token_ns = token_ns;
     if (previous < seq.prompt_len && seq.num_computed >= seq.prompt_len) {
         metrics_.inc(MetricId::PrefillTokens, seq.prompt_len - previous);
+        group->prefill_done_ns = token_ns;
     }
 }
 
@@ -1513,6 +1517,33 @@ void SchedulerCore::finish(const std::shared_ptr<SequenceGroup>& group, FinishRe
     if (group->tenant_live_reserved) {
         group->tenant_live_reserved = false;
         release_tenant_live(group->tenant);
+    }
+    // D2-10：超阈值才落一条脱敏记录；默认关闭，写盘失败不影响收尾。
+    if (slow_dump_.enabled()) {
+        const std::int64_t finish_ns = now_ns();
+        const std::int64_t enqueued = group->enqueued_ns > 0 ? group->enqueued_ns : finish_ns;
+        const std::int64_t admitted = group->admit_ns > 0 ? group->admit_ns : enqueued;
+        const std::int64_t prefilled =
+                group->prefill_done_ns > 0 ? group->prefill_done_ns : admitted;
+        const std::int64_t first = group->first_token_ns > 0 ? group->first_token_ns : prefilled;
+        SlowRequestRecord record;
+        record.req_id = group->req_id;
+        record.tenant = group->tenant;
+        record.prompt_tokens = static_cast<std::int32_t>(group->prompt_ids.size());
+        record.output_tokens = seq.num_output;
+        record.preemptions = group->preemptions_total;
+        record.finish = reason;
+        record.queue_wait_ms = (admitted - enqueued) / 1'000'000;
+        record.prefill_ms = (prefilled - admitted) / 1'000'000;
+        record.first_token_ms = (first - prefilled) / 1'000'000;
+        record.total_ms = (finish_ns - enqueued) / 1'000'000;
+        record.prompt_sha8 = prompt_fingerprint(group->prompt_ids.data(), group->prompt_ids.size());
+        if (slow_dump_.maybe_dump(record)) {
+            logger()->info("slow request dump req_id={} total_ms={} queue_wait_ms={} prefill_ms={} "
+                           "first_token_ms={} output={}",
+                           record.req_id, record.total_ms, record.queue_wait_ms, record.prefill_ms,
+                           record.first_token_ms, record.output_tokens);
+        }
     }
     release_request_id(group->req_id);
     seq.finish = reason;

@@ -75,6 +75,9 @@ struct ServerConfig {
     // 阶段 12 S4：key 文件热加载轮询周期（秒）；0=关闭。POSIX 另可由 SIGHUP 触发重读。
     std::int32_t api_keys_reload_seconds = 0;
     std::int32_t step_trace_rate = 0; // 1/N 采样；0=关
+    // D2-10 慢请求：入队→收尾超过该毫秒数就落一条脱敏 dump；0=关。
+    std::int32_t slow_request_ms = 0;
+    std::string slow_dump_dir = "logs/slow";
     // 控制面隔离：>0 时在 loopback 上另起一个独立线程池的 /healthz /readyz /metrics。
     // 0 保持旧行为（控制端点仍挂在数据面端口，兼容现有客户端）。
     std::int32_t control_port = 0;
