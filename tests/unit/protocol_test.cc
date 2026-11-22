@@ -193,6 +193,19 @@ TEST_CASE("chat 越界字段与非法消息一律按 unsupported_field 拒绝") 
     CHECK(parse_chat_body("not json", req, message) == ErrCode::InvalidJson);
 }
 
+// D2-06 故障面：n>1 与 stop 可共存（非流式），n>1 与流式必须 400，不静默降级。
+TEST_CASE("D2-06：n>1 与 stop 组合、n>1 与流式拒绝") {
+    InferenceRequest req;
+    std::string message;
+    CHECK(parse_body(R"({"prompt":"hi","n":2,"stop":["x"]})", req, message) == ErrCode::Ok);
+    CHECK(req.n == 2);
+    CHECK(req.stop.size() == 1);
+    CHECK(http_status(ErrCode::UnsupportedField) == 400);
+    CHECK(parse_body(R"({"prompt":"hi","n":2,"stream":true})", req, message) ==
+          ErrCode::UnsupportedField);
+    CHECK(message.find("unsupported_field: stream 与 n>1") != std::string::npos);
+}
+
 TEST_CASE("成功响应与流式帧回显请求的 model 字段") {
     InferenceRequest req;
     std::string message;

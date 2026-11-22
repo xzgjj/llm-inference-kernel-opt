@@ -1,10 +1,11 @@
-"""test_fault_injection.py — D2-11：四类故障面各一条最小注入用例。
+"""test_fault_injection.py — D2-11/D2-06：五类故障面各一条最小注入用例。
 
-覆盖（与 SPEC-DEBUG2 D2-11 对齐）：
+覆盖（与 SPEC-DEBUG2 D2-11、D2-06 对齐）：
   1. runner 挂死：stub 步进延迟 500 ms + --completion-timeout-ms 100 → 请求失败但进程存活；
   2. 慢客户端：流式读到一半断开 → 服务端不崩、/readyz 仍 200；
   3. TLS 配置错：单独文件 test_server_tls_config_error.py 已覆盖，这里只做交叉引用；
-  4. 磁盘满（用"dump 目录不可建"近似）：--slow-dump-dir 指向普通文件 → 请求仍 200。
+  4. 磁盘满（用"dump 目录不可建"近似）：--slow-dump-dir 指向普通文件 → 请求仍 200；
+  5. 请求时限到点：1 s deadline + 慢步进 → 504 TIMEOUT，进程仍可服务。
 """
 from __future__ import annotations
 
@@ -93,6 +94,20 @@ def main() -> int:
                                     {"prompt": "disk", "max_tokens": 8, "seed": 3})
             check(status == 200, f"dump 写失败不应影响请求，实际 {status}")
             check(wait_ready_again(port, 5.0), "dump 写失败后进程必须仍存活")
+
+        # 5) 请求时限到点：单步 400 ms、8 token 远超 1 s 总时限，必须以 TIMEOUT 收尾。
+        with kit.running_server(server, model,
+                                ["--ctx-tokens", "512", "--max-concurrency", "1",
+                                 "--max-num-batched-tokens", "256", "--log-level", "warn",
+                                 "--request-deadline-seconds", "1"],
+                                env_extra={"LLMOPT_TEST_STUB_DELAY_MS": "400"}) as port:
+            status, body, _ = kit.post(port, "/completion",
+                                       {"prompt": "deadline", "max_tokens": 8, "seed": 4})
+            check(status == 504, f"时限到点应回 504，实际 {status}")
+            payload = json.loads(body)
+            code = payload.get("error", payload).get("code")
+            check(code == "TIMEOUT", f"错误码应为 TIMEOUT，实际 {code}")
+            check(wait_ready_again(port, 5.0), "超时请求后进程必须仍可服务")
 
     # 3) TLS 配置错：由 integration_server_tls_config_error 覆盖，这里只确认文件存在。
     tls_test = Path(__file__).resolve().parent / "test_server_tls_config_error.py"
